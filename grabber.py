@@ -2121,9 +2121,11 @@ def jobs():
     scope, scope_args = scope_sql()
     scope += " AND status != 'cancelled'"  # cancelled jobs are hidden
     sub = request.args.get("sub", "")
-    limit = 100
+    # every unfinished job (queued / downloading / failed) is always sent; finished ones a page at a time
+    limit = int(request.args["limit"]) if request.args.get("limit", "").isdigit() else 100
     if sub.isdigit():  # one followed uploader's videos
-        scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), 1000
+        scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), max(limit, 1000)
+    more = False
     if term:
         # Searches titles, links, summaries, key points, tags, file paths and transcripts
         like = f"%{term}%"
@@ -2136,7 +2138,11 @@ def jobs():
                 d["match"] = snippet(r["transcript"] or "", term)
             out.append(d)
     else:
-        out = [job_dict(r) for r in q(f"SELECT * FROM jobs WHERE {scope} ORDER BY id DESC LIMIT ?", (*scope_args, limit))]
+        unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
+        finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY id DESC LIMIT ?", (*scope_args, limit + 1))
+        more = len(finished) > limit
+        out = [job_dict(r) for r in sorted(rows + finished[:limit], key=lambda r: r["id"], reverse=True)]
     # privacy mode: hidden items aren't even sent unless they've been revealed with the password
     prefs, show_hidden = privacy_get(g.owner), revealed()
     hidden_count = 0
@@ -2165,7 +2171,7 @@ def jobs():
     return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
                    features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
-                   subs=subs_list(), sub_interval=SUB_INTERVAL)
+                   subs=subs_list(), sub_interval=SUB_INTERVAL, more=more)
 
 
 def subs_list():
