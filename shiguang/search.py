@@ -428,7 +428,11 @@ def smart_search(parsed, scope, scope_args, owner):
     for r, d in cands:
         by_source.setdefault(r["ref"] or r["id"], []).append(r["id"])
     # the uploader is a filter already; a keyword that's (part of) their name only demands they say it
-    kws = [k for k in parsed.get("keywords") or [] if not (up and (k.casefold() in up.casefold() or up.casefold() in k.casefold()))]
+    # the uploader is a filter already; a keyword that's (part of) their name only demands they say it. A keyword
+    # that's the on-screen thing (地图) is a demand on the picture, not on what's said
+    vis = (parsed.get("visual") or "").casefold()
+    kws = [k for k in parsed.get("keywords") or [] if not (up and (k.casefold() in up.casefold() or up.casefold() in k.casefold()))
+           and not (vis and (k.casefold() in vis or vis in k.casefold()))]
     said, text_hit = {}, {}
     for k in kws:
         like = f"%{k}%"
@@ -463,8 +467,9 @@ def smart_search(parsed, scope, scope_args, owner):
         # it's talked about (a video about Kenya's railway says 铁路 forty times; one mentioning it, twice)
         title = titleish(d).casefold()
         counts = collections.Counter(h["kw"] for h in said.get(jid, []))
-        score = (100 * (len(matched) + bool(seen)) + 20 * sum(k.casefold() in title for k in kws)
-                 + sum(min(counts[k], 15) for k in kws))
+        met = len(matched) + bool(seen)
+        d["met"], d["of"] = met, len(kws) + bool(parsed.get("visual"))
+        score = 100 * met + 20 * sum(k.casefold() in title for k in kws) + 2 * sum(min(counts[k], 30) for k in kws)
         d["hits"] = [{k: v for k, v in h.items() if k != "kw"} for h in hits] + seen
         if hits:
             d["match_where"], d["match"] = hits[0]["src"], hits[0]["text"]
@@ -474,14 +479,19 @@ def smart_search(parsed, scope, scope_args, owner):
                 d["frame"] = {"part": seen[0]["part"], "t": seen[0]["t"]}
         out.append((score, jid, d))
     out.sort(key=lambda x: (-x[0], -x[1]))
-    return [d for _, _, d in out[:100]]
+    full = [d for _, _, d in out if d["met"] == d["of"]]
+    # nothing meets all of it: say so, and show what meets the most (the page marks them 部分符合)
+    return (full or [{**d, "partial": True} for _, _, d in out])[:100]
 
 
 def understood(parsed):
     """How the search was read, for the page: 关键词「伊朗」· 画面像「地图」· UP 主 小王Albert · 2026-09-04 起."""
     parts = []
-    if parsed.get("keywords"):
-        parts.append("关键词" + "".join(f"「{k}」" for k in parsed["keywords"]))
+    up, vis = (parsed.get("uploader") or "").casefold(), (parsed.get("visual") or "").casefold()
+    kws = [k for k in parsed.get("keywords") or [] if not (up and (k.casefold() in up or up in k.casefold()))
+           and not (vis and (k.casefold() in vis or vis in k.casefold()))]  # as smart_search uses them
+    if kws:
+        parts.append("关键词" + "".join(f"「{k}」" for k in kws))
     if parsed.get("visual"):
         parts.append(f"画面像「{parsed['visual']}」")
     if parsed.get("uploader"):

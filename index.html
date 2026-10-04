@@ -345,6 +345,9 @@
   .dup li { margin: 6px 0; }
   .dup a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
   .understood { margin: 0 0 12px; color: var(--muted); }
+  .answer { border: 2px solid var(--ink); background: var(--bg); padding: 10px 12px; line-height: 2; }
+  .cite { border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 0 4px; margin: 0 2px; font-size: 12px;
+          line-height: 1.4; }
   .notehits { margin: 0 0 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 4px 10px; cursor: pointer; }
   /* photo viewer: pinch / wheel / double-tap to zoom, drag to pan, swipe for the next photo, swipe down to close */
   #lightbox { position: fixed; inset: 0; z-index: 35; background: rgba(29,27,38,.96); overflow: hidden; touch-action: none;
@@ -424,6 +427,7 @@
     <input type="search" id="search" placeholder="搜索标题、简介、标签、字幕…" autocomplete="off">
   </form>
   <div class="right">
+    <button class="btn plain" onclick="openAsk()" title="问拾光：用片库和随记回答问题">问</button>
     <button class="btn" onclick="openAdd()">＋ 添加</button>
     <button class="avatar" id="avatar" onclick="avatarTap()" title="账号">登</button>
   </div>
@@ -523,6 +527,18 @@
 </div>
 
 <!-- account -->
+<div class="sheet-bg" id="askSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet wide-sheet">
+    <h2>问拾光</h2>
+    <form class="row" onsubmit="ask(event)" style="margin-bottom:10px">
+      <input type="text" id="askText" placeholder="比如：小王怎么看霍尔木兹海峡？" autocomplete="off" style="margin:0;flex:3">
+      <button class="btn" id="askGo">问</button>
+    </form>
+    <p class="hint">用视频里说过的话和你的随记回答，每句后面的编号点了会跳到出处。</p>
+    <div id="askOut"></div>
+  </div>
+</div>
+
 <div class="sheet-bg" id="usageSheet" hidden onclick="if (event.target === this) hide(this)">
   <div class="sheet wide-sheet" id="usageBody"></div>
 </div>
@@ -664,6 +680,7 @@ function card(j) {
     : j.match ? `<div class="hit">${esc(j.match_where || "字幕")}：${hl(j.match)}</div>` : "";
   const picking = selecting ? `<span class="pick">${selected.has(j.id) ? "✓" : ""}</span>` : "";
   if (j.hidden) over += `<span class="badge left hid">已隐藏</span>`;
+  if (j.of > 1 && j.met < j.of) over += `<span class="badge left">符合 ${j.met}/${j.of}</span>`;
   // how far you got (on any device): a bar along the bottom, or 已看完
   const w = j.watch;
   if (w && w.done) over += `<span class="badge tr">已看完</span>`;
@@ -711,7 +728,8 @@ function render() {
   $("#noteHits").hidden = notes || mixNotes || !query || !hits.length;
   $("#noteHits").textContent = `随记里也有 ${hits.length} 条匹配 →`;
   $("#understood").hidden = !(query && state.understood);
-  $("#understood").innerHTML = state.understood ? `按 ${esc(state.understood)} 找 · <button class="link" onclick="searchExact()">按原文搜索</button>` : "";
+  $("#understood").innerHTML = state.understood ? `按 ${esc(state.understood)} 找${state.partial
+    ? "<br><b>没有同时符合的</b>，下面是符合其中一部分的（卡片上写着符合了哪些）" : ""} · <button class="link" onclick="searchExact()">按原文搜索</button>` : "";
   const jobs = list ? [] : state.jobs.filter(j =>
     // 首页 skips 追更 videos still waiting in line (hundreds after a backfill); they're under 下载中 and the UP chip
     chip === "all" ? !(j.status === "queued" && (j.source || "").startsWith("sub:")) :
@@ -848,7 +866,7 @@ function digestCard() {
   return `<div class="px digest">${head}${d.headline ? `<p class="dline">${esc(d.headline)}</p>` : ""}${ups || '<p class="sub">这段时间追更的 UP 主没有新视频。</p>'}</div>`;
 }
 // a video that may not be in the list loaded so far (opened from a digest)
-async function openJob(id) {
+async function openJob(id, part, t) {
   if (!state.jobs.some(j => j.id === id)) {
     try {
       const r = await (await fetch(`/api/jobs?ids=${id}`)).json();
@@ -856,7 +874,7 @@ async function openJob(id) {
       if (j) state.jobs.push(j); else { toast("这个视频不见了"); return; }
     } catch (e) { toast("连不上 Pi"); return; }
   }
-  openWatch(id);
+  if (part !== undefined) { hide($("#askSheet")); openWatch(id, part, t || 0.01); } else openWatch(id);
 }
 function renderSubs() {
   const list = state.subs || [];
@@ -1631,6 +1649,27 @@ document.addEventListener("paste", e => {
   if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
   const t = e.clipboardData.getData("text"); if (/https?:\/\/|magnet:/.test(t)) sendText(t);
 });
+
+/* ---------- 问拾光 ---------- */
+function openAsk() { $("#askSheet").hidden = false; setTimeout(() => $("#askText").focus(), 50); }
+async function ask(e) {
+  e.preventDefault();
+  const qtext = $("#askText").value.trim(); if (!qtext) return;
+  $("#askGo").disabled = true; $("#askOut").innerHTML = '<p class="hint">正在翻字幕和随记…</p>';
+  let r;
+  try { r = await (await fetch("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q: qtext})})).json(); }
+  catch (err) { r = {error: "连不上 Pi"}; }
+  $("#askGo").disabled = false;
+  if (r.error) { $("#askOut").innerHTML = `<div class="form-err">${esc(r.error)}</div>`; return; }
+  // 【n】 -> a button that opens the source at its moment
+  const cite = n => { const c = (r.cites || {})[n]; if (!c) return `【${n}】`;
+    const label = c.kind === "note" ? "随记" : (c.t != null ? dur(c.t) : "简介");
+    const go = c.kind === "note" ? `askOpenNote(${c.note})` : `openJob(${c.job}, ${c.part || 0}, ${c.t ?? 0})`;
+    return `<button class="cite" title="${esc(c.title || "")}" onclick="${go}">${n} · ${esc(label)}</button>`; };
+  const html = esc(r.answer).replace(/【(\d+)】/g, (_, n) => cite(n)).replace(/\n/g, "<br>");
+  $("#askOut").innerHTML = `<div class="answer">${html}</div>${r.understood ? `<p class="hint">按 ${esc(r.understood)} 找的资料</p>` : ""}`;
+}
+function askOpenNote(id) { hide($("#askSheet")); focusNote = id; setChip("notes"); }
 
 /* ---------- 资源使用 ---------- */
 let usageDays = 7;

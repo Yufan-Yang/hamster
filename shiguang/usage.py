@@ -149,7 +149,7 @@ def backfill_usage():
 
 USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm", "summarize"): "AI 总结（看字幕）",
                ("llm", "earlier"): "AI 分类+总结（统计开始前，未细分）", ("llm", "translate"): "AI 翻译字幕",
-               ("llm", "digest"): "AI 追更周报", ("llm", "chapters"): "AI 章节", ("llm", "search"): "AI 理解搜索", ("llm", "tags"): "AI 合并同义标签",
+               ("llm", "digest"): "AI 追更周报", ("llm", "chapters"): "AI 章节", ("llm", "search"): "AI 理解搜索", ("llm", "ask"): "AI 问拾光", ("llm", "tags"): "AI 合并同义标签",
                ("whisper", "job"): "语音转文字 · 新下载（抽样 6 分钟）", ("whisper", "note"): "语音转文字 · 随记",
                ("whisper", "idle"): "语音转文字 · 闲时生成字幕（Pi）",
                ("whisper", "mac"): "语音转文字 · 完整字幕（Mac）", ("encode", "plex"): "转码（Plex / 手机能播）",

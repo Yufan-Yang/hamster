@@ -573,7 +573,8 @@ def jobs():
                    note_hits=[notes.note_dict(r, m, seen) for r, m, seen in
                               search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
                    if term else [],
-                   understood=search.understood(parsed) if parsed else None, cats=category_counts())
+                   understood=search.understood(parsed) if parsed else None,
+                   partial=bool(parsed and out and out[0].get("partial")), cats=category_counts())
 
 
 def subs_list():
@@ -963,6 +964,19 @@ def similar_of(jid):
     return jsonify(similar=out)
 
 
+@app.post("/api/ask")
+def ask_question():
+    """问拾光: answer a question from what's said in the videos and written in the notes, with sources."""
+    question = str((request.get_json(silent=True) or {}).get("q", "")).strip()[:300]
+    if not question:
+        return jsonify(error="问点什么"), 400
+    if not LLM_API_KEY:
+        return jsonify(error="没有配置 AI"), 400
+    scope, scope_args = scope_sql()
+    ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
+    return jsonify(ask.answer(question, scope + " AND status != 'cancelled'", scope_args, g.owner, ups))
+
+
 @app.get("/api/digests")
 def digests_list():
     rows = q("SELECT * FROM digests WHERE owner=? ORDER BY end DESC, id DESC LIMIT 8", (g.owner,))
@@ -1142,4 +1156,4 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import board, channels, core, library, llm, notes, pipeline, search  # noqa: E402
+from . import ask, board, channels, core, library, llm, notes, pipeline, search  # noqa: E402
