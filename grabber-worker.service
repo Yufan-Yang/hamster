@@ -1,0 +1,19 @@
+[Unit]
+Description=拾光 downloads: runs each queued job in its own process (grabber)
+After=network-online.target mnt-media.mount xray-tproxy.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/media
+
+[Service]
+User=grabber
+Group=media
+UMask=0002
+EnvironmentFile=-/etc/grabber.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/grabber/venv/bin/python /opt/grabber/grabber.py worker
+Nice=5
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

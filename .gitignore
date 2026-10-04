@@ -1,0 +1,7 @@
+# real config lives in /etc/grabber.env on the Pi; grabber.env.example is the template
+grabber.env
+# signed iOS shortcut: built and signed on the Mac, carries the signer's certificate
+*.shortcut
+__pycache__/
+*.pyc
+.DS_Store

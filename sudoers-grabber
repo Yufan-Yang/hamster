@@ -1,0 +1,3 @@
+# grabber runs aria2 as `bt` so torrent traffic skips the proxy
+Defaults>bt umask=0002, umask_override
+grabber ALL=(bt) NOPASSWD: /usr/bin/aria2c

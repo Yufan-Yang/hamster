@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- always the beige paper theme, also when the phone is in dark mode -->
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f5f0e1">
+<title>拾光</title>
+<link rel="icon" href="/favicon.ico?v=2" sizes="any">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/favicon.png?v=2">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2">
+<style>
+  /* 拾光 · pixel style: one pixel font, hard 2px ink borders, flat offset shadows, a small fixed palette */
+  @font-face { font-family: "Pixel"; src: url("/static/pixel.woff2") format("woff2"); font-display: swap; }
+  :root {
+    --bg: #f5f0e1;      /* paper */
+    --panel: #fffdf6;
+    --ink: #1d1b26;     /* text, borders, shadows */
+    --muted: #57536a;
+    --faint: #8f8b9c;
+    --accent: #ff004d;  /* red: primary actions, brand */
+    --yellow: #ffec27;  /* selection, search hits */
+    --blue: #1d6fe0;    /* links, tags */
+    --green: #00a83e;
+    --soft: #e9e2cd;    /* quiet fills */
+    --on-accent: #ffffff;
+    --overlay: rgba(29, 27, 38, .6);
+  }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  /* no double-tap-to-zoom (it swallows quick taps such as the avatar's triple tap); pinch zoom still works */
+  html, button, a, .card { touch-action: manipulation; }
+  .avatar { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body, button, input { font-family: "Pixel", "PingFang SC", monospace; font-size: 12px; line-height: 1.75;
+                        -webkit-font-smoothing: none; -moz-osx-font-smoothing: unset; }
+  a { color: inherit; text-decoration: none; }
+  button { color: inherit; cursor: pointer; }
+  input { color: var(--ink); }
+  ::selection { background: var(--yellow); color: #1d1b26; }
+
+  /* shared pixel bits */
+  .px { border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); background: var(--panel); }
+  .btn { height: 36px; padding: 0 14px; border: 2px solid var(--ink); background: var(--accent); color: var(--on-accent);
+         box-shadow: 3px 3px 0 var(--ink); white-space: nowrap; }
+  .btn:active:not(:disabled) { transform: translate(3px, 3px); box-shadow: none; }
+  .btn.plain { background: var(--panel); color: var(--ink); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .link { border: 0; background: none; color: var(--blue); padding: 4px 0; text-decoration: underline; text-underline-offset: 3px; }
+
+  /* top bar */
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 2px solid var(--ink);
+           display: flex; align-items: center; gap: 16px; padding: 10px 24px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .logo { display: flex; align-items: center; gap: 10px; flex: none; }
+  .logo b { font-size: 24px; line-height: 1; font-weight: normal; color: var(--bg); background: var(--accent);
+            border: 2px solid var(--ink); box-shadow: 3px 3px 0 var(--ink); padding: 4px 8px 6px; letter-spacing: 2px; }
+  .logo span { color: var(--muted); }
+  .search { flex: 1; max-width: 560px; margin: 0 auto; display: flex; }
+  .search input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 2px solid var(--ink); background: var(--panel);
+                  outline: none; box-shadow: inset 3px 3px 0 var(--soft); }
+  .search input:focus { box-shadow: inset 3px 3px 0 var(--soft), 0 0 0 2px var(--yellow); }
+  .right { display: flex; align-items: center; gap: 12px; flex: none; }
+  .avatar { width: 36px; height: 36px; border: 2px solid var(--ink); background: var(--panel); color: var(--ink);
+            box-shadow: 3px 3px 0 var(--ink); }
+  .avatar.on { background: var(--yellow); color: #1d1b26; }
+  .avatar:active { transform: translate(3px, 3px); box-shadow: none; }
+
+  /* filter chips */
+  .chips { display: flex; gap: 10px; overflow-x: auto; padding: 14px 24px 10px; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip { flex: none; height: 30px; padding: 0 10px; border: 2px solid var(--ink); background: var(--panel); white-space: nowrap; }
+  .chip.on { background: var(--ink); color: var(--bg); }
+  .chip.dim:not(.on) { color: var(--faint); border-color: var(--faint); }
+
+  main { padding: 0 24px 60px; }
+  .toolbar { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; }
+  .scope { color: var(--muted); flex: 1; }
+
+  /* video grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 28px 20px; }
+  .card { cursor: pointer; min-width: 0; position: relative; }
+  .cover { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: var(--soft);
+           border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); transition: transform .08s, box-shadow .08s; }
+  .card:hover .cover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
+  .card:active .cover { transform: translate(4px, 4px); box-shadow: none; }
+  .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover .ph { position: absolute; inset: 0; display: grid; place-items: center; font-size: 36px; color: var(--faint); }
+  .badge { position: absolute; right: 0; bottom: 0; background: var(--ink); color: var(--bg); padding: 0 6px;
+           font-variant-numeric: tabular-nums; }
+  .badge.left { left: 0; right: auto; top: 0; bottom: auto; }
+  .badge.bad { background: var(--accent); color: var(--on-accent); }
+  .prog { position: absolute; left: 6px; right: 6px; bottom: 6px; height: 12px; border: 2px solid #fff; background: rgba(0,0,0,.5); }
+  .prog > div { height: 100%; transition: width .6s;
+                background: repeating-linear-gradient(90deg, var(--yellow) 0 6px, transparent 6px 8px); }
+  .state { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(29,27,38,.6); color: #fff;
+           text-align: center; padding: 8px 8px 24px; }
+  .info { padding: 10px 0 0; }
+  .title { line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+           overflow-wrap: anywhere; }
+  .meta { color: var(--muted); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+          overflow: hidden; }
+  .hit { color: var(--muted); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  mark { background: var(--yellow); color: #1d1b26; padding: 0 1px; }
+  .empty { text-align: center; color: var(--muted); padding: 80px 0; }
+
+  /* batch selection */
+  .pick { position: absolute; top: 6px; left: 6px; z-index: 2; width: 24px; height: 24px; border: 2px solid var(--ink);
+          background: var(--panel); display: grid; place-items: center; color: var(--ink); }
+  .card.picked .pick { background: var(--yellow); }
+  .card.picked .cover { box-shadow: 4px 4px 0 var(--accent); border-color: var(--accent); }
+  .selbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 12; background: var(--panel); border-top: 2px solid var(--ink);
+            display: flex; align-items: center; gap: 14px; padding: 12px 24px max(12px, env(safe-area-inset-bottom)); }
+
+  /* sheets: add / account / remove */
+  .sheet-bg { position: fixed; inset: 0; background: var(--overlay); z-index: 25; display: grid; place-items: center; padding: 16px; }
+  .sheet { width: min(520px, 100%); background: var(--panel); border: 2px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding: 20px; }
+  .sheet h2 { margin: 0 0 12px; font-size: 24px; line-height: 1.3; font-weight: normal; }
+  .sheet input[type=text], .sheet input[type=password] { width: 100%; height: 40px; padding: 0 12px; border: 2px solid var(--ink);
+         background: var(--bg); outline: none; margin-bottom: 10px; box-shadow: inset 3px 3px 0 var(--soft); }
+  .sheet input:focus { box-shadow: inset 3px 3px 0 var(--soft), 0 0 0 2px var(--yellow); }
+  .row { display: flex; gap: 12px; }
+  .row .btn { flex: 1; height: 40px; }
+  .btn.wide { width: 100%; height: 42px; margin-top: 4px; }
+  .drop { border: 2px dashed var(--ink); padding: 20px 12px; text-align: center; color: var(--muted); margin-bottom: 12px; }
+  .tips { color: var(--muted); margin-top: 14px; line-height: 2; }
+  .tips a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .hint { color: var(--muted); margin: 0 0 12px; }
+  .steps { margin: 0 0 12px; padding-left: 20px; }
+  .steps li { margin: 0 0 8px; }
+  code.copy { font-family: inherit; background: var(--bg); border: 2px solid var(--ink); padding: 0 4px; cursor: pointer;
+              overflow-wrap: anywhere; }
+  code.copy.block { display: block; margin-top: 6px; padding: 4px 8px; }
+  .field { display: block; position: relative; margin-bottom: 10px; }
+  .sheet .field input { margin-bottom: 0; }
+  .field .note { display: block; color: var(--faint); margin: 2px 2px 0; }
+  .field .note:empty { display: none; }
+  .field .note.good { color: var(--green); }
+  .field .note.bad { color: var(--accent); }
+  .field.pw input { padding-right: 60px; }
+  .eye { position: absolute; right: 6px; top: 6px; height: 28px; padding: 0 8px; border: 0; background: transparent; color: var(--blue); }
+  .form-err { border: 2px solid var(--accent); color: var(--accent); padding: 6px 10px; margin-bottom: 10px; background: var(--bg); }
+  .form-err::before { content: "! "; }
+  .switch { text-align: center; color: var(--muted); margin-top: 14px; }
+  .switch a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .check { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border: 2px solid var(--ink); background: var(--bg);
+           padding: 10px 12px; cursor: pointer; }
+  .check input { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+  .check span { flex-basis: 100%; color: var(--accent); padding-left: 26px; }
+  .devs { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding: 0 4px 4px 0; }
+  .dev { display: flex; align-items: center; gap: 10px; border: 2px solid var(--ink); background: var(--bg); padding: 8px 10px; }
+  .dev-main { flex: 1; min-width: 0; cursor: pointer; }
+  .dev .sub, .devs > .sub { color: var(--muted); overflow-wrap: anywhere; }
+  .dev .cur { color: #1d1b26; background: var(--yellow); padding: 0 4px; margin-left: 4px; }
+  .dev .btn { flex: none; height: 30px; }
+
+  #dropAll { position: fixed; inset: 12px; z-index: 30; background: rgba(255,236,39,.18); border: 4px dashed var(--ink);
+             display: grid; place-items: center; font-size: 24px; color: var(--ink); pointer-events: none; }
+  #dropAll:not([hidden]) { animation: fadeIn .15s steps(3); }
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+           border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--accent); padding: 8px 16px; z-index: 40; max-width: calc(100% - 32px); }
+
+  /* watch page */
+  #watch { position: fixed; inset: 0; z-index: 15; background: var(--bg); overflow-y: auto; }
+  .wbar { position: sticky; top: 0; background: var(--bg); border-bottom: 2px solid var(--ink); display: flex; align-items: center;
+          gap: 12px; padding: 10px 24px; padding-top: max(10px, env(safe-area-inset-top)); z-index: 2; }
+  .wbar button { border: 2px solid var(--ink); background: var(--panel); box-shadow: 3px 3px 0 var(--ink); height: 36px; padding: 0 12px; }
+  .wbar button:active { transform: translate(3px, 3px); box-shadow: none; }
+  .wbar b { font-weight: normal; color: var(--accent); font-size: 24px; line-height: 1; letter-spacing: 2px; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
+  .stage { position: relative; background: #000; aspect-ratio: 16 / 9; display: grid; place-items: center;
+           border: 2px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); }
+  .stage video { width: 100%; height: 100%; background: #000; }
+  .stage .msg { color: #eee; text-align: center; padding: 20px; }
+  .stage.audio img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .55; }
+  .stage.audio .note-big { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; color: #555; }
+  .stage.audio audio { position: absolute; left: 12px; bottom: 12px; width: calc(100% - 24px); height: 54px; z-index: 1; display: block; }
+  .warn { margin-top: 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 6px 10px; }
+  .wtitle { font-size: 24px; line-height: 1.4; margin: 20px 0 8px; overflow-wrap: anywhere; font-weight: normal; }
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+  .tags span { color: var(--blue); cursor: pointer; border: 2px solid var(--blue); padding: 0 6px; }
+  .tags span:hover { background: var(--blue); color: var(--bg); }
+  .wmeta { color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .wmeta a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .parts { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
+  .parts button { border: 2px solid var(--ink); background: var(--panel); padding: 2px 10px; }
+  .parts button.on { background: var(--ink); color: var(--bg); }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+  .actions button { height: 32px; padding: 0 12px; border: 2px solid var(--ink); background: var(--panel); box-shadow: 3px 3px 0 var(--ink); }
+  .actions button:active { transform: translate(3px, 3px); box-shadow: none; }
+  .desc { border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); padding: 12px 14px; margin-top: 20px; cursor: pointer; }
+  .desc .sum { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .desc.open { cursor: default; }
+  .desc.open .sum { display: block; }
+  .desc .more { display: none; }
+  .desc.open .more { display: block; }
+  .desc.open .expand { display: none; }
+  .desc .toggle { color: var(--blue); margin-top: 4px; cursor: pointer; }
+  .desc ul { margin: 10px 0 0; padding-left: 0; list-style: none; }
+  .desc li { margin: 4px 0; padding-left: 16px; position: relative; }
+  .desc li::before { content: "■"; position: absolute; left: 0; color: var(--accent); }
+  .card.is-hidden .cover { opacity: .45; }
+  .badge.hid { background: var(--muted); color: var(--bg); }
+  .pv { color: var(--muted); }
+  .pv.on { background: var(--yellow); color: #1d1b26; padding: 0 4px; }
+  .psec { border-bottom: 2px solid var(--ink); margin: 0 0 8px; padding-bottom: 2px; }
+  .ptags { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ptag { border: 2px solid var(--ink); background: var(--bg); padding: 0 0 0 6px; display: inline-flex; align-items: center; gap: 4px; }
+  .ptag button { border: 0; border-left: 2px solid var(--ink); background: var(--panel); height: 100%; padding: 0 6px; }
+  .sub { color: var(--muted); }
+  /* 追更: followed uploaders */
+  .subs { display: flex; flex-direction: column; gap: 14px; max-width: 900px; }
+  .subadd { display: flex; gap: 10px; }
+  .subadd input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 2px solid var(--ink); background: var(--panel);
+                  outline: none; box-shadow: inset 3px 3px 0 var(--soft); }
+  .subadd input:focus { box-shadow: inset 3px 3px 0 var(--soft), 0 0 0 2px var(--yellow); }
+  .subrow { display: flex; gap: 14px; align-items: flex-start; }
+  .subrow .face { flex: none; width: 56px; height: 56px; border: 2px solid var(--ink); background: var(--soft); overflow: hidden;
+                  display: grid; place-items: center; font-size: 24px; color: var(--faint); }
+  .subrow .face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .subrow .body { flex: 1; min-width: 0; }
+  .subrow .name { font-size: 24px; line-height: 1.3; overflow-wrap: anywhere; cursor: pointer; }
+  .subrow .plat { font-size: 12px; border: 2px solid var(--ink); padding: 0 4px; margin-left: 8px; vertical-align: middle; }
+  .subrow .plat.bilibili { background: #fb7299; color: #fff; border-color: var(--ink); }
+  .subrow .plat.youtube { background: var(--accent); color: #fff; }
+  .subrow .acts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+  .err { white-space: pre-line; color: var(--accent); margin-top: 12px; overflow-wrap: anywhere; }
+
+  @media (max-width: 640px) {
+    header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
+    .logo span { display: none; }
+    .search { order: 3; flex-basis: 100%; max-width: none; }
+    .right { margin-left: auto; }
+    .chips { padding: 12px 12px 8px; }
+    main { padding: 0 12px 40px; }
+    .grid { grid-template-columns: 1fr 1fr; gap: 20px 12px; }
+    .wbar { padding: 8px 12px; }
+    .wrap { padding: 0 0 40px; }
+    .stage { border-width: 0 0 2px; box-shadow: none; }
+    .wrap > :not(.stage) { margin-left: 12px; margin-right: 12px; }
+    /* sheets slide up from the bottom on phones */
+    .sheet-bg { align-items: end; padding: 0; }
+    .sheet { width: 100%; border-width: 2px 0 0; box-shadow: none; padding: 18px 14px max(18px, env(safe-area-inset-bottom));
+             max-height: 92vh; overflow-y: auto; }
+    /* 16px+ stops iOS Safari zooming into fields; 24px keeps the pixel font on its grid */
+    .sheet input[type=text], .sheet input[type=password], .search input { font-size: 16px; }
+    .sheet input[type=text], .sheet input[type=password] { height: 46px; }
+    .btn.wide { height: 46px; }
+    .eye { top: 8px; }
+    .selbar { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+  }
+  /* motion: stepped (pixel-like) entrances and exits, quick but visible */
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+  @keyframes popIn { from { opacity: 0; transform: translate(0, 18px); } to { opacity: 1; transform: none; } }
+  @keyframes popOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translate(0, 18px); } }
+  @keyframes slideIn { from { opacity: 0; transform: translate(48px, 0); } to { opacity: 1; transform: none; } }
+  @keyframes slideOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translate(48px, 0); } }
+  @keyframes march { to { background-position: 16px 0; } }
+  @keyframes blink { 50% { opacity: .35; } }
+  .sheet-bg:not([hidden]) { animation: fadeIn .18s steps(4); }
+  .sheet-bg:not([hidden]) .sheet { animation: popIn .24s steps(6); }
+  .sheet-bg.closing { animation: fadeOut .17s steps(4) forwards; }
+  .sheet-bg.closing .sheet { animation: popOut .17s steps(4) forwards; }
+  #watch:not([hidden]) { animation: slideIn .26s steps(6); }
+  #watch.closing { animation: slideOut .17s steps(4) forwards; }
+  .card.enter { animation: popIn .28s steps(6) both; animation-delay: calc(var(--i) * 35ms); }
+  .chip { transition: background .12s steps(2), color .12s steps(2); }
+  .prog > div { background-size: 16px 100%; animation: march .5s steps(2) infinite; }
+  .state { animation: fadeIn .2s steps(3); }
+  #toast:not([hidden]) { animation: popIn .22s steps(5); }
+  .desc.open .more { animation: fadeIn .2s steps(4); }
+  .stage .msg { animation: blink 1.2s steps(2) infinite; }
+  @media (max-width: 640px) {
+    @keyframes sheetUp { from { transform: translate(0, 100%); } to { transform: none; } }
+    @keyframes sheetDown { from { transform: none; } to { transform: translate(0, 100%); } }
+    .sheet-bg:not([hidden]) .sheet { animation: sheetUp .26s steps(7); }
+    .sheet-bg.closing .sheet { animation: sheetDown .17s steps(4) forwards; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
+  <form class="search" onsubmit="return false">
+    <input type="search" id="search" placeholder="搜索标题、简介、标签、字幕…" autocomplete="off">
+  </form>
+  <div class="right">
+    <button class="btn" onclick="openAdd()">＋ 添加</button>
+    <button class="avatar" id="avatar" onclick="avatarTap()" title="账号">登</button>
+  </div>
+</header>
+
+<div class="chips" id="chips"></div>
+<main>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="grid" id="grid"></div>
+  <div class="subs" id="subs" hidden></div>
+  <div class="empty" id="empty">正在加载…</div>
+</main>
+
+<div class="selbar" id="selbar" hidden>
+  <span id="selCount">已选 0 个</span>
+  <button class="link" onclick="selectAll()">全选</button>
+  <span style="flex:1"></span>
+  <button class="btn plain" onclick="toggleSelect()">取消</button>
+  <button class="btn" id="selRemove" onclick="askRemove([...selected])">移除</button>
+</div>
+
+<!-- remove confirm -->
+<div class="sheet-bg" id="removeSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet">
+    <h2 id="removeTitle">移除</h2>
+    <p class="hint" id="removeHint"></p>
+    <label class="check"><input type="checkbox" id="removeFiles"> 同时从硬盘删除文件<span>删除后无法恢复，Plex 里也会消失</span></label>
+    <div class="row" style="margin-top:16px">
+      <button class="btn plain" onclick="hide($('#removeSheet'))">取消</button>
+      <button class="btn" id="removeGo">移除</button>
+    </div>
+  </div>
+</div>
+
+<!-- add -->
+<div class="sheet-bg" id="addSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet">
+    <h2>添加下载</h2>
+    <div class="drop">把链接、网页、磁力或 .torrent 拖到页面任意位置<br>或粘贴到下面（可以一次多个）<br>B站 UP 主空间、YouTube 频道链接会自动「追更」</div>
+    <form id="addForm">
+      <input type="text" id="addText" placeholder="https://… 或 magnet:?…" autocomplete="off">
+      <div class="row">
+        <button class="btn">开始下载</button>
+        <button type="button" class="btn plain" onclick="$('#file').click()">选择 .torrent</button>
+      </div>
+      <input type="file" id="file" accept=".torrent" hidden multiple>
+    </form>
+    <div id="addTips"></div>
+  </div>
+</div>
+<div id="dropAll" hidden>松开就开始下载</div>
+
+<!-- Android share setup -->
+<div class="sheet-bg" id="androidSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet">
+    <h2>安卓分享到拾光</h2>
+    <p class="hint">安卓上网页没法直接出现在分享菜单里（需要 HTTPS），用开源的 HTTP Shortcuts 应用代替，设置一次就好：</p>
+    <ol class="steps">
+      <li>在应用商店或 F-Droid 安装 <b>HTTP Shortcuts</b>（作者 Waboodoo）。</li>
+      <li>先在手机浏览器里打开一次本页，这样拾光能认出这台手机。</li>
+      <li>在应用里点 <b>＋</b> → <b>Regular Shortcut</b>，名字填「发送到拾光」。</li>
+      <li><b>Basic Request Settings</b>：Method 选 <b>POST</b>，URL 填：<code class="copy" onclick="copyText(this)">http://192.168.3.200:8088/api/add</code></li>
+      <li><b>Request Body / Parameters</b>：类型选 <b>Custom Text</b>，Content-Type 填 <code class="copy" onclick="copyText(this)">application/json</code>，内容填下面这段，然后把 <b>分享内容</b> 换成变量（点输入框旁的 <b>{}</b> → 新建 Text 变量，在变量设置里勾选 <b>Allow 'Share...'</b>），把「我的安卓」改成你的手机名：<br>
+        <code class="copy block" onclick="copyText(this)">{"text": "分享内容", "device": "我的安卓"}</code></li>
+      <li><b>Trigger &amp; Execution Settings</b> 里打开 <b>Show in Share menu</b>（显示在分享菜单）。</li>
+      <li>以后在 B站、YouTube、浏览器等任意 App 里点 <b>分享</b> → <b>HTTP Shortcuts</b> → <b>发送到拾光</b>，就开始下载了。</li>
+    </ol>
+    <p class="hint">点上面带框的文字可以复制。只能在家里的 Wi-Fi 下用。</p>
+    <div class="row"><button class="btn plain" onclick="hide($('#androidSheet'))">知道了</button></div>
+  </div>
+</div>
+
+<!-- privacy -->
+<div class="sheet-bg" id="privacySheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet" id="privacyBody"></div>
+</div>
+
+<!-- account -->
+<div class="sheet-bg" id="accountSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet" id="accountBody"></div>
+</div>
+
+<!-- watch -->
+<div id="watch" hidden>
+  <div class="wbar"><button onclick="closeWatch()" aria-label="返回">◀ 返回</button><b>拾光</b></div>
+  <div class="wrap" id="watchBody"></div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script>
+const $ = s => document.querySelector(s);
+// The privacy unlock lives only in this page's memory: a reload, or leaving the page in the
+// background for over a minute, locks it again.
+let privacyToken = null, privacyTimer = null, hiddenSince = 0;
+const _fetch = window.fetch.bind(window);
+window.fetch = (url, opts = {}) => {
+  if (privacyToken) opts = {...opts, headers: {...(opts.headers || {}), "X-Privacy-Token": privacyToken}};
+  return _fetch(url, opts);
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const FOLDERS = {"Music Videos": "音乐MV", "Tutorials": "教程", "Talks": "演讲", "News": "新闻", "Gaming": "游戏",
+                 "Sports": "体育", "Documentaries": "纪录片", "Vlogs": "Vlog", "Comedy": "搞笑", "Clips": "片段", "Other": "其他"};
+const LIBS = {"Movies": "电影", "TV": "剧集", "Music": "音乐", "Downloads": "文件"};
+const STAGES = {"starting": "准备中", "downloading video": "下载中", "downloading torrent": "下载种子", "downloading file": "下载中",
+                "looking for the video on the page": "在页面上找视频", "inspecting": "检查文件", "making it Plex-friendly": "转换格式",
+                "classifying": "AI 分类", "transcribing speech": "语音转文字", "summarizing": "AI 总结", "filing into library": "归档"};
+const ACTIVE = ["queued", "downloading", "processing"];
+
+let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null;
+let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
+
+// Close a sheet / the watch page with a short exit animation instead of vanishing
+function hide(el, after) {
+  if (!el || el.hidden || el.classList.contains("closing")) return;
+  el.classList.add("closing");
+  setTimeout(() => { el.hidden = true; el.classList.remove("closing"); after && after(); }, 170);
+}
+function toast(t) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 3000); }
+// Escape, then highlight the search term
+function hl(s) {
+  const e = esc(s);
+  if (!query) return e;
+  const q = esc(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return e.replace(new RegExp(q, "gi"), m => `<mark>${m}</mark>`);
+}
+function dur(sec) {
+  if (!sec) return "";
+  sec = Math.round(sec); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+}
+function ago(t) {
+  const d = Date.now() / 1000 - t;
+  if (d < 60) return "刚刚"; if (d < 3600) return Math.floor(d / 60) + " 分钟前";
+  if (d < 86400) return Math.floor(d / 3600) + " 小时前"; if (d < 86400 * 30) return Math.floor(d / 86400) + " 天前";
+  return new Date(t * 1000).toLocaleDateString("zh-CN");
+}
+function category(j) {
+  const a = j.analysis || {};
+  if (j.status !== "done") return null;
+  return a.library === "Videos" ? (a.folder || "Other") : (a.library || "Other");
+}
+function catName(c) { return FOLDERS[c] || LIBS[c] || c; }
+function titleOf(j) { return (j.analysis || {}).title || j.title || (j.url.startsWith("torrent-file:") ? "种子文件" : j.url); }
+function subOf(j) {
+  const m = /^sub:(\d+)$/.exec(j.source || "");
+  return m ? (state.subs || []).find(s => s.id === +m[1]) : null;
+}
+function phone(j) {
+  const d = j.device || ((j.source || "").startsWith("shortcut:") ? j.source.slice(9) : null);
+  return d ? d.replace(/^📱\s*/, "") : null;
+}
+
+/* ---------- grid ---------- */
+function renderChips() {
+  const counts = {};
+  state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
+  const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
+  const failed = state.jobs.filter(j => j.status === "failed").length;
+  const list = [["all", "全部"]];
+  if (deviceFilter) list.push(["device", `设备：${deviceFilter} ✕`]);
+  list.push(["subs", `追更${(state.subs || []).length ? " " + state.subs.length : ""}`]);
+  const sf = chip.startsWith("sub:") && (state.subs || []).find(s => "sub:" + s.id === chip);
+  if (sf) list.push([chip, `UP：${sf.name} ✕`]);
+  if (active) list.push(["active", `下载中 ${active}`]);
+  // every category is always listed; ones with content first
+  const all = [...Object.keys(FOLDERS), ...Object.keys(LIBS)];
+  all.sort((a, b) => (counts[b] || 0) - (counts[a] || 0)).forEach(c => list.push([c, catName(c)]));
+  if (failed) list.push(["failed", `失败 ${failed}`]);
+  if (!list.some(([k]) => k === chip)) chip = "all";
+  const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${counts[k] === undefined && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("");
+  if ($("#chips").innerHTML !== chipsHtml) $("#chips").innerHTML = chipsHtml;
+}
+function setChip(k) {
+  if (k === "device" && chip === "device") { deviceFilter = null; k = "all"; }  // click the device chip again to clear it
+  if (k === "all") deviceFilter = null;
+  if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:");
+  chip = k; render();
+  if (refetch) { lastBody = ""; refresh(); }
+}
+
+function card(j) {
+  const a = j.analysis || {}, m = (j.media || [])[0];
+  let over = "";
+  if (ACTIVE.includes(j.status)) over = `<div class="state">${j.status === "queued" ? "排队中" : esc(STAGES[j.stage] || j.stage || "处理中")}${j.progress ? " " + j.progress.toFixed(0) + "%" : ""}${j.speed ? "<br>" + esc(j.speed) : ""}</div>
+                      <div class="prog"><div style="width:${j.progress || 0}%"></div></div>`;
+  else if (j.status === "failed") over = j.retry_at ? `<span class="badge left">等待自动重试</span>` : `<span class="badge left bad">失败</span>`;
+  else if (j.status === "cancelled") over = `<span class="badge left bad">已取消</span>`;
+  else if (j.missing) over = `<span class="badge left bad">文件已删除</span>`;
+  const cover = j.thumb ? `<img src="/thumb/${j.id}" alt="" loading="lazy">` : `<div class="ph">${m && m.audio ? "♪" : "▶"}</div>`;
+  const badge = m && m.duration ? `<span class="badge">${dur(m.duration)}</span>` : "";
+  const parts = (j.media || []).length > 1 ? `<span class="badge left">${j.media.length} 个视频</span>` : "";
+  const meta = [category(j) ? catName(category(j)) : null, ago(j.created), subOf(j) ? "追更 · " + subOf(j).name : phone(j),
+                j.owner_label ? "@" + j.owner_label : null].filter(Boolean).map(esc).join(" · ");
+  const hit = j.match ? `<div class="hit">字幕：${hl(j.match)}</div>`
+    : (query && (a.summary || "").toLowerCase().includes(query.toLowerCase()) ? `<div class="hit">${hl(a.summary)}</div>` : "");
+  const picking = selecting ? `<span class="pick">${selected.has(j.id) ? "✓" : ""}</span>` : "";
+  if (j.hidden) over += `<span class="badge left hid">已隐藏</span>`;
+  return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id})`}">
+    ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
+    <div class="info"><div class="title">${hl(titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
+  </div>`;
+}
+
+function render() {
+  renderChips();
+  $("#subs").hidden = chip !== "subs";
+  $("#grid").hidden = chip === "subs";
+  if (chip === "subs") renderSubs();
+  const jobs = chip === "subs" ? [] : state.jobs.filter(j =>
+    chip === "all" ? true :
+    chip.startsWith("sub:") ? j.source === chip :
+    chip === "active" ? ACTIVE.includes(j.status) :
+    chip === "failed" ? j.status === "failed" :
+    chip === "device" ? phone(j) === deviceFilter : category(j) === chip);
+  shown = jobs;
+  // Patch only the cards that changed, so covers don't reload and the page doesn't flash
+  const grid = $("#grid"), htmls = jobs.map(card), ids = jobs.map(j => j.id).join(",");
+  if (grid.dataset.ids !== ids) {
+    grid.innerHTML = htmls.join("");
+    [...grid.children].forEach((el, i) => { el.classList.add("enter"); el.style.setProperty("--i", Math.min(i, 12)); });
+    grid.dataset.ids = ids;
+  } else {
+    htmls.forEach((h, i) => { if (cardHtml[i] !== h) grid.children[i].outerHTML = h; });
+  }
+  cardHtml = htmls;
+  updateSelbar();
+  $("#empty").hidden = jobs.length > 0 || chip === "subs";
+  $("#empty").textContent = query ? "没有找到匹配的内容" : chip.startsWith("sub:") ? "还没有这个 UP 主的视频，列表获取后会自动开始下载"
+    : "还没有内容，点右上角「＋ 添加」，或者直接把链接拖进来";
+  $("#scope").textContent = state.admin ? "所有人的内容（管理员）"
+    : state.user ? `${state.user} 的内容（登录过这个账号的所有设备）`
+    : "只显示这台设备添加的内容 · 登录后，同一账号在不同设备上的内容会合并";
+  $("#privState").innerHTML = privacyToken && (state.privacy || {}).revealed
+    ? `<span class="pv on">正在显示隐藏内容</span> <button class="link" onclick="lockPrivacy()">隐藏</button>` : "";
+  const av = $("#avatar");
+  av.textContent = state.user ? state.user.slice(0, 1).toUpperCase() : "登";
+  av.classList.toggle("on", !!state.user);
+  if (watching) updateWatchStatus();
+}
+
+async function refresh() {
+  try {
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
+    const body = await (await fetch("/api/jobs" + (params.size ? "?" + params : ""))).text();
+    if (body !== lastBody) {  // nothing changed: leave the page alone
+      lastBody = body;
+      state = JSON.parse(body);
+      render();
+      // From outside the home network everything needs an account: go straight to the login form
+      if (state.login_required && $("#accountSheet").hidden) openAccount();
+    }
+  } catch (e) { toast("连不上 Pi"); }
+  schedule();
+}
+// Lazy polling: every 5 s while something is downloading, every 60 s otherwise,
+// paused while the tab is hidden and refreshed right away when you come back to it.
+let pollTimer;
+function schedule() {
+  clearTimeout(pollTimer);
+  if (document.hidden) return;
+  const busy = state.jobs.some(j => ACTIVE.includes(j.status)) || (state.subs || []).some(s => s.pending);
+  pollTimer = setTimeout(refresh, busy ? 5000 : 60000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+/* ---------- 追更: followed uploaders ---------- */
+const PLAT = {bilibili: "B站", youtube: "YouTube"};
+function until(t) {
+  const d = t - Date.now() / 1000;
+  return d < 60 ? "马上" : d < 3600 ? Math.round(d / 60) + " 分钟后" : d < 2 * 86400 ? Math.round(d / 3600) + " 小时后"
+    : Math.round(d / 86400) + " 天后";
+}
+function every(sec) {
+  return sec % 604800 === 0 ? (sec === 604800 ? "每周" : `每 ${sec / 604800} 周`)
+    : sec % 86400 === 0 ? `每 ${sec / 86400} 天` : sec >= 3600 ? `每 ${Math.round(sec / 3600)} 小时` : `每 ${Math.round(sec / 60)} 分钟`;
+}
+function subRow(s) {
+  const status = s.pending ? "正在获取视频列表…"
+    : `上次检查 ${ago(s.checked)} · 下次 ${until(s.next)}`;
+  const counts = [`已下载 ${s.done}`, s.active ? `下载中/排队 ${s.active}` : "", s.failed ? `失败 ${s.failed}` : "",
+                  s.total ? `UP 主共 ${s.total} 个` : ""].filter(Boolean).join(" · ");
+  const partial = s.backfill && s.total >= s.backfill;
+  return `<div class="px subrow" style="padding:12px 14px">
+    <div class="face">${s.avatar ? `<img src="/subavatar/${s.id}" alt="" loading="lazy">` : "▶"}</div>
+    <div class="body">
+      <div class="name" onclick="setChip('sub:${s.id}')">${esc(s.name)}<span class="plat ${esc(s.platform)}">${PLAT[s.platform] || esc(s.platform)}</span></div>
+      <div class="sub">${esc(counts)}${s.owner_label ? " · @" + esc(s.owner_label) : ""}</div>
+      <div class="sub">${esc(status)}${partial && !s.pending ? ` · 先缓存了最新 ${s.backfill} 个` : ""}</div>
+      ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}</div>` : ""}
+      <div class="acts">
+        <button class="link" onclick="setChip('sub:${s.id}')">看视频</button>
+        <button class="link" onclick="subAct(${s.id}, 'refresh')">立即检查</button>
+        ${partial ? `<button class="link" onclick="subAct(${s.id}, 'all')">缓存全部</button>` : ""}
+        <a class="link" href="${esc(s.url)}" target="_blank" rel="noopener">主页</a>
+        <button class="link" style="color:var(--accent)" onclick="subAct(${s.id}, 'delete')">取消追更</button>
+      </div>
+    </div>
+  </div>`;
+}
+function renderSubs() {
+  const list = state.subs || [];
+  const html = `<form class="subadd" onsubmit="addSub(event)">
+      <input type="text" id="subUrl" placeholder="B站 UP 主空间 / YouTube 频道链接" autocomplete="off">
+      <button class="btn">追更</button>
+    </form>
+    <div class="sub">${every(state.sub_interval || 604800)}检查一次新视频，有新的就自动下载。取消追更不会删除已经下载的视频。</div>
+    ${list.map(subRow).join("") || '<div class="empty" style="padding:40px 0">还没有追更的 UP 主</div>'}`;
+  const el = $("#subs");
+  if (el.dataset.html === html) return;
+  const typed = $("#subUrl") ? $("#subUrl").value : "", focused = document.activeElement && document.activeElement.id === "subUrl";
+  el.innerHTML = html; el.dataset.html = html;
+  $("#subUrl").value = typed; if (focused) $("#subUrl").focus();
+}
+function addSub(e) {
+  e.preventDefault();
+  const t = $("#subUrl").value.trim(); if (!t) return;
+  $("#subUrl").value = ""; $("#subs").dataset.html = ""; sendText(t);
+}
+async function subAct(id, action) {
+  const s = (state.subs || []).find(x => x.id === id) || {};
+  if (action === "delete" && !confirm(`不再追更「${s.name}」？已经下载的视频会保留，还在排队的会取消。`)) return;
+  if (action === "all" && !confirm(`下载「${s.name}」的全部 ${s.total} 个视频？会占用不少硬盘和时间，但不影响你手动添加的下载。`)) return;
+  const r = await (await fetch(`/api/subs/${id}/${action}`, {method: "POST"})).json();
+  toast(r.error || {refresh: "马上检查新视频", all: "开始缓存全部视频", delete: "已取消追更"}[action]);
+  if (action === "delete" && chip === "sub:" + id) chip = "subs";
+  lastBody = ""; refresh();
+}
+
+/* ---------- watch page ---------- */
+function openWatch(id, part = 0) {
+  const j = state.jobs.find(x => x.id === id); if (!j) return;
+  stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
+  watching = {id, part};
+  const a = j.analysis || {}, media = j.media || [], m = media[part];
+  let stage;
+  if (m) {
+    // Audio: cover (or a note) fills the frame, controls sit along its bottom edge like a video player
+    stage = m.audio
+      ? `<div class="stage audio">${j.thumb ? `<img src="/thumb/${id}" alt="">` : `<div class="note-big">♪</div>`}
+           <audio controls autoplay src="${m.src}"></audio></div>`
+      : `<div class="stage" id="stage">${videoTag(j, m)}</div>`;
+    if (!m.audio && ["vp9", "av1"].includes(m.vcodec) && /iPhone|iPad/.test(navigator.userAgent))
+      stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用电脑或 Plex 看。</div>`;
+  } else {
+    stage = `<div class="stage"><div class="msg" id="wstatus"></div></div>`;
+  }
+  const src = j.url.startsWith("torrent-file:") ? "种子文件" : j.url.startsWith("magnet:") ? "磁力链接"
+    : `<a href="${esc(j.url)}" target="_blank" rel="noopener">原链接</a>`;
+  const meta = [category(j) ? esc(catName(category(j))) : null, esc(ago(j.created)), m && m.duration ? dur(m.duration) : null, src,
+                phone(j) ? esc(phone(j)) : null, j.owner_label ? "@" + esc(j.owner_label) : null,
+                a.usage && a.usage.calls ? `AI ${a.usage.calls} 次 / ${a.usage.tokens} tokens` : null].filter(Boolean);
+  const parts = media.length > 1 ? `<div class="parts">${media.map((x, i) =>
+    `<button class="${i === part ? "on" : ""}" onclick="openWatch(${id},${i})">${i + 1}. ${esc(x.name.slice(-24))}</button>`).join("")}</div>` : "";
+  const active = ACTIVE.includes(j.status);
+  const file = (j.files || [])[0];
+  // Description collapsed to two lines, like YouTube; click to expand
+  const desc = a.summary || (a.key_points || []).length || (a.tags || []).length ? `
+    <div class="desc" id="desc" onclick="this.classList.add('open')">
+      <div class="sum">${hl(a.summary || "")}</div>
+      <div class="more">
+        ${(a.key_points || []).length ? `<ul>${a.key_points.map(p => `<li>${hl(p)}</li>`).join("")}</ul>` : ""}
+        ${file ? `<div class="meta" style="margin-top:10px">位置：${esc(file.replace("/mnt/media/", ""))}</div>` : ""}
+        ${a.note ? `<div class="meta">注：${esc(a.note)}</div>` : ""}
+        <div class="toggle" onclick="event.stopPropagation(); $('#desc').classList.remove('open')">收起</div>
+      </div>
+      <div class="toggle expand">…展开</div>
+    </div>` : "";
+  $("#watchBody").innerHTML = `${stage}
+    <div class="wtitle">${hl(titleOf(j))}</div>
+    ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify(t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
+    <div class="wmeta">${meta.map(x => `<span>${x}</span>`).join("")}</div>
+    ${parts}
+    <div class="actions">
+      ${active ? `<button onclick="act(${id},'cancel')">取消下载</button>` : ""}
+      ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
+      ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
+    </div>
+    ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
+    ${desc}`;
+  $("#watch").hidden = false;
+  document.body.style.overflow = "hidden";
+  updateWatchStatus();
+  if (m) setupMediaSession(j);
+}
+
+/* ---------- player ----------
+   Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
+function stopMedia() {
+  document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
+}
+function setupMediaSession(j) {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: titleOf(j), artist: (j.analysis || {}).creator || "拾光",
+    artwork: j.thumb ? [{src: `/thumb/${j.id}`, sizes: "640x360", type: "image/jpeg"}] : []});
+}
+function videoTag(j, m, t = 0) {
+  const tracks = m.subs.map((label, k) =>
+    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(label)}" srclang="${esc(label.split("-")[0])}"${k === 0 ? " default" : ""}>`).join("");
+  return `<video controls autoplay playsinline preload="metadata" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
+}
+function updateWatchStatus() {
+  const el = $("#wstatus"); if (!el || !watching) return;
+  const j = state.jobs.find(x => x.id === watching.id); if (!j) return;
+  if (j.status === "done" && (j.media || []).length) { openWatch(j.id); return; }  // just finished: show the player
+  el.innerHTML = j.status === "queued" ? "排队中…" : j.status === "failed" ? "下载失败" : j.status === "cancelled" ? "已取消"
+    : j.missing ? "文件已经从硬盘上删除了（可能是在 Plex 或共享文件夹里删的）"
+    : j.status === "done" ? "这个任务没有可以播放的文件"
+    : `${esc(STAGES[j.stage] || j.stage || "处理中")} ${j.progress ? j.progress.toFixed(0) + "%" : ""}<br>${esc(j.speed || "")}`;
+}
+function closeWatch() {
+  stopMedia();
+  watching = null; document.body.style.overflow = "";
+  hide($("#watch"), () => { $("#watchBody").innerHTML = ""; });
+}
+async function act(id, action, close) {
+  const r = await (await fetch(`/api/jobs/${id}/${action}`, {method: "POST"})).json();
+  toast(r.error || (action === "delete" && r.msg.startsWith("still") ? "正在停止，稍后再移除"
+    : {cancel: "正在取消", retry: "已重新开始", delete: "已从列表移除（文件还在）"}[action]));
+  if (close) closeWatch();
+  await refresh();
+  if (watching) openWatch(watching.id, watching.part);
+}
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!$("#privacySheet").hidden) hide($("#privacySheet"));
+  else if (!$("#addSheet").hidden) hide($("#addSheet"));
+  else if (!$("#androidSheet").hidden) hide($('#androidSheet'));
+  else if (!$("#removeSheet").hidden) hide($("#removeSheet"));
+  else if (!$("#accountSheet").hidden) hide($("#accountSheet"));
+  else if (watching) closeWatch();
+  else if (selecting) toggleSelect();
+});
+
+/* ---------- privacy mode (hidden menu: tap the avatar three times) ---------- */
+// Triple tap, or press and hold for a second, opens the privacy menu; a single tap opens the account menu
+let taps = 0, tapTimer, holdTimer, held = false;
+function avatarTap() {
+  if (held) { held = false; return; }  // this click ends a long press that already opened the menu
+  taps++; clearTimeout(tapTimer);
+  if (taps >= 3) { taps = 0; openPrivacy(); return; }
+  tapTimer = setTimeout(() => { const n = taps; taps = 0; if (n) openAccount(); }, 500);
+}
+(() => {
+  const av = document.getElementById("avatar");
+  const start = () => { held = false; clearTimeout(holdTimer); holdTimer = setTimeout(() => { held = true; taps = 0; clearTimeout(tapTimer); openPrivacy(); }, 1000); };
+  const stop = () => clearTimeout(holdTimer);
+  av.addEventListener("pointerdown", start);
+  ["pointerup", "pointerleave", "pointercancel"].forEach(ev => av.addEventListener(ev, stop));
+  av.addEventListener("contextmenu", e => e.preventDefault());
+})();
+function lockPrivacy(quiet) {
+  if (!privacyToken) return;
+  privacyToken = null; clearTimeout(privacyTimer);
+  if (!$("#privacySheet").hidden) hide($("#privacySheet"));
+  if (selecting) toggleSelect();
+  if (!quiet) toast("已隐藏");
+  // leave the player alone unless it's showing something that is now hidden again
+  if (watching && (state.jobs.find(j => j.id === watching.id) || {}).hidden) closeWatch();
+  refresh();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hiddenSince = Date.now();
+  else if (privacyToken && Date.now() - hiddenSince > 60000) lockPrivacy(true);
+});
+async function privacyApi(body) {
+  const r = await fetch("/api/privacy", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (r.status === 403) { lockPrivacy(true); toast("隐私菜单已锁上，请重新打开"); return false; }
+  return true;
+}
+async function openPrivacy() {
+  if (!state.user) { openAccount(); toast("先登录账号"); return; }
+  if (!privacyToken) {
+    $("#privacyBody").innerHTML = `
+      <h2>验证身份</h2>
+      <p class="hint">输入账号 ${esc(state.user)} 的密码。</p>
+      <form id="unlockForm">
+        <input type="password" id="unlockPw" placeholder="密码" autocomplete="current-password">
+        <div class="form-err" id="unlockErr" hidden></div>
+        <button class="btn wide">确定</button>
+      </form>`;
+    $("#privacySheet").hidden = false;
+    setTimeout(() => $("#unlockPw").focus(), 50);
+    $("#unlockForm").onsubmit = async e => {
+      e.preventDefault();
+      const r = await fetch("/api/privacy/unlock", {method: "POST", headers: {"Content-Type": "application/json"},
+                                                    body: JSON.stringify({password: $("#unlockPw").value})});
+      const j = await r.json();
+      if (!r.ok) { $("#unlockErr").textContent = j.error; $("#unlockErr").hidden = false; $("#unlockPw").select(); return; }
+      privacyToken = j.token;
+      clearTimeout(privacyTimer);
+      privacyTimer = setTimeout(() => lockPrivacy(true), j.expires_in * 1000);
+      openPrivacy();
+    };
+    return;
+  }
+  const r = await fetch("/api/privacy");
+  if (!r.ok) { lockPrivacy(true); return openPrivacy(); }
+  const p = await r.json();
+  const tagChips = p.tags.map((t, i) =>
+    `<span class="ptag">#${esc(t)} <button onclick='savePrivacyTags(${esc(JSON.stringify(p.tags.filter((_, k) => k !== i)))})'>✕</button></span>`).join("");
+  $("#privacyBody").innerHTML = `
+    <h2>隐私</h2>
+    <div class="psec">显示隐藏的内容</div>
+    <label class="check" style="margin-bottom:16px"><input type="checkbox" id="revealBox" ${p.revealed ? "checked" : ""}> 显示
+      <span style="color:var(--muted)">只在这个页面有效；刷新页面、离开超过 1 分钟或 30 分钟后会自动恢复隐藏</span></label>
+    <div class="psec">按标签隐藏</div>
+    <div class="ptags">${tagChips || '<span class="sub">还没有</span>'}</div>
+    <form id="ptagForm" class="row" style="margin:10px 0 16px">
+      <input type="text" id="ptagInput" list="ptagList" placeholder="输入或选择标签" autocomplete="off" style="margin:0">
+      <datalist id="ptagList">${p.library_tags.filter(t => !p.tags.includes(t)).map(t => `<option value="${esc(t)}">`).join("")}</datalist>
+      <button class="btn" style="flex:none">添加</button>
+    </form>
+    <div class="row"><button class="btn plain" onclick="lockPrivacy()">锁上</button><button class="btn" onclick="hide($('#privacySheet'))">完成</button></div>`;
+  $("#privacySheet").hidden = false;
+  $("#revealBox").onchange = async e => { if (await privacyApi({reveal: e.target.checked})) refresh(); };
+  $("#ptagForm").onsubmit = e => {
+    e.preventDefault();
+    const t = $("#ptagInput").value.trim().replace(/^#/, "");
+    if (t && !p.tags.includes(t)) savePrivacyTags([...p.tags, t]);
+  };
+}
+async function savePrivacyTags(tags) {
+  if (await privacyApi({tags})) { await refresh(); openPrivacy(); }
+}
+
+/* ---------- removing (one or many) ---------- */
+function toggleSelect() {
+  selecting = !selecting; selected.clear();
+  $("#manageBtn").textContent = selecting ? "完成" : "批量管理";
+  render();
+}
+function togglePick(id) { selected.has(id) ? selected.delete(id) : selected.add(id); render(); }
+function selectAll() {
+  const all = shown.every(j => selected.has(j.id));
+  shown.forEach(j => all ? selected.delete(j.id) : selected.add(j.id)); render();
+}
+function updateSelbar() {
+  $("#selbar").hidden = !selecting;
+  $("#selCount").textContent = `已选 ${selected.size} 个`;
+  $("#selRemove").disabled = !selected.size;
+  document.body.style.paddingBottom = selecting ? "72px" : "";
+}
+function askRemove(ids) {
+  if (!ids.length) return;
+  const one = ids.length === 1 ? state.jobs.find(j => j.id === ids[0]) : null;
+  const busy = ids.filter(id => ACTIVE.includes((state.jobs.find(j => j.id === id) || {}).status)).length;
+  $("#removeTitle").textContent = one ? "移除这个内容？" : `移除 ${ids.length} 个内容？`;
+  $("#removeHint").textContent = (one ? `「${titleOf(one)}」` : "") + "会从列表里移除。"
+    + (busy ? `其中 ${busy} 个还在下载，会先停止。` : "") + "不勾选下面的选项，硬盘上的文件会保留，Plex 里也还在。";
+  $("#removeFiles").checked = false;
+  $("#removeGo").textContent = "移除";
+  $("#removeFiles").onchange = () => $("#removeGo").textContent = $("#removeFiles").checked ? "移除并删除文件" : "移除";
+  $("#removeGo").onclick = () => doRemove(ids, $("#removeFiles").checked);
+  $("#removeSheet").hidden = false;
+}
+async function doRemove(ids, files) {
+  const btn = $("#removeGo"); btn.disabled = true;
+  try {
+    const r = await (await fetch("/api/jobs/remove", {method: "POST", headers: {"Content-Type": "application/json"},
+                                                     body: JSON.stringify({ids, files})})).json();
+    let msg = `已移除 ${(r.removed || 0) + (r.kept_shared || 0)} 个` + (files ? `，删除了 ${r.files} 个文件` : "，文件保留");
+    if (r.kept_shared) msg += `；${r.kept_shared} 个的文件别的账号还在用，文件没删`;
+    if (r.stopping) msg += `；${r.stopping} 个正在停止，稍后再移除一次`;
+    toast(msg);
+  } catch { toast("移除失败，连不上 Pi"); }
+  btn.disabled = false;
+  hide($("#removeSheet"));
+  if (watching && ids.includes(watching.id)) closeWatch();
+  if (selecting) toggleSelect();
+  refresh();
+}
+
+/* ---------- ways to send links in (no manual adding on the page) ---------- */
+function openAndroid() { hide($("#accountSheet")); hide($("#addSheet")); $("#androidSheet").hidden = false; }
+// navigator.clipboard needs HTTPS; this page is plain HTTP on the LAN, so copy through a hidden textarea
+function copyText(el) {
+  const t = document.createElement("textarea");
+  t.value = el.textContent; t.readOnly = true; t.style.position = "fixed"; t.style.opacity = "0";
+  document.body.appendChild(t); t.select(); t.setSelectionRange(0, t.value.length);
+  const ok = document.execCommand("copy"); t.remove();
+  toast(ok ? "已复制" : "复制失败，请长按选择");
+}
+function shareTips() {
+  const bm = `javascript:void(window.open('${location.origin}/add?url='+encodeURIComponent(location.href),'_blank','width=420,height=160'))`;
+  return `<div class="psec" style="margin-top:18px">发送到拾光</div>
+    <div class="tips" style="margin-top:0">
+      ▶ iPhone：在手机上打开本页，<a href="/shortcut">安装「发送到拾光」快捷指令</a>，之后在任意 App 的分享菜单里点它<br>
+      ▶ 安卓：用免费的 HTTP Shortcuts 加一个分享入口，<a href="#" onclick="openAndroid(); return false">看设置步骤</a><br>
+      ▶ 电脑：把 <a href="${esc(bm)}" onclick="event.preventDefault(); toast('把这个链接拖到浏览器书签栏使用')">发送到拾光</a> 拖到书签栏，在任何网页上点一下就会下载当前页面
+    </div>`;
+}
+
+function openAdd() {
+  $("#addTips").innerHTML = shareTips();
+  $("#addSheet").hidden = false; setTimeout(() => $("#addText").focus(), 50);
+}
+async function send(body) {
+  const r = await fetch("/api/add", {method: "POST", body});
+  const j = await r.json();
+  const dup = (j.duplicates || []).length, link = (j.linked || []).length, fresh = (j.ids || []).length - dup - link;
+  const subsNew = (j.subs || []).filter(s => s.how === "new").length, subsDup = (j.subs || []).length - subsNew;
+  toast(!r.ok ? (j.error === "No link found" ? "没找到链接" : j.error)
+    : [subsNew ? `开始追更 ${subsNew} 个 UP 主，正在获取视频列表` : "", subsDup ? `${subsDup} 个 UP 主已经在追了` : "",
+       fresh ? `已开始下载 ${fresh} 个` : "", link ? `${link} 个别人已经下过，直接加进来了` : "",
+       dup ? `${dup} 个已经在列表里了` : ""].filter(Boolean).join("，"));
+  if (r.ok && dup && !fresh && j.ids.length === 1) { hide($("#addSheet")); await refresh(); openWatch(j.ids[0]); return; }
+  if (r.ok) { hide($("#addSheet")); chip = (j.subs || []).length && !(j.ids || []).length ? "subs" : "all"; }
+  refresh();
+}
+function sendText(t) { const f = new FormData(); f.append("text", t); return send(f); }
+function sendFile(file) { const f = new FormData(); f.append("torrent", file); return send(f); }
+$("#addForm").onsubmit = e => { e.preventDefault(); const t = $("#addText").value.trim(); if (t) { sendText(t); $("#addText").value = ""; } };
+$("#file").onchange = () => { for (const f of $("#file").files) sendFile(f); $("#file").value = ""; };
+
+let dragDepth = 0;
+document.addEventListener("dragenter", e => { e.preventDefault(); dragDepth++; $("#dropAll").hidden = false; });
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#dropAll").hidden = true; } });
+document.addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; $("#dropAll").hidden = true;
+  const files = [...e.dataTransfer.files].filter(f => f.name.endsWith(".torrent"));
+  if (files.length) { files.forEach(sendFile); return; }
+  const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/html");
+  if (t) sendText(t); else toast("没找到链接");
+});
+document.addEventListener("paste", e => {
+  if (document.activeElement.tagName === "INPUT") return;
+  const t = e.clipboardData.getData("text"); if (/https?:\/\/|magnet:/.test(t)) sendText(t);
+});
+
+/* ---------- account ---------- */
+async function openAccount() {
+  if (!state.user) { renderAuth("login"); $("#accountSheet").hidden = false; return; }
+  let acc = {devices: [], counts: {}};
+  try { acc = await (await fetch("/api/account")).json(); } catch { /* still show the logout button */ }
+  const rows = acc.devices.map(d => {
+    const names = [d.label, ...d.phones];
+    const n = names.reduce((sum, x) => sum + (acc.counts[x] || 0) + (acc.counts["📱 " + x] || 0), 0);
+    return `<div class="dev">
+      <div class="dev-main" onclick="filterDevice(${esc(JSON.stringify(names[d.phones.length ? 1 : 0]))})">
+        <b>${esc(d.label)}</b>${d.current ? ' <span class="cur">当前设备</span>' : ""}
+        ${d.phones.length ? `<div class="sub">快捷指令：${d.phones.map(esc).join("、")}</div>` : ""}
+        <div class="sub">${n} 个内容 · 最近使用 ${esc(ago(d.seen))}</div>
+      </div>
+      ${d.current ? "" : `<button class="btn plain" onclick="removeDevice('${d.id}', false)">移除</button>`}
+    </div>`;
+  }).join("");
+  $("#accountBody").innerHTML = `
+    <h2>${esc(state.user)}${state.admin ? "（管理员）" : ""}</h2>
+    <p style="color:var(--muted);margin:0 0 12px;font-size:13px">已登录这个账号的设备（${acc.devices.length} 台）。在其他手机、电脑上登录同一账号即可加入；点设备只看它添加的内容。</p>
+    <div class="devs">${rows || '<div class="sub">还没有设备</div>'}</div>
+    <button class="btn plain wide" style="margin-top:14px" onclick="logout()">退出登录</button>
+    ${shareTips()}`;
+  $("#accountSheet").hidden = false;
+}
+/* login / register: one mode at a time with a single button, inline checks and errors */
+function renderAuth(mode, keep = {}) {
+  const reg = mode === "register";
+  $("#accountBody").innerHTML = `
+    <h2>${reg ? "注册账号" : "登录"}</h2>
+    <p class="hint">${reg ? "注册后，这台设备会自动加入账号。以后在其他手机、电脑上登录同一个账号，所有设备的内容会合在一起。"
+                         : "登录后，这台设备之前添加的内容会合并到账号里。"}</p>
+    <form id="authForm" novalidate>
+      <label class="field">
+        <input type="text" id="username" placeholder="用户名" autocomplete="username" autocapitalize="off" spellcheck="false"
+               maxlength="32" value="${esc(keep.name || "")}">
+        <span class="note" id="nameNote">${reg ? "字母、数字、汉字或 . - _，最多 32 个" : ""}</span>
+      </label>
+      <label class="field pw">
+        <input type="password" id="password" placeholder="${reg ? "设置密码（至少 4 位）" : "密码"}"
+               autocomplete="${reg ? "new-password" : "current-password"}" value="${esc(keep.password || "")}">
+        <button type="button" class="eye" onclick="togglePw()" aria-label="显示密码">显示</button>
+      </label>
+      ${reg ? `<label class="field"><input type="password" id="password2" placeholder="再输一次密码" autocomplete="new-password">
+               <span class="note" id="pw2Note"></span></label>` : ""}
+      <div class="form-err" id="authErr" hidden></div>
+      <button class="btn wide" id="authBtn">${reg ? "注册并登录" : "登录"}</button>
+    </form>
+    ${state.external ? `<p class="hint" style="margin-top:12px">你在外网访问拾光，需要先登录。新账号只能在家里的网络注册。</p>`
+    : `<div class="switch">${reg ? `已经有账号？<a href="#" onclick="renderAuth('login', authValues()); return false">去登录</a>`
+                              : `还没有账号？<a href="#" onclick="renderAuth('register', authValues()); return false">注册一个</a>`}</div>`}
+    ${shareTips()}`;
+  const f = $("#authForm"), name = $("#username"), pw = $("#password"), pw2 = $("#password2");
+  setTimeout(() => (name.value ? pw : name).focus(), 50);
+  const err = t => { $("#authErr").textContent = t || ""; $("#authErr").hidden = !t; };
+  [name, pw, pw2].forEach(el => el && el.addEventListener("input", () => err("")));
+  if (reg) {
+    let timer;
+    name.addEventListener("input", () => {
+      clearTimeout(timer);
+      const v = name.value.trim(), note = $("#nameNote");
+      note.className = "note";
+      if (!v) { note.textContent = "字母、数字、汉字或 . - _，最多 32 个"; return; }
+      if (!/^[\w.\-\u4e00-\u9fff]{1,32}$/.test(v)) { note.textContent = "只能用字母、数字、汉字或 . - _"; note.className = "note bad"; return; }
+      timer = setTimeout(async () => {
+        const r = await (await fetch("/api/name-available?name=" + encodeURIComponent(v))).json();
+        if (name.value.trim() !== v) return;
+        note.textContent = r.available ? "✓ 可以用" : "这个用户名已被注册";
+        note.className = "note " + (r.available ? "good" : "bad");
+      }, 300);
+    });
+    pw2.addEventListener("input", () => {
+      const note = $("#pw2Note");
+      note.textContent = pw2.value && pw2.value !== pw.value ? "两次输入的密码不一样" : "";
+      note.className = "note bad";
+    });
+    if (name.value) name.dispatchEvent(new Event("input"));
+  }
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const n = name.value.trim(), p = pw.value;
+    if (!n) { err("请输入用户名"); name.focus(); return; }
+    if (!p) { err("请输入密码"); pw.focus(); return; }
+    if (reg && p.length < 4) { err("密码至少 4 位"); pw.focus(); return; }
+    if (reg && p !== pw2.value) { err("两次输入的密码不一样"); pw2.focus(); return; }
+    const btn = $("#authBtn"); btn.disabled = true; btn.textContent = reg ? "注册中…" : "登录中…";
+    try {
+      const r = await fetch("/api/" + mode, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name: n, password: p})});
+      const j = await r.json();
+      if (r.ok) {
+        hide($("#accountSheet"));
+        toast(reg ? `欢迎，${n}！这台设备已加入账号` : `欢迎回来，${n}`);
+        await refresh();
+        return;
+      }
+      err(j.error);
+      if (!reg && r.status === 403) { pw.select(); pw.focus(); }
+    } catch { err("连不上 Pi，稍后再试"); }
+    btn.disabled = false; btn.textContent = reg ? "注册并登录" : "登录";
+  };
+}
+function authValues() { return {name: $("#username")?.value || "", password: $("#password")?.value || ""}; }
+function togglePw() {
+  const show = $("#password").type === "password";
+  document.querySelectorAll("#authForm input[type=password], #authForm input.shown").forEach(el => {
+    el.type = show ? "text" : "password"; el.classList.toggle("shown", show);
+  });
+  $(".eye").textContent = show ? "隐藏" : "显示";
+}
+
+function filterDevice(name) { deviceFilter = name; chip = "device"; hide($("#accountSheet")); render(); }
+async function removeDevice(id, current) {
+  await fetch(`/api/devices/${id}/remove`, {method: "POST"});
+  toast(current ? "已退出" : "已移除这台设备（它添加的内容还在账号里）");
+  await refresh();
+  if (state.user) openAccount(); else hide($("#accountSheet"));
+}
+async function logout() { await fetch("/api/logout", {method: "POST"}); hide($("#accountSheet")); toast("已退出"); refresh(); }
+
+/* ---------- search ---------- */
+function searchFor(t) { closeWatch(); $("#search").value = t; query = t; refresh(); window.scrollTo(0, 0); }
+let searchTimer;
+$("#search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { query = $("#search").value.trim(); refresh(); }, 250); };
+
+refresh();
+</script>
+</body>
+</html>
