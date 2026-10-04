@@ -101,16 +101,16 @@ def video_gps(path):
 def note_dict(r, marks=None, seen=None):
     media = json.loads(r["media"])
     d = {"id": r["id"], "text": r["text"], "created": r["created"], "updated": r["updated"], "device": r["device"],
-         "pending": bool(r["pending"]),
+         "pending": bool(r["pending"]), "tags": json.loads(r["tags"] or "[]"),
          "media": [{"kind": m["kind"], "duration": m.get("duration"), "poster": bool(m.get("poster")),
-                    "transcript": m.get("transcript", ""), "place": m.get("place")} for m in media],
+                    "transcript": m.get("tidy") or m.get("transcript", ""), "place": m.get("place")} for m in media],
          "place": next((m["place"] for m in media if m.get("place")), None)}
     if marks:
         d["marks"] = marks
         missing = [k for k in marks if k not in r["text"]]
         if missing:  # found in what's said in a voice note / video, or written on a photo: show where
             d["match"], d["match_where"] = next(((search.snippet(m.get(k, ""), missing[0]), label) for m in media
-                                                 for k, label in (("transcript", "语音"), ("ocr", "图中文字"))
+                                                 for k, label in (("tidy", "语音"), ("transcript", "语音"), ("ocr", "图中文字"))
                                                  if missing[0] in m.get(k, "")), ("", ""))
     if seen:
         d["seen"] = seen  # photos that look like the search

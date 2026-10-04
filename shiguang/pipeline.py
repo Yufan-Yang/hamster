@@ -271,7 +271,10 @@ def run_job(job_id):
             update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=time.time() + delay,
                    error=f"{str(e)[:900]}\n（{wait}后自动重试，第 {attempts}/{len(delays)} 次，已下载的部分会保留）")
         else:
-            update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=None, error=str(e)[:1000])
+            update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=None, error=str(e)[:1000],
+                   advice="")
+            if LLM_API_KEY:  # failed for good: why, in plain words, and what to do
+                board.publish("explain_failure", f"job:{job_id}", 50, force=True)
     finally:
         finish_links(job_id)
         ring("jobs", "tasks")  # a download slot is free; the CPU may be (the Pi's idle work waits for that)

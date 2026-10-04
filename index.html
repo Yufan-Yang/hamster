@@ -326,6 +326,8 @@
   .otd { padding: 10px 14px; margin-bottom: 18px; background: var(--panel); }
   .otdh { font-size: 24px; line-height: 1.3; color: var(--accent); }
   .otd .note { box-shadow: none; }
+  .ntags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+  .ntags .chip { font-size: 12px; padding: 0 6px; }
   .places { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 14px; }
   .similar { border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 8px 12px; margin-top: 14px; }
   .similar .psec { border-color: #1d1b26; }
@@ -938,7 +940,7 @@ async function loadNotes(older) {
       const edge = r.notes[r.notes.length - 1];
       const older = keepOlder ? notesState.notes.filter(n => !ids.has(n.id) && (n.created < edge.created || (n.created === edge.created && n.id < edge.id))) : [];
       notesState = {notes: [...r.notes, ...older], more: keepOlder ? notesState.more : r.more, q: query,
-                    onthisday: r.onthisday || [], places: r.places || []};
+                    onthisday: r.onthisday || [], places: r.places || [], recap: r.recap || null};
     }
     if (chip === "notes") { renderNotes(); schedule(); }
   } catch (e) { toast("连不上 Pi"); }
@@ -972,8 +974,19 @@ function noteCard(n) {
   return `<div class="px note" id="note${n.id}">
     <div class="ntime"><span>${hhmm(n.created)}${n.place ? " · " + esc(n.place) : ""}${n.device ? " · " + esc(n.device.replace(/^📱\s*/, "")) : ""}</span></div>
     ${text}${n.match ? `<div class="nsay">${noteWhere(n)}</div>` : ""}${noteMedia(n)}
+    ${(n.tags || []).length && !editing ? `<div class="ntags">${n.tags.map(t => `<button class="chip" onclick="searchNotes(${esc(JSON.stringify(t))})">${esc(t)}</button>`).join("")}</div>` : ""}
     <div class="nacts">${acts}</div>
   </div>`;
+}
+async function recapNow() {
+  await fetch("/api/notes/recap", {method: "POST"});
+  toast("正在回顾，过一会儿再看这里");
+  setTimeout(() => { notesBody = ""; loadNotes(); }, 20000);
+}
+function jumpNote(id) {
+  focusNote = id;
+  const f = document.getElementById("note" + id);
+  if (f) { focusNote = null; f.scrollIntoView({block: "center"}); f.classList.add("flash"); }
 }
 function renderNotes() {
   if (editingNote) return;  // don't wipe what you're typing
@@ -986,8 +999,14 @@ function renderNotes() {
   if (!notesState.notes.length) html = `<div class="empty" style="padding:40px 0">${query ? "随记里没有找到匹配的内容" : notesState.q === null ? "正在加载…" : "还没有随记。写点什么，或者拍张照片"}</div>`;
   if (!query) {
     // 那年今天: what you noted on this day in earlier years; and the places notes were made (tap to see those)
-    const otd = notesState.onthisday || [], places = notesState.places || [];
-    const top = (otd.length ? `<div class="px otd"><div class="otdh">那年今天</div>${otd.map(n =>
+    const otd = notesState.onthisday || [], places = notesState.places || [], rc = notesState.recap;
+    // the week looked back on (Monday mornings, or 回顾最近 7 天); its highlights jump to their notes
+    const recap = rc && rc.text ? `<div class="px otd"><div class="otdh">一周回顾 <span class="sub">${esc(rc.start.slice(5))} ~ ${esc(rc.end.slice(5))} · ${rc.notes} 条</span></div>
+        <p style="margin:6px 0">${esc(rc.text)}</p>${(rc.highlights || []).map(h =>
+        `<button class="link" style="display:block;text-align:left" onclick="jumpNote(${h.note})">· ${esc(h.line)}</button>`).join("")}
+        <button class="link" onclick="recapNow()">重新回顾最近 7 天</button></div>`
+      : notesState.notes.length >= 3 ? `<p class="hint"><button class="link" onclick="recapNow()">让 AI 回顾一下最近 7 天</button></p>` : "";
+    const top = recap + (otd.length ? `<div class="px otd"><div class="otdh">那年今天</div>${otd.map(n =>
         `<div class="nday"><b>${new Date(n.created * 1000).getFullYear()} 年 · ${new Date().getFullYear() - new Date(n.created * 1000).getFullYear()} 年前</b></div>${noteCard(n)}`).join("")}</div>` : "")
       + (places.length ? `<div class="places"><span class="sub">地点</span>${places.map(([p, c]) =>
         `<button class="chip" onclick="searchNotes(${esc(JSON.stringify(p))})">${esc(p)} ${c}</button>`).join("")}</div>` : "");
@@ -1311,6 +1330,7 @@ function openWatch(id, part = 0, t = 0) {
     ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
     <div id="similarBox"></div>
     <div id="chapters"></div>
+    ${j.advice && j.status === "failed" ? `<div class="answer" style="margin-bottom:8px">${esc(j.advice)}</div>` : ""}
     ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
     ${hitList(j)}
     ${desc}`;

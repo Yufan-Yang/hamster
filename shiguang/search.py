@@ -335,8 +335,8 @@ def _note_find(hay, low, tok):
 
 def note_marks(r, term):
     """The matched bits of text when every word of `term` is in the note (text or what's said in it), else None."""
-    hay = r["text"] + "\n" + "\n".join(m.get("transcript", "") + "\n" + m.get("ocr", "") + "\n" + m.get("place", "")
-                                       for m in json.loads(r["media"]))
+    hay = r["text"] + "\n" + "\n".join(m.get("transcript", "") + "\n" + m.get("tidy", "") + "\n" + m.get("ocr", "") + "\n"
+                                       + m.get("place", "") for m in json.loads(r["media"])) + "\n" + " ".join(json.loads(dict(r).get("tags") or "[]"))
     low, marks = hay.casefold(), []
     for tok in term.casefold().split():
         m = _note_find(hay, low, tok)

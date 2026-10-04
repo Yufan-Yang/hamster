@@ -16,7 +16,7 @@ else:
     # `import grabber as G` (refresh_metadata.py, one-off scripts): G.anything finds it in whichever module has it
     def __getattr__(name):
         for mod in (shiguang.core, shiguang.llm, shiguang.download, shiguang.library, shiguang.search, shiguang.board,
-                    shiguang.tasks, shiguang.notes, shiguang.usage, shiguang.pipeline, shiguang.telegram,
+                    shiguang.tasks, shiguang.notes, shiguang.ask, shiguang.usage, shiguang.pipeline, shiguang.telegram,
                     shiguang.channels, shiguang.web, shiguang.main):
             if hasattr(mod, name):
                 return getattr(mod, name)

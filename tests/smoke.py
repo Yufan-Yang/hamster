@@ -90,6 +90,15 @@ def whole_category():
 
 
 check("a category chip gets all of its videos", whole_category)
+
+
+def note_fields():
+    d = get("/api/notes")
+    assert "recap" in d, d.keys()
+    assert all("tags" in n for n in d["notes"]), "tags"
+
+
+check("notes carry tags and the weekly recap", note_fields)
 check("usage", lambda: get("/api/usage?days=7"))
 check("account", lambda: get("/api/account"))
 check("digests", lambda: get("/api/digests"))

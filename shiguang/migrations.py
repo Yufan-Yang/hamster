@@ -57,6 +57,8 @@ STEPS = [
     (13, lambda db: add(db, "jobs", "cancel", "INTEGER DEFAULT 0")),  # set by the page, read by the job
     # which image model made a picture vector: vectors of different models can't be compared
     (14, lambda db: add(db, "vec", "model", "TEXT DEFAULT 'chinese-clip-vit-base-patch16-int8'")),
+    (15, lambda db: add(db, "notes", "tags", "TEXT DEFAULT '[]'")),  # AI tags of a 随记
+    (16, lambda db: add(db, "jobs", "advice", "TEXT DEFAULT ''")),  # why a download failed and what to do (AI)
 ]
 
 

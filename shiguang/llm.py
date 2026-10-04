@@ -58,6 +58,7 @@ Reply with one JSON object with exactly these keys:
 SUMMARY_FIELDS = {
     "summary": "2-4 sentences: what it is about and what is said",
     "key_points": "3-6 short strings",
+    "tags": "3-6 short tags for what is actually discussed: topics, people, places, events",
 }
 SUMMARY_SYSTEM = """You summarise a video for its owner from its transcript.
 Write in {lang}, even when the video is in another language.
@@ -170,10 +171,11 @@ def classify(job_id, name, meta, guess):
     meta = {k: v for k, v in meta.items() if v}
     if len(meta.get("description") or "") > 1500:  # the start of a description is enough to classify
         meta["description"] = meta["description"][:1500] + " …[cut]"
-    parts = [f"Name: {name}", "Metadata:\n" + json.dumps(meta, ensure_ascii=False, indent=1)]
+    # The tag list first: it's the same from one video to the next, and DeepSeek charges 1/50 for input it has seen
+    # (a request's opening that matches an earlier one); what differs per video comes after it
     known = library_tags()[:200]
-    if known:
-        parts.append("Tags already in the library: " + "、".join(known))
+    parts = ["Tags already in the library: " + "、".join(known)] if known else []
+    parts += [f"Name: {name}", "Metadata:\n" + json.dumps(meta, ensure_ascii=False, indent=1)]
     if guess:
         parts.append("Filename parser guess:\n" + json.dumps({k: str(v) for k, v in guess.items()}, ensure_ascii=False))
     usage = {}
@@ -334,6 +336,10 @@ def summarize(job_id, a, transcript, transcript_note):
         if isinstance(points, str):  # now and then a single string instead of a list
             points = [x.strip(" -•·") for x in re.split(r"[\n；;]+", points)]
         a["key_points"] = [str(x) for x in points if str(x).strip()] if isinstance(points, list) else []
+        # tags from what's said (the first ones came from the title and description only); the old ones stay
+        # first: the creator and the people in it
+        new = [str(t).strip() for t in out.get("tags") or [] if str(t).strip()] if isinstance(out.get("tags"), list) else []
+        a["tags"] = list(dict.fromkeys((a.get("tags") or []) + new))[:12]
     except Exception as e:
         a["note"] = f"AI summary failed: {e}"
     return a

@@ -72,14 +72,14 @@ def task_payload(kind, target):
             raise ValueError(f"no note {n.group(1)}")
         return {"note": int(n.group(1)), "title": (row["text"] or "随记")[:30],
                 "files": [{"file": m["file"], "kind": m["kind"]} for m in json.loads(row["media"]) if m.get("todo")]}
-    d = re.fullmatch(r"digest:(.+):(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)", target)
+    d = re.fullmatch(r"(?:digest|notes-recap):(.+):(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)", target)
     if d:
         return {"owner": d.group(1), "start": d.group(2), "end": d.group(3), "title": f"{d.group(2)} ~ {d.group(3)}"}
     m = re.fullmatch(r"job:(\d+)(?::(\d+))?", target)
     if not m:
         raise ValueError(f"unknown target {target}")
     row = q("SELECT * FROM jobs WHERE id=?", (int(m.group(1)),), one=True)
-    if not row or row["status"] != "done":
+    if not row or (row["status"] != "done" and not (kind == "explain_failure" and row["status"] == "failed")):
         raise ValueError(f"no finished job {m.group(1)}")
     a = json.loads(row["analysis"] or "{}")
     out = {"job": row["id"], "title": a.get("title") or row["title"]}

@@ -842,6 +842,7 @@ def notes_list():
             for p in {m.get("place") for m in json.loads(r["media"]) if m.get("place")}:
                 places[p] = places.get(p, 0) + 1
         extra["places"] = sorted(places.items(), key=lambda x: -x[1])[:20]
+        extra["recap"] = kv_get(f"notes_recap:{g.owner}")  # last week, looked back on (Monday mornings)
     return jsonify(notes=[notes.note_dict(r, term) for r in rows[:50]], more=len(rows) > 50, **extra)
 
 
@@ -861,7 +862,9 @@ def note_add():
     q("UPDATE notes SET media=?, pending=? WHERE id=?",
       (json.dumps(media, ensure_ascii=False), int(any(m["todo"] for m in media)), nid))
     if media:
-        board.publish("note_media", f"note:{nid}", 60, force=True)
+        board.publish("note_media", f"note:{nid}", 60, force=True)  # note_ai follows it
+    elif LLM_API_KEY:
+        board.publish("note_ai", f"note:{nid}", 30)
     return jsonify(note=notes.note_dict(notes.note_row(nid)))
 
 
@@ -887,6 +890,8 @@ def note_edit(nid):
     created = notes.note_time(body.get("created")) or row["created"]
     q("UPDATE notes SET text=?, media=?, created=?, updated=? WHERE id=?",
       (text, json.dumps(media, ensure_ascii=False), created, time.time(), nid))
+    if text != row["text"] and LLM_API_KEY:
+        board.publish("note_ai", f"note:{nid}", 30, force=True)
     return jsonify(note=notes.note_dict(notes.note_row(nid)))
 
 
@@ -984,6 +989,15 @@ def digests_list():
                 (f"digest:{g.owner}:%",), one=True)
     return jsonify(digests=[{"id": r["id"], **json.loads(r["body"]), "created": r["created"]} for r in rows],
                    pending=bool(pending))
+
+
+@app.post("/api/notes/recap")
+def notes_recap_now():
+    """The last 7 days of 随记, looked back on now (the automatic one comes on Monday mornings)."""
+    end = time.strftime("%Y-%m-%d")
+    start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 6 * 86400))
+    board.publish("notes_recap", f"notes-recap:{g.owner}:{start}:{end}", 70, force=True)
+    return jsonify(ok=True)
 
 
 @app.post("/api/digests/now")

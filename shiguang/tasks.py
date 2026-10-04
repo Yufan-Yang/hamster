@@ -8,12 +8,13 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 
 from pathlib import Path
 
 from . import board, download, library, llm, notes, search
 from .migrations import once
-from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, log_usage, q, update)
+from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, kv_set, log_usage, q, update)
 
 
 IDLE_WHISPER_MODEL = os.environ.get("IDLE_WHISPER_MODEL", "small")
@@ -72,6 +73,7 @@ def pi_summarize(task, beat):
     a.pop("note", None)
     a = llm.summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
     update(jid, analysis=a, stage="")
+    llm.merge_tags_if_new()  # tags it brought that mean the same as ones in the library: folded in
     board.publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True)  # key points changed
     vids = [f for f in json.loads(row["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
     if vids:
@@ -229,6 +231,9 @@ def publish_digests():
     start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
     for r in q("SELECT DISTINCT owner FROM subs"):
         board.publish("digest", f"digest:{r['owner']}:{start}:{end}", 40)
+    t0 = time.mktime(time.strptime(start, "%Y-%m-%d"))
+    for r in q("SELECT DISTINCT owner FROM notes WHERE created >= ?", (t0,)):
+        board.publish("notes_recap", f"notes-recap:{r['owner']}:{start}:{end}", 40)
 
 
 @board.task("similar", "找重复和切片", "light")
@@ -488,4 +493,105 @@ def pi_save_note_media(task, beat):
     q("UPDATE notes SET media=?, pending=? WHERE id=?",
       (json.dumps(media, ensure_ascii=False), int(any(m.get("todo") for m in media)), nid))
     board.drop_parent_result(task, {"items": len(items)})
+    board.publish("note_ai", f"note:{nid}", 30, force=True)  # now there's what was said: tags, punctuation
     return {"items": len(items)}
+
+
+NOTE_AI_SYSTEM = """You help with someone's private notes (a diary). Given one note: its text, what was said in its voice
+recordings or videos (speech-to-text: unpunctuated, may have misheard words), text read off its photos, and where it
+was made. Reply with one JSON object: {{"tags": [...], "tidy": {{"<file>": "...", ...}}}}
+- tags: 1-4 short Chinese tags for what the note is about (a person's name, a place, an activity, a topic). No dates.
+- tidy: for each recording given, the same words with punctuation and paragraphs (blank lines between them), obvious
+  mishearings fixed only when the meaning is clear; never add or drop content. Leave out recordings under a sentence."""
+
+
+@board.task("note_ai", "整理随记", "ai-quick")
+def pi_note_ai(task, beat):
+    """A 随记's tags, and its voice recordings with punctuation (one call without thinking, ~¥0.001)."""
+    nid = task["payload"]["note"]
+    row = q("SELECT text, media FROM notes WHERE id=?", (nid,), one=True)
+    if not row:
+        return {"skipped": "note deleted"}
+    media = json.loads(row["media"])
+    said = {m["file"]: m["transcript"] for m in media if len(m.get("transcript") or "") >= 12}
+    parts = [f"TEXT: {row['text']}"] + [f"RECORDING {f}: {t}" for f, t in said.items()]
+    parts += [f"ON A PHOTO: {m['ocr']}" for m in media if m.get("ocr")]
+    parts += [f"PLACE: {m['place']}" for m in media if m.get("place")][:1]
+    if len(row["text"].strip()) < 4 and not said and len(parts) == 1:
+        return {"skipped": "nothing to read"}
+    out = llm.llm_json(NOTE_AI_SYSTEM, "\n".join(parts)[:12000], {"tags": "array", "tidy": "object"}, 3000, {}, "notes",
+                       think=False)
+    tags = [str(t).strip()[:12] for t in out.get("tags") or [] if str(t).strip()][:4]
+    tidy = out.get("tidy") if isinstance(out.get("tidy"), dict) else {}
+    row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)  # re-read: it may have changed meanwhile
+    if not row:
+        return {"skipped": "note deleted"}
+    media = [{**m, "tidy": str(tidy[m["file"]])} if m["file"] in said and tidy.get(m["file"]) else m
+             for m in json.loads(row["media"])]
+    q("UPDATE notes SET tags=?, media=? WHERE id=?",
+      (json.dumps(tags, ensure_ascii=False), json.dumps(media, ensure_ascii=False), nid))
+    return {"tags": tags, "tidied": len([f for f in said if tidy.get(f)])}
+
+
+NOTES_RECAP_SYSTEM = """You write a short look back at someone's private notes from one week, in Simplified Chinese, plainly
+and warmly, like a friend recalling the week with them: 2-4 sentences on what they did, saw and thought, naming the
+places and people that come up. Don't invent anything that isn't in the notes. Then up to 4 highlights, each one line
+pointing at one note by its id.
+Reply with one JSON object: {{"text": "...", "highlights": [{{"note": <id>, "line": "..."}}]}}"""
+
+
+@board.task("notes_recap", "随记一周回顾", "ai-quick")
+def pi_notes_recap(task, beat):
+    p = task["payload"]
+    t0 = time.mktime(time.strptime(p["start"], "%Y-%m-%d"))
+    t1 = time.mktime(time.strptime(p["end"], "%Y-%m-%d")) + 86400
+    rows = q("SELECT * FROM notes WHERE owner=? AND created >= ? AND created < ? ORDER BY created", (p["owner"], t0, t1))
+    if not rows:
+        return {"notes": 0}
+    lines = []
+    for r in rows:
+        media = json.loads(r["media"])
+        said = " ".join(m.get("tidy") or m.get("transcript") or "" for m in media)
+        place = next((m["place"] for m in media if m.get("place")), "")
+        photos = sum(m["kind"] == "image" for m in media)
+        lines.append(f"note {r['id']} {time.strftime('%m-%d %a %H:%M', time.localtime(r['created']))} {place}"
+                     f"{' (' + str(photos) + ' photos)' if photos else ''}: {r['text']} {said}"[:1200])
+    out = llm.llm_json(NOTES_RECAP_SYSTEM, "\n".join(lines)[:30000], {"text": "string", "highlights": "array"}, 3000, {},
+                       "notes", think=False)
+    ids = {r["id"] for r in rows}
+    recap = {"start": p["start"], "end": p["end"], "text": str(out.get("text") or ""), "notes": len(rows),
+             "highlights": [{"note": llm.as_int(h.get("note")), "line": str(h.get("line") or "")}
+                            for h in out.get("highlights") or [] if isinstance(h, dict) and llm.as_int(h.get("note")) in ids]}
+    kv_set(f"notes_recap:{p['owner']}", recap)
+    return {"notes": len(rows)}
+
+
+FAILURE_SYSTEM = """A download in a home media box failed. From the link's site and the error output, say in one short
+Chinese sentence why (for someone who isn't a programmer), and in another what to do: wait and retry, log in (give the
+box a cookies file), the video is gone or private, region-locked, the site isn't supported, a members-only video...
+Reply with one JSON object: {{"cause": "...", "fix": "..."}}"""
+
+
+@board.task("explain_failure", "解释下载失败", "ai-quick")
+def pi_explain_failure(task, beat):
+    """Why a download failed, in plain words, and what to do (one call without thinking, ~¥0.0005)."""
+    jid = task["payload"]["job"]
+    row = q("SELECT url, error, attempts, status FROM jobs WHERE id=?", (jid,), one=True)
+    if not row or row["status"] != "failed" or not row["error"]:
+        return {"skipped": "not failed"}
+    host = urllib.parse.urlsplit(row["url"]).netloc or row["url"][:40]
+    out = llm.llm_json(FAILURE_SYSTEM, f"SITE: {host}\nATTEMPTS: {row['attempts']}\nERROR:\n{row['error'][-1500:]}",
+                       {"cause": "string", "fix": "string"}, 600, {}, "failure", jid, think=False)
+    advice = f"{out.get('cause') or ''} {out.get('fix') or ''}".strip()
+    q("UPDATE jobs SET advice=? WHERE id=?", (advice, jid))
+    return {"advice": advice}
+
+
+@once("notes_ai_backfilled", background=True)
+def backfill_note_ai():
+    """Once: tags and tidied recordings for the notes written before there were any; and plain-words reasons for
+    downloads that have already failed for good."""
+    for r in q("SELECT id FROM notes"):
+        board.publish("note_ai", f"note:{r['id']}", 5)
+    for r in q("SELECT id FROM jobs WHERE status='failed' AND retry_at IS NULL AND error != ''"):
+        board.publish("explain_failure", f"job:{r['id']}", 5)
