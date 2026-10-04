@@ -38,7 +38,13 @@ writes the disks' SMART data to /run/disk-health.json (needs smartmontools); 资
 Python packages beyond the basics: `faster-whisper`, `onnxruntime`, `onnx`, `tokenizers`, `rapidocr_onnxruntime`,
 `pypinyin`, `opencc-python-reimplemented`.
 
-- `grabber.py web` – page + API (waitress); `grabber.py worker` – runs queued jobs, follows channels
+- `grabber.py web` – page + API (waitress); `grabber.py worker` – runs queued jobs, follows channels.
+  The code is the `shiguang` package: `core` (config, database, wake-ups), `migrations` (numbered schema steps,
+  one-time data jobs), `download`, `library` (media files, Plex, playback), `llm`, `pipeline` (a job from link to
+  library), `channels` (追更), `search` (subtitles, text on pictures, CLIP), `board` (the task board), `tasks`
+  (what each kind of task does, declared with `@task`), `notes`, `usage`, `web` (routes), `main` (processes).
+- `./deploy.sh` – lint, smoke test on the Pi against a copy of the database (`tests/smoke.py`), swap in, restart,
+  and put the previous code back if the page or the workers don't come up
 - `grabber.service`, `grabber-worker.service` – systemd units; config in `/etc/grabber.env`
   (template: `grabber.env.example`)
 - `refresh_metadata.py` – re-run the classifier on finished jobs

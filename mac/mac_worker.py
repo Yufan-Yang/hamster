@@ -42,6 +42,7 @@ UNLOAD_AFTER = 600  # free the model's ~2 GB of memory after this long without w
 NAME = "mac-" + socket.gethostname().split(".")[0]
 CAPS = ["transcribe", "cover", "frames", "note_media", "gpu"]  # the task kinds this does, and that it has a GPU
 CLIP = HERE / "models" / "clip" / "vision.onnx"  # the Pi's image model (same file: same vectors), copied over
+CLIP_MODEL = "chinese-clip-vit-base-patch16-int8"  # its name on the Pi (search.CLIP_MODEL): sent with every vector
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the same shot (talk shows: a handful)
 GAME_APPS = HERE / "game-apps.txt"
@@ -163,10 +164,29 @@ def transcribe(audio, lang=None):
             start = int(len(audio) * at)
             votes.append(mlx_whisper.transcribe(audio[start:start + 30 * 16000], **common).get("language"))
         lang = max(set(votes), key=votes.count)
-    out = mlx_whisper.transcribe(audio, language=lang,
+    # word_timestamps: each line starts where its first word is heard. Without it Whisper starts a line where the
+    # last one ended, so a line said after 20 s of English came up 20 s early and stayed (about 2x slower; still
+    # >10x realtime)
+    out = mlx_whisper.transcribe(audio, language=lang, word_timestamps=True,
                                  initial_prompt="以下是普通话的句子，用简体中文。" if lang == "zh" else None, **common)
+    found = list(out["segments"])
+    # Gaps: with the language fixed, Whisper skips what's said in another one (an English speech in a Chinese
+    # news show) and sometimes the rest of a 30-second window. Listen to each gap of 4 s or more again, letting it
+    # tell the language itself.
+    covered = sorted((s["start"], s["end"]) for s in found if s["text"].strip())
+    edges = [0.0] + [x for se in covered for x in se] + [len(audio) / 16000]
+    for a, b in zip(edges[0::2], edges[1::2]):
+        if b - a >= 4:
+            piece = audio[int(a * 16000):int(b * 16000)]
+            if float(np.abs(piece).mean()) < 0.003:  # silence
+                continue
+            more = mlx_whisper.transcribe(piece, word_timestamps=True, **common)
+            if more.get("language") not in ("zh", "en", lang):  # a few seconds misheard as Portuguese...: English
+                more = mlx_whisper.transcribe(piece, language="en", word_timestamps=True, **common)
+            found += [{**s, "start": s["start"] + a, "end": min(s["end"] + a, b)} for s in more["segments"]]
+    found.sort(key=lambda s: s["start"])
     segs = []
-    for s in out["segments"]:
+    for s in found:
         text = s["text"].strip()
         if not text or any(j in text for j in JUNK):
             continue
@@ -174,10 +194,9 @@ def transcribe(audio, lang=None):
         if (s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -0.8) or s.get("compression_ratio", 0) > 2.6:
             continue
         segs.append([round(s["start"], 2), round(s["end"], 2), text])
-    if lang == "zh":
-        from opencc import OpenCC
-        cc = OpenCC("t2s")
-        segs = [[a, b, cc.convert(t)] for a, b, t in segs]
+    from opencc import OpenCC  # Chinese in simplified characters, whichever pass heard it
+    cc = OpenCC("t2s")
+    segs = [[a, b, cc.convert(t) if re.search(r"[\u4e00-\u9fff]", t) else t] for a, b, t in segs]
     return lang, segs
 
 
@@ -252,7 +271,7 @@ def do_cover(task):
         with Image.open(f.name) as im:
             v = clip_vectors([ImageOps.exif_transpose(im)])[0]
         lines = read_text(f.name)
-    return {"vector": b64(v), "lines": lines, "seconds": round(time.time() - started, 2)}
+    return {"vector": b64(v), "lines": lines, "seconds": round(time.time() - started, 2), "model": CLIP_MODEL}
 
 
 def do_frames(task):
@@ -273,7 +292,7 @@ def do_frames(task):
                 if prev is None or float(v @ prev) < SAME_SHOT:
                     kept.append([round(t, 2), b64(v)])
                     prev = v
-    return {"frames": kept, "keyframes": len(members), "seconds": round(time.time() - started, 1)}
+    return {"frames": kept, "keyframes": len(members), "seconds": round(time.time() - started, 1), "model": CLIP_MODEL}
 
 
 def open_picture(path):
@@ -298,7 +317,7 @@ def do_note_media(task):
         it = {}
         with fetch(task, f"note-file?file={quote(f['file'])}", Path(f["file"]).suffix) as tmp:
             if f["kind"] == "image":
-                it["vector"] = b64(clip_vectors([open_picture(tmp.name)])[0])
+                it["vector"], it["model"] = b64(clip_vectors([open_picture(tmp.name)])[0]), CLIP_MODEL
                 it["ocr"] = "\n".join(read_text(tmp.name))
             else:
                 audio = decode(tmp.name)
@@ -308,7 +327,7 @@ def do_note_media(task):
                     subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(min(1.0, it["duration"] / 2)), "-i", tmp.name,
                                     "-frames:v", "1", frame], capture_output=True)
                     if Path(frame).exists():
-                        it["vector"] = b64(clip_vectors([open_picture(frame)])[0])
+                        it["vector"], it["model"] = b64(clip_vectors([open_picture(frame)])[0]), CLIP_MODEL
                         Path(frame).unlink()
                 if len(audio) > 16000:
                     lang, segs = transcribe(audio)

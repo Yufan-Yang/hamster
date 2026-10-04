@@ -1,0 +1,1112 @@
+"""The web page and its API, accounts and privacy, the task board over HTTP."""
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import time
+
+from flask import Response
+from flask import g
+from flask import jsonify
+from flask import request
+from flask import send_file
+from flask import send_from_directory
+from flask import session
+from pathlib import Path
+from werkzeug.security import check_password_hash
+from werkzeug.security import generate_password_hash
+from .core import (ADMIN_PASSWORD, AUDIO_EXT, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, q, safe_name, secret_key)
+
+
+DEVICE_COOKIE = "grabber_device"
+NAME_RE = re.compile(r"[\w.\-]{1,32}")
+_seen_cache = {}
+
+
+def ensure_admin():
+    if ADMIN_PASSWORD:
+        q("INSERT INTO users (name, pw, admin, created) VALUES ('admin', ?, 1, ?) "
+          "ON CONFLICT(name) DO UPDATE SET pw=excluded.pw, admin=1", (generate_password_hash(ADMIN_PASSWORD), time.time()))
+
+
+def device_label(ua):
+    """Short readable name for a browser, e.g. "iPhone · Safari"."""
+    ua = ua or ""
+    os_name = next((n for k, n in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Macintosh", "Mac"),
+                                   ("Windows", "Windows"), ("Linux", "Linux")) if k in ua), "设备")
+    browser = next((n for k, n in (("Edg/", "Edge"), ("MicroMessenger", "微信"), ("CriOS", "Chrome"), ("FxiOS", "Firefox"),
+                                   ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari")) if k in ua), "浏览器")
+    return f"{os_name} · {browser}"
+
+
+def owner_of_device(device_id):
+    row = q("SELECT user FROM devices WHERE id=?", (device_id,), one=True)
+    return f"user:{row['user']}" if row and row["user"] else device_id
+
+
+def phone_owner(name):
+    """Owner for a job sent by the iOS shortcut from the phone called `name`."""
+    row = q("SELECT device FROM phones WHERE name=?", (name,), one=True)
+    if not row:
+        dev = q("SELECT id FROM devices WHERE ip=? AND seen>? ORDER BY seen DESC LIMIT 1",
+                (client_ip(), time.time() - 30 * 86400), one=True)
+        if not dev:
+            return "shortcut"  # never opened the page on this phone: admin-only
+        q("INSERT OR IGNORE INTO phones (name, device, created) VALUES (?,?,?)", (name, dev["id"], time.time()))
+        row = q("SELECT device FROM phones WHERE name=?", (name,), one=True)
+    return owner_of_device(row["device"])
+
+
+# From outside, only these work without logging in (everything else needs an account)
+PUBLIC_PATHS = ("/", "/api/login", "/api/jobs", "/api/account")
+login_failures = {}  # ip -> [failed attempts, first failure time]
+
+
+def is_external():
+    return str(request.environ.get("SERVER_PORT")) == str(EXTERNAL_PORT)
+
+
+def client_ip():
+    # Through the tunnel the peer is 127.0.0.1; Caddy on the VPS passes the real address in
+    # X-Forwarded-For, which waitress (trusting 127.0.0.1) turns into the remote address
+    return request.remote_addr
+
+
+@app.before_request
+def identify():
+    g.external = is_external()
+    if request.path.startswith("/api/compute/"):  # the Mac worker: token, no cookie, not a browser
+        g.device, g.new_device, g.user, g.admin, g.owner = "", False, None, False, None
+        return
+    g.device = request.cookies.get(DEVICE_COOKIE) or ""
+    g.new_device = not re.fullmatch(r"[0-9a-f]{32}", g.device)
+    if g.new_device:
+        g.device = secrets.token_hex(16)
+    g.user = session.get("user")
+    # The login is a signed cookie, so it is also checked against the devices table: a browser removed from
+    # the account (e.g. a lost phone) is logged out on its next request, not only when it logs out itself
+    if g.user and (not q("SELECT 1 FROM users WHERE name=?", (g.user,), one=True)
+                   or (q("SELECT user FROM devices WHERE id=?", (g.device,), one=True) or {"user": None})["user"] != g.user):
+        session.clear()
+        g.user = None
+    g.admin = bool(g.user and q("SELECT admin FROM users WHERE name=?", (g.user,), one=True)["admin"])
+    g.owner = f"user:{g.user}" if g.user else g.device
+    if g.external and not g.user:
+        # No anonymous device mode on the internet: show the page and the login form, nothing else
+        if request.path == "/api/jobs":
+            return jsonify(jobs=[], login_required=True, external=True, user=None, admin=False,
+                           disk={"free": 0, "total": 0}, features={}, privacy={})
+        if request.path == "/api/account":
+            return jsonify(user=None, devices=[])
+        if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/subs/", "/thumb/")):
+            return jsonify(error="login required", login_required=True), 401
+    if request.path == "/api/add" and not request.cookies:
+        phone = str((request.get_json(silent=True) or {}).get("device", "")).strip()[:60]
+        if not phone:  # body that isn't valid JSON (see add_post)
+            m = re.search(r'"device"\s*:\s*"([^"]{1,60})"', request.get_data(as_text=True))
+            phone = m.group(1) if m else ""
+        g.owner = phone_owner(phone) if phone else "shortcut"
+        g.device_label = f"📱 {phone}" if phone else "快捷指令"
+        g.new_device = False
+        return
+    g.device_label = device_label(request.headers.get("User-Agent"))
+    if request.path.startswith("/api/notes") and request.method == "POST":
+        request.max_content_length = NOTE_MAX_UPLOAD
+    # Remember where each browser was last seen (throttled; the page polls every 2 s)
+    key = (g.device, client_ip())
+    if time.time() - _seen_cache.get(key, 0) > 600:
+        _seen_cache[key] = time.time()
+        q("INSERT INTO devices (id, ip, seen, label) VALUES (?,?,?,?) "
+          "ON CONFLICT(id) DO UPDATE SET ip=excluded.ip, seen=excluded.seen, label=excluded.label",
+          (g.device, client_ip(), time.time(), g.device_label))
+
+
+@app.after_request
+def remember(resp):
+    if getattr(g, "new_device", False):
+        resp.set_cookie(DEVICE_COOKIE, g.device, max_age=10 * 365 * 86400, httponly=True, samesite="Lax")
+    return resp
+
+
+def scope_sql():
+    return ("1", ()) if g.admin else ("owner = ?", (g.owner,))
+
+
+def visible(jid):
+    row = q("SELECT owner FROM jobs WHERE id=?", (jid,), one=True)
+    return bool(row) and (g.admin or row["owner"] == g.owner)
+
+
+def sign_in(name):
+    """Log this browser into `name` and move the jobs it added anonymously into the account."""
+    session.permanent = True
+    session["user"] = name
+    q("INSERT INTO devices (id, user, ip, seen) VALUES (?,?,?,?) "
+      "ON CONFLICT(id) DO UPDATE SET user=excluded.user", (g.device, name, client_ip(), time.time()))
+    q("UPDATE jobs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    # followed uploaders too; one the account already follows stays once
+    q("DELETE FROM subs WHERE owner=? AND key IN (SELECT key FROM subs WHERE owner=?)", (g.device, f"user:{name}"))
+    q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    q("UPDATE notes SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    q("UPDATE OR IGNORE watch SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    # bring this device's privacy settings into the account
+    dev, acc = privacy_get(g.device), privacy_get(f"user:{name}")
+    privacy_set(f"user:{name}", list(dict.fromkeys(acc["tags"] + dev["tags"])), list(dict.fromkeys(acc["ids"] + dev["ids"])))
+
+
+# ---------------------------------------------------------------- privacy mode
+
+def privacy_get(owner):
+    row = q("SELECT tags, ids FROM privacy WHERE owner=?", (owner,), one=True)
+    return {"tags": json.loads(row["tags"]), "ids": json.loads(row["ids"])} if row else {"tags": [], "ids": []}
+
+
+def privacy_set(owner, tags, ids):
+    q("INSERT INTO privacy (owner, tags, ids) VALUES (?,?,?) ON CONFLICT(owner) DO UPDATE SET tags=excluded.tags, ids=excluded.ids",
+      (owner, json.dumps(tags, ensure_ascii=False), json.dumps(ids)))
+
+
+# Privacy unlocks live only in the open page: unlocking returns a token the page keeps in memory and sends
+# back as X-Privacy-Token. Reloading the page (or the token expiring) locks everything again.
+privacy_tokens = {}  # token -> {"owner", "expires", "reveal"}
+
+
+def privacy_token():
+    tok = privacy_tokens.get(request.headers.get("X-Privacy-Token", ""))
+    if tok and tok["owner"] == g.owner and tok["expires"] > time.time():
+        return tok
+    return None
+
+
+def revealed():
+    tok = privacy_token()
+    return bool(tok and tok["reveal"])
+
+
+def is_hidden(d, prefs):
+    # hiding is by tag only (hiding single items by hand was dropped)
+    aliases = kv_get("tag_aliases", {})
+    hide = {aliases.get(t, t).lower() for t in prefs["tags"]}
+    return any(aliases.get(t, t).lower() in hide for t in (d.get("analysis") or {}).get("tags") or [])
+
+
+@app.post("/api/privacy/unlock")
+def privacy_unlock():
+    """Open the hidden privacy menu (reached by tapping the avatar three times) with the account password."""
+    if not g.user:
+        return jsonify(error="先登录账号"), 403
+    key = f"privacy:{g.user}"
+    fails, since = login_failures.get(key, (0, time.time()))
+    if fails >= 5 and time.time() - since < 15 * 60:
+        return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
+    row = q("SELECT pw FROM users WHERE name=?", (g.user,), one=True)
+    if not row or not check_password_hash(row["pw"], str((request.get_json(silent=True) or {}).get("password", ""))):
+        time.sleep(1)
+        recent = time.time() - since < 15 * 60
+        login_failures[key] = (fails + 1 if recent else 1, since if recent else time.time())
+        return jsonify(error="密码不对"), 403
+    login_failures.pop(key, None)
+    for t in [t for t, v in privacy_tokens.items() if v["expires"] < time.time()]:
+        privacy_tokens.pop(t, None)
+    token = secrets.token_urlsafe(24)
+    privacy_tokens[token] = {"owner": g.owner, "expires": time.time() + 30 * 60, "reveal": False}
+    return jsonify(token=token, expires_in=30 * 60)
+
+
+@app.get("/api/privacy")
+def privacy_info():
+    if not privacy_token():
+        return jsonify(error="locked"), 403
+    prefs = privacy_get(g.owner)
+    return jsonify(**prefs, revealed=revealed(), library_tags=llm.library_tags()[:300])
+
+
+@app.post("/api/privacy")
+def privacy_update():
+    """{"tags": [...]} sets the hidden tags; {"reveal": true/false} shows or hides them in this page."""
+    tok = privacy_token()
+    if not tok:
+        return jsonify(error="locked"), 403
+    body = request.get_json(silent=True) or {}
+    prefs = privacy_get(g.owner)
+    if isinstance(body.get("tags"), list):
+        prefs["tags"] = list(dict.fromkeys(str(t).strip()[:40] for t in body["tags"] if str(t).strip()))[:200]
+    privacy_set(g.owner, prefs["tags"], [])
+    if "reveal" in body:
+        tok["reveal"] = bool(body["reveal"])
+    return jsonify(ok=True)
+
+
+def credentials():
+    body = request.get_json(silent=True) or {}
+    return str(body.get("name", "")).strip(), str(body.get("password", ""))
+
+
+@app.post("/api/login")
+def login():
+    ip = client_ip()
+    fails, since = login_failures.get(ip, (0, time.time()))
+    if fails >= 10 and time.time() - since < 15 * 60:
+        return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
+    name, pw = credentials()
+    row = q("SELECT pw FROM users WHERE name=?", (name,), one=True)
+    if not row or not check_password_hash(row["pw"], pw):
+        time.sleep(1)  # slow down guessing
+        login_failures[ip] = (fails + 1 if time.time() - since < 15 * 60 else 1,
+                              since if time.time() - since < 15 * 60 else time.time())
+        return jsonify(error="用户名或密码不对"), 403
+    login_failures.pop(ip, None)
+    sign_in(name)
+    return jsonify(ok=True)
+
+
+@app.get("/api/name-available")
+def name_available():
+    name = request.args.get("name", "").strip()
+    return jsonify(available=bool(NAME_RE.fullmatch(name)) and not q("SELECT 1 FROM users WHERE name=?", (name,), one=True))
+
+
+@app.post("/api/register")
+def register():
+    if g.external:  # accounts are made at home; strangers on the internet can't sign up
+        return jsonify(error="只能在家里的网络注册新账号"), 403
+    name, pw = credentials()
+    if not NAME_RE.fullmatch(name):
+        return jsonify(error="用户名：1-32 个字母、数字、汉字或 . - _"), 400
+    if len(pw) < 4:
+        return jsonify(error="密码至少 4 位"), 400
+    try:
+        with db_lock:
+            core.DB.execute("INSERT INTO users (name, pw, created) VALUES (?,?,?)",
+                       (name, generate_password_hash(pw), time.time()))
+            core.DB.commit()
+    except sqlite3.IntegrityError:
+        return jsonify(error="这个用户名已被注册"), 409
+    sign_in(name)
+    return jsonify(ok=True)
+
+
+@app.get("/api/account")
+def account():
+    """Devices tied to the logged-in account: browsers that logged in, and iPhones using the shortcut."""
+    if not g.user:
+        return jsonify(user=None, devices=[])
+    # The same browser gets a new cookie for every address it opens the page by (192.168.3.200 and
+    # pi-gateway.local are two sites to it), so it shows up as several devices: one row per kind of browser
+    # on one IP, removed together
+    devices, rows = [], {}
+    for d in q("SELECT * FROM devices WHERE user=? ORDER BY seen DESC", (g.user,)):
+        phones = [p["name"] for p in q("SELECT name FROM phones WHERE device=?", (d["id"],))]
+        row = rows.get((d["label"], d["ip"]))
+        if row:
+            row["ids"].append(d["id"])
+            row["current"] = row["current"] or d["id"] == g.device
+            row["phones"] += [p for p in phones if p not in row["phones"]]
+            continue
+        row = rows[(d["label"], d["ip"])] = {"id": d["id"], "ids": [d["id"]], "label": d["label"] or "设备", "seen": d["seen"],
+                                             "current": d["id"] == g.device, "phones": phones}
+        devices.append(row)
+    # Jobs from before devices were recorded have no device; JSON keys must be strings
+    counts = {r["device"] or "未知设备": r["n"] for r in q("SELECT device, COUNT(*) n FROM jobs WHERE owner=? GROUP BY device",
+                                                       (f"user:{g.user}",))}
+    return jsonify(user=g.user, devices=devices, counts=counts)
+
+
+@app.post("/api/devices/<device_id>/remove")
+def remove_device(device_id):
+    """Untie a browser (and the iPhone shortcut that goes with it) from the account; its jobs stay."""
+    if not g.user:
+        return jsonify(error="not logged in"), 403
+    ids = device_id.split(",")  # one row in the list can be several cookies of the same browser
+    for i in ids:
+        q("UPDATE devices SET user=NULL WHERE id=? AND user=?", (i, g.user))
+    if g.device in ids:
+        session.clear()
+    return jsonify(ok=True)
+
+
+@app.post("/api/logout")
+def logout():
+    # This browser goes back to being anonymous; the account keeps its jobs
+    q("UPDATE devices SET user=NULL WHERE id=?", (g.device,))
+    session.clear()
+    return jsonify(ok=True)
+
+
+@app.get("/")
+def index():
+    return send_from_directory(HERE, "index.html")
+
+
+@app.get("/static/<path:name>")
+def static_file(name):
+    return send_from_directory(HERE / "static", name, max_age=30 * 86400)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return send_from_directory(HERE / "static", "favicon.ico", max_age=30 * 86400, mimetype="image/x-icon")
+
+
+@app.get("/shortcut")
+def shortcut():
+    """iOS share-sheet shortcut: share a link from any app and it gets sent to /api/add."""
+    return send_from_directory(HERE, "send-to-pi.shortcut", as_attachment=True, download_name="发送到拾光.shortcut")
+
+
+@app.get("/add")
+def add_get():
+    """Target for the bookmarklet: /add?url=..."""
+    url = request.args.get("url", "")
+    if URL_RE.match(url) and channels.channel_of(url):
+        channels.add_sub(url, g.owner, g.device_label)
+        return f"<meta http-equiv=refresh content='1;url=/'>开始追更 – {url}"
+    if URL_RE.match(url):
+        jid = pipeline.add_job(url, source="web", owner=g.owner, device=g.device_label)
+        return f"<meta http-equiv=refresh content='1;url=/'>Queued #{jid} – {url}"
+    return "No URL", 400
+
+
+@app.post("/api/add")
+def add_post():
+    ids = []
+    if "torrent" in request.files:
+        f = request.files["torrent"]
+        path = STATE / "uploads" / f"{int(time.time())}-{safe_name(f.filename)}"
+        path.parent.mkdir(exist_ok=True)
+        f.save(path)
+        ids.append(pipeline.add_job("torrent-file:" + str(path), owner=g.owner, device=g.device_label))
+    body = request.get_json(silent=True) or {}
+    raw = "" if body or request.form else request.get_data(as_text=True)
+    text = request.form.get("text") or body.get("text", "") or raw
+    device = str(body.get("device", "")).strip()[:60]
+    if raw and not device:
+        # Android's HTTP Shortcuts pastes shared text into a JSON template without escaping it, so a title
+        # with quotes breaks the JSON; still take the links and the device name out of the raw body
+        m = re.search(r'"device"\s*:\s*"([^"]{1,60})"', raw)
+        device = m.group(1) if m else ""
+    source = f"shortcut:{device}" if device else "web"
+    hows, subs = [], []
+    for u in find_urls(text):
+        if channels.channel_of(u):  # an uploader's page: follow it instead of downloading the page
+            sid, how = channels.add_sub(u, g.owner, g.device_label)
+            subs.append({"id": sid, "how": how})
+            continue
+        jid, how = pipeline.add_job_ex(u, source=source, owner=g.owner, device=g.device_label)
+        ids.append(jid)
+        hows.append(how)
+    if not ids and subs:
+        if not request.cookies:
+            return Response(f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载", mimetype="text/plain")
+        return jsonify(ids=[], duplicates=[], linked=[], subs=subs)
+    if not ids and not request.cookies and text.strip():
+        # the iOS / Android shortcut shared plain text (no link): keep it as a 随记
+        now = time.time()
+        q("INSERT INTO notes (owner, text, device, created, updated) VALUES (?,?,?,?,?)",
+          (g.owner, text.strip()[:20000], g.device_label, now, now))
+        return Response("没有链接，已经记到「随记」里", mimetype="text/plain")
+    if not ids:
+        if not request.cookies:
+            return Response("没找到链接", mimetype="text/plain", status=400)
+        return jsonify(error="No link found"), 400
+    dupes = [i for i, h in zip(ids, hows) if h == "duplicate"]
+    linked = [i for i, h in zip(ids, hows) if h == "linked"]
+    if not request.cookies:
+        # iOS shortcut / Android HTTP Shortcuts show the reply as a notification: keep it readable
+        new = len(ids) - len(dupes) - len(linked)
+        msg = "，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主" if subs else "", f"开始下载 {new} 个" if new else "",
+                                    f"{len(linked)} 个别人已经下过，直接加进来了" if linked else "",
+                                    f"{len(dupes)} 个已经在拾光里了" if dupes else "") if x)
+        return Response(msg, mimetype="text/plain")
+    return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs)
+
+
+def owner_label(o):
+    o = o or ""
+    return o[5:] if o.startswith("user:") else "快捷指令（未识别）" if o == "shortcut" else "匿名设备" if o else "旧任务"
+
+
+@app.get("/api/jobs")
+def jobs():
+    term = request.args.get("q", "").strip()
+    term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
+    scope, scope_args = scope_sql()
+    scope += " AND status != 'cancelled'"  # cancelled jobs are hidden
+    sub = request.args.get("sub", "")
+    # every unfinished job (queued / downloading / failed) is always sent; finished ones a page at a time
+    limit = int(request.args["limit"]) if request.args.get("limit", "").isdigit() else 100
+    if sub.isdigit():  # one followed uploader's videos
+        scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), max(limit, 1000)
+    more = False
+    if term:
+        # Searches titles, links, summaries, key points, tags, file paths and transcripts
+        like = f"%{term}%"
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ? OR url LIKE ? OR analysis LIKE ? OR files LIKE ? "
+                 "OR transcript LIKE ?) ORDER BY id DESC LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
+        # The idle-time index belongs to the job that downloaded the files; entries linked to it share it
+        by_source = {}
+        for r in q(f"SELECT id, ref FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args):
+            by_source.setdefault(r["ref"] or r["id"], []).append(r["id"])
+        said = {}  # lines said in the video (subtitles) or written on its cover
+        for r in q("SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND text LIKE ? ORDER BY ref, part, t", (like,)):
+            for jid in by_source.get(r["ref"], []):
+                said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"],
+                                                 "text": search.snippet(r["text"], term, 10, 40).strip("…") if len(r["text"]) > 50 else r["text"]})
+        looks = {}  # covers and frames that look like it
+        for source, found in search.visual_hits(term, "job", set(by_source)).items():
+            for jid in by_source[source]:
+                looks[jid] = found
+        known = {r["id"] for r in rows}
+        extra = [i for i in dict.fromkeys([*said, *looks]) if i not in known]
+        if extra:
+            rows += q(f"SELECT * FROM jobs WHERE id IN ({','.join('?' * len(extra))})", extra)
+        out, only_looks = [], []
+        for r in rows:
+            d = job_dict(r)
+            hits = said.get(r["id"], [])[:30]
+            if not hits and d["status"] == "done" and term.lower() in (r["transcript"] or "").lower():
+                hits = [{**h, "src": "字幕"} for h in search.subtitle_hits(d, r, term)]  # not indexed yet
+            seen = [{"part": p, "t": t, "src": "画面" if t is not None else "封面", "text": f"看起来像「{term}」"}
+                    for _, p, t, _ in looks.get(r["id"], [])[:5]]
+            if term.lower() not in search.titleish(d).lower():
+                # say where it was found when it isn't in the title, so the result doesn't look random
+                if hits:
+                    d["match_where"], d["match"] = hits[0]["src"], hits[0]["text"]
+                else:
+                    d["match_where"], d["match"] = next(((k, search.snippet(t, term)) for k, t in search.match_fields(d, r)
+                                                         if term.lower() in t.lower()), ("", ""))
+                if not d["match"] and seen:
+                    d["match_where"], d["match"] = seen[0]["src"], seen[0]["text"]
+                    if seen[0]["t"] is not None:
+                        d["frame"] = {"part": seen[0]["part"], "t": seen[0]["t"]}  # show that moment as the cover
+            d["hits"] = hits + seen
+            # matched only by how it looks: after the text matches, most alike first
+            (only_looks if d.get("match_where") in ("画面", "封面") and not hits else out).append(d)
+        # at most a dozen: further down the list the likeness gets thin
+        out += sorted(only_looks, key=lambda d: -looks[d["id"]][0][0])[:12]
+    else:
+        unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
+        finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY id DESC LIMIT ?", (*scope_args, limit + 1))
+        more = len(finished) > limit
+        if request.args.get("ids"):  # particular videos (opened from a digest, a note...), wherever they are
+            wanted = [int(x) for x in request.args["ids"].split(",") if x.isdigit()][:50]
+            finished += q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(wanted))})", (*scope_args, *wanted)) if wanted else []
+            finished = list({r["id"]: r for r in finished}.values())
+            limit = len(finished)
+        shown = {r["id"] for r in rows + finished[:limit]}
+        # videos you're in the middle of are always there, also when they're further back than the first page
+        resume = [r["job_id"] for r in q("SELECT job_id FROM watch WHERE owner=? AND done=0 AND pos > 15 "
+                                         "ORDER BY updated DESC LIMIT 12", (g.owner,)) if r["job_id"] not in shown]
+        extra = q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(resume))})", (*scope_args, *resume)) if resume else []
+        out = [job_dict(r) for r in sorted(rows + finished[:limit] + extra, key=lambda r: r["id"], reverse=True)]
+    # privacy mode: hidden items aren't even sent unless they've been revealed with the password
+    prefs, show_hidden = privacy_get(g.owner), revealed()
+    hidden_count = 0
+    kept = []
+    for d in out:
+        if is_hidden(d, prefs):
+            hidden_count += 1
+            if not show_hidden:
+                continue
+            d["hidden"] = True
+        kept.append(d)
+    out = kept
+    watched = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=?", (g.owner,))}
+    for d in out:
+        w = watched.get(d["id"])
+        if w:
+            d["watch"] = {"part": w["part"], "pos": w["pos"], "dur": w["dur"], "done": bool(w["done"]), "at": w["updated"]}
+        if d["status"] == "linked" and d.get("ref"):  # show the original download's progress
+            src = q("SELECT status, stage, progress, speed, title, thumb FROM jobs WHERE id=?", (d["ref"],), one=True)
+            if src:
+                d.update(status=src["status"] if src["status"] in ("queued", "downloading", "processing") else "queued",
+                         stage=src["stage"], progress=src["progress"], speed=src["speed"], title=d["title"] or src["title"])
+        owner = d.pop("owner", None)
+        d["media"] = library.media_info(d) if d["status"] == "done" else []
+        d["missing"] = d["status"] == "done" and not d["media"] and any(
+            Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT for f in d["files"])
+        if g.admin:
+            d["owner_label"] = owner_label(owner)
+    usage = shutil.disk_usage(MEDIA)
+    return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
+                   features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
+                   privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
+                   subs=subs_list(), sub_interval=channels.SUB_INTERVAL, more=more,
+                   notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
+                   # a search also shows matching 随记 among the videos
+                   note_hits=[notes.note_dict(r, m, seen) for r, m, seen in search.notes_search(term)[:50]] if term else [])
+
+
+def subs_list():
+    """Followed uploaders visible here, with how many of their videos are downloaded / waiting."""
+    where, args = ("1", ()) if g.admin else ("owner = ?", (g.owner,))
+    counts = {}
+    for r in q("SELECT source, status, COUNT(*) n FROM jobs WHERE source LIKE 'sub:%' GROUP BY source, status"):
+        c = counts.setdefault(r["source"], {})
+        c[r["status"]] = c.get(r["status"], 0) + r["n"]
+    out = []
+    for r in q(f"SELECT * FROM subs WHERE {where} ORDER BY id DESC", args):
+        c = counts.get(f"sub:{r['id']}", {})
+        out.append({"id": r["id"], "platform": r["platform"], "name": r["name"], "url": r["url"],
+                    "avatar": bool(r["avatar"]), "total": r["total"], "backfill": r["backfill"],
+                    "checked": r["checked"], "error": r["error"], "pending": r["checked"] is None or bool(r["everything"]),
+                    "done": c.get("done", 0), "active": sum(c.get(k, 0) for k in ("queued", "downloading", "processing", "linked")),
+                    "failed": c.get("failed", 0), "next": (r["checked"] or time.time()) + (channels.SUB_RETRY if r["error"] else channels.SUB_INTERVAL),
+                    **({"owner_label": owner_label(r["owner"])} if g.admin else {})})
+    return out
+
+
+def sub_visible(sid):
+    row = q("SELECT owner FROM subs WHERE id=?", (sid,), one=True)
+    return bool(row) and (g.admin or row["owner"] == g.owner)
+
+
+@app.post("/api/subs/<int:sid>/<action>")
+def sub_action(sid, action):
+    """refresh: check for new videos now · all: download every video of the uploader · delete: stop following
+    (videos already downloaded stay; ones still waiting in the queue are dropped)"""
+    if not sub_visible(sid):
+        return jsonify(error="not found"), 404
+    if action == "refresh":
+        q("UPDATE subs SET checked=NULL WHERE id=?", (sid,))
+    elif action == "all":
+        q("UPDATE subs SET everything=1, checked=NULL WHERE id=?", (sid,))
+    elif action == "delete":
+        q("DELETE FROM subs WHERE id=?", (sid,))
+        for r in q("SELECT id FROM jobs WHERE source=? AND status='queued'", (f"sub:{sid}",)):
+            pipeline.cancel_job(r["id"])
+        (channels.AVATARS / f"{sid}.jpg").unlink(missing_ok=True)
+    else:
+        return jsonify(error="unknown action"), 400
+    return jsonify(ok=True)
+
+
+@app.get("/subavatar/<int:sid>")
+def sub_avatar(sid):
+    row = q("SELECT avatar FROM subs WHERE id=?", (sid,), one=True)
+    if not row or not row["avatar"] or not Path(row["avatar"]).exists():
+        return "", 404
+    return send_file(row["avatar"], max_age=86400)
+
+
+def compute_auth():
+    if g.external or not board.COMPUTE_TOKEN or not hmac.compare_digest(request.headers.get("X-Compute-Token", ""), board.COMPUTE_TOKEN):
+        return jsonify(error="forbidden"), 403
+    return None
+
+
+def _worker():
+    return str((request.get_json(silent=True) or {}).get("worker") or request.args.get("worker") or "")[:40] or None
+
+
+@app.post("/api/tasks/publish")
+def api_publish():
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    kind, target = str(body.get("kind", "")), str(body.get("target", ""))
+    if not board.TASK_KINDS.get(kind, {}).get("remote"):
+        return jsonify(error=f"may not publish {kind!r}"), 403
+    try:
+        tid = board.publish(kind, target, int(body.get("priority") or 20), by=_worker() or "remote", force=bool(body.get("force")))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(id=tid)
+
+
+@app.post("/api/tasks/claim")
+def api_claim():
+    """The next task this worker can do (caps), waiting up to `wait` seconds (at most 25) for one to come in."""
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    worker, caps = _worker(), [str(c) for c in body.get("caps") or []]
+    if not worker:
+        return jsonify(error="worker name missing"), 400
+    if body.get("paused"):
+        # still there, just not taking tasks for a while (a game in front): others keep leaving it its kinds,
+        # until it's been paused for PREFER_WAIT
+        row = q("SELECT paused, seen FROM workers WHERE name=?", (worker,), one=True)
+        since = json.loads(row["paused"]).get("since") if row and row["paused"] else time.time()
+        if time.time() - since < board.PREFER_WAIT_PAUSED:
+            board.seen_worker(worker, caps, paused=json.dumps({"why": str(body["paused"])[:40], "since": since}))
+        return jsonify(task=None)
+    deadline = time.time() + min(float(body.get("wait") or 0), 25)
+    while True:
+        mark = bell_mark("tasks")
+        task = board.claim_task(worker, caps)
+        if task or time.time() >= deadline:
+            return jsonify(task=task)
+        bell_wait("tasks", mark, max(0.1, deadline - time.time()))
+
+
+@app.post("/api/tasks/<int:tid>/heartbeat")
+def api_heartbeat(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    return jsonify(ok=board.heartbeat_task(tid, _worker(), body.get("progress")))
+
+
+@app.post("/api/tasks/<int:tid>/done")
+def api_done(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    if not board.complete_task(tid, _worker(), body.get("result") or {}):
+        return jsonify(error="not your task (any more)"), 409
+    return jsonify(ok=True)
+
+
+@app.post("/api/tasks/<int:tid>/fail")
+def api_fail(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    return jsonify(ok=board.fail_task(tid, _worker(), body.get("error", ""), retry=bool(body.get("retry", True))))
+
+
+@app.post("/api/tasks/ingest")
+def api_ingest():
+    """The Mac's drop folder (~/拾光投递): a file dropped there becomes a 随记 of `account`, with the file's date."""
+    if (denied := compute_auth()):
+        return denied
+    request.max_content_length = NOTE_MAX_UPLOAD
+    account = str(request.form.get("account", ""))
+    if not q("SELECT 1 FROM users WHERE name=?", (account,), one=True):
+        return jsonify(error=f"no account {account!r}"), 400
+    g.owner, g.device_label = f"user:{account}", "Mac mini · 投递"
+    return note_add()
+
+
+@app.post("/api/tasks/<int:tid>/release")
+def api_release(tid):
+    """Not a failure: the worker is wanted for something else (a game on the Mac). Back on the board, progress kept."""
+    if (denied := compute_auth()):
+        return denied
+    board.release_task(tid, _worker())
+    return jsonify(ok=True)
+
+
+@app.get("/api/tasks/<int:tid>/audio")
+def api_task_audio(tid):
+    """The task's video's first sound track as it is (no re-encoding: the Pi only unpacks it, ~60 MB an hour of
+    AAC); the worker decodes it. Re-encoding here made the Pi the bottleneck: 2 minutes for 27 minutes of sound."""
+    if (denied := compute_auth()):
+        return denied
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, _worker()), one=True)
+    if not row:
+        return jsonify(error="not your task"), 404
+    try:
+        path, _ = board.task_media({"payload": json.loads(row["payload"])})
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "matroska", "-"],
+                            stdout=subprocess.PIPE)
+
+    def stream():
+        try:
+            while chunk := proc.stdout.read(1 << 16):
+                yield chunk
+        finally:
+            proc.kill()
+            proc.wait()
+    return Response(stream(), mimetype="audio/x-matroska")
+
+
+def my_task(tid):
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, _worker()), one=True)
+    return board.task_dict(row) if row else None
+
+
+@app.get("/api/tasks/<int:tid>/keyframes")
+def api_task_keyframes(tid):
+    """The task's video's keyframes as a tar of 224x224 JPEGs named by their time in seconds (~3 MB for 24 min)."""
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    if not task:
+        return jsonify(error="not your task"), 404
+    import tarfile
+    path, _ = board.task_media(task)
+    (INCOMPLETE / "tmp").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=INCOMPLETE / "tmp") as tmp:
+        frames = library.keyframes(path, Path(tmp))
+        out = tempfile.NamedTemporaryFile(dir=INCOMPLETE / "tmp", suffix=".tar", delete=False)
+        with tarfile.open(fileobj=out, mode="w") as tar:
+            for t, f in frames:
+                tar.add(f, arcname=f"{t:.2f}.jpg")
+        out.close()
+
+    def stream():
+        try:
+            with open(out.name, "rb") as f:
+                while chunk := f.read(1 << 16):
+                    yield chunk
+        finally:
+            os.unlink(out.name)
+    return Response(stream(), mimetype="application/x-tar")
+
+
+@app.get("/api/tasks/<int:tid>/note-file")
+def api_task_note_file(tid):
+    """One attachment of the note a note_media task is about."""
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    name = request.args.get("file", "")
+    if not task or name not in [f["file"] for f in task["payload"].get("files", [])]:
+        return jsonify(error="not your task / not its file"), 404
+    return send_file(NOTES_DIR / name, conditional=True)
+
+
+@app.get("/api/tasks/<int:tid>/cover")
+def api_task_cover(tid):
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    if not task:
+        return jsonify(error="not your task"), 404
+    return send_file(library.job_thumb(task))
+
+
+@app.get("/api/tasks")
+def api_board():
+    """The board (for `task board` on the Mac and for 资源使用)."""
+    if g.external and not g.user and (denied := compute_auth()):
+        return denied
+    return jsonify(board.board_summary())
+
+
+@app.get("/api/notes")
+def notes_list():
+    term = request.args.get("q", "").strip()
+    where, args = "owner = ?", [g.owner]
+    # newest first by the note's date (which can be changed); 更早的 continues after the last one shown
+    before, before_id = notes.note_time(request.args.get("before")), request.args.get("before_id", "")
+    if before and before_id.isdigit():
+        where, args = where + " AND (created < ? OR (created = ? AND id < ?))", args + [before, before, int(before_id)]
+    if term:  # the text and what's said in voice notes and videos; forgiving (see _note_find)
+        found = search.notes_search(term)
+        return jsonify(notes=[notes.note_dict(r, m, seen) for r, m, seen in found[:200]], more=False)
+    rows = q(f"SELECT * FROM notes WHERE {where} ORDER BY created DESC, id DESC LIMIT 51", args)
+    extra = {}
+    if not before:  # first page: 那年今天, and the places your notes were made
+        today = time.strftime("%m-%d")
+        extra["onthisday"] = [notes.note_dict(r) for r in q(
+            "SELECT * FROM notes WHERE owner=? AND strftime('%m-%d', created, 'unixepoch', 'localtime')=? "
+            "AND strftime('%Y', created, 'unixepoch', 'localtime') < strftime('%Y', 'now', 'localtime') "
+            "ORDER BY created DESC", (g.owner, today))]
+        places = {}
+        for r in q("SELECT media FROM notes WHERE owner=?", (g.owner,)):
+            for p in {m.get("place") for m in json.loads(r["media"]) if m.get("place")}:
+                places[p] = places.get(p, 0) + 1
+        extra["places"] = sorted(places.items(), key=lambda x: -x[1])[:20]
+    return jsonify(notes=[notes.note_dict(r, term) for r in rows[:50]], more=len(rows) > 50, **extra)
+
+
+@app.post("/api/notes")
+def note_add():
+    text = (request.form.get("text") or "").strip()[:20000]
+    files = request.files.getlist("media")
+    if not text and not files:
+        return jsonify(error="空的"), 400
+    now = time.time()
+    with db_lock:
+        cur = core.DB.execute("INSERT INTO notes (owner, text, device, created, updated) VALUES (?,?,?,?,?)",
+                         (g.owner, text, g.device_label, notes.note_time(request.form.get("created")) or now, now))
+        core.DB.commit()
+        nid = cur.lastrowid
+    media = notes.save_note_files(nid, files)
+    q("UPDATE notes SET media=?, pending=? WHERE id=?",
+      (json.dumps(media, ensure_ascii=False), int(any(m["todo"] for m in media)), nid))
+    if media:
+        board.publish("note_media", f"note:{nid}", 60, force=True)
+    return jsonify(note=notes.note_dict(notes.note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>")
+def note_edit(nid):
+    """Change the text and/or drop attachments (`drop`: their positions)."""
+    row = notes.note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    media = json.loads(row["media"])
+    drop = {int(i) for i in body.get("drop", []) if str(i).isdigit()}
+    for i in drop:
+        if i < len(media):
+            for k in ("file", "poster"):
+                if media[i].get(k):
+                    (NOTES_DIR / media[i][k]).unlink(missing_ok=True)
+            q("DELETE FROM vec WHERE kind='note' AND ref=? AND src=?", (nid, "照片:" + media[i]["file"]))
+    media = [m for i, m in enumerate(media) if i not in drop]
+    text = str(body.get("text", row["text"])).strip()[:20000]
+    if not text and not media:
+        return note_delete(nid)
+    created = notes.note_time(body.get("created")) or row["created"]
+    q("UPDATE notes SET text=?, media=?, created=?, updated=? WHERE id=?",
+      (text, json.dumps(media, ensure_ascii=False), created, time.time(), nid))
+    return jsonify(note=notes.note_dict(notes.note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>/media")
+def note_add_media(nid):
+    """More photos / videos / voice for a note that's already there."""
+    row = notes.note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    added = notes.save_note_files(nid, request.files.getlist("media"))
+    if not added:
+        return jsonify(error="不是照片、视频或音频"), 400
+    row = notes.note_row(nid)  # re-read: saving big files takes a while
+    q("UPDATE notes SET media=?, pending=1, updated=? WHERE id=?",
+      (json.dumps(json.loads(row["media"]) + added, ensure_ascii=False), time.time(), nid))
+    board.publish("note_media", f"note:{nid}", 60, force=True)
+    return jsonify(note=notes.note_dict(notes.note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>/delete")
+def note_delete(nid):
+    row = notes.note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    for m in json.loads(row["media"]):
+        for k in ("file", "poster"):
+            if m.get(k):
+                (NOTES_DIR / m[k]).unlink(missing_ok=True)
+    q("DELETE FROM notes WHERE id=?", (nid,))
+    q("DELETE FROM vec WHERE kind='note' AND ref=?", (nid,))
+    return jsonify(ok=True)
+
+
+@app.get("/notefile/<int:nid>/<int:n>")
+@app.get("/notefile/<int:nid>/<int:n>/<what>")
+def note_file(nid, n, what="file"):
+    row = notes.note_row(nid)
+    media = json.loads(row["media"]) if row else []
+    if n >= len(media) or what not in ("file", "poster") or not media[n].get(what):
+        return "", 404
+    path = NOTES_DIR / media[n][what]
+    if not path.exists():
+        return "", 404
+    return send_file(path, conditional=True, max_age=86400)  # Range requests: videos seek, iPhones play them
+
+
+@app.get("/api/points/<int:jid>")
+def key_point_times(jid):
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    row = q("SELECT analysis, ref FROM jobs WHERE id=?", (jid,), one=True)
+    a = json.loads(row["analysis"] or "{}")
+    if row["ref"]:  # linked entry: the downloading job has the chapters
+        a = {**json.loads(q("SELECT analysis FROM jobs WHERE id=?", (row["ref"],), one=True)["analysis"] or "{}"), **a}
+    times = [{"part": 0, "t": t} if t is not None else None for t in a["point_times"]] if a.get("point_times") \
+        else search.point_times(jid)
+    return jsonify(times=times, chapters=a.get("chapters") or {})
+
+
+@app.get("/api/similar/<int:jid>")
+def similar_of(jid):
+    """Same content elsewhere in the library: re-uploads, clips of it, or what it's a clip of."""
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    out = []
+    for r in q("SELECT * FROM similar WHERE a=? OR b=?", (jid, jid)):
+        other = r["b"] if r["a"] == jid else r["a"]
+        if not visible(other):
+            continue
+        mine, theirs = (r["a_in_b"], r["b_in_a"]) if r["a"] == jid else (r["b_in_a"], r["a_in_b"])
+        row = q("SELECT title, analysis FROM jobs WHERE id=?", (other,), one=True)
+        rel = "same" if r["kind"] == "same" else "part_of" if mine >= theirs else "has_part"
+        out.append({"job": other, "rel": rel, "mine": mine, "theirs": theirs,
+                    "title": json.loads(row["analysis"] or "{}").get("title") or row["title"]})
+    return jsonify(similar=out)
+
+
+@app.get("/api/digests")
+def digests_list():
+    rows = q("SELECT * FROM digests WHERE owner=? ORDER BY end DESC, id DESC LIMIT 8", (g.owner,))
+    pending = q("SELECT state FROM tasks WHERE kind='digest' AND target LIKE ? AND state IN ('queued','running')",
+                (f"digest:{g.owner}:%",), one=True)
+    return jsonify(digests=[{"id": r["id"], **json.loads(r["body"]), "created": r["created"]} for r in rows],
+                   pending=bool(pending))
+
+
+@app.post("/api/digests/now")
+def digest_now():
+    """The last 7 days, now (the automatic one comes on Monday mornings)."""
+    if not q("SELECT 1 FROM subs WHERE owner=?", (g.owner,), one=True):
+        return jsonify(error="还没有追更的 UP 主"), 400
+    end = time.strftime("%Y-%m-%d")
+    start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 6 * 86400))
+    board.publish("digest", f"digest:{g.owner}:{start}:{end}", 70, force=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/watch/<int:jid>")
+def save_watch(jid):
+    """Where playback is (sent every ~10 s, on pause and when the page is left): picked up on any device."""
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        pos, dur, part = float(body.get("pos") or 0), float(body.get("dur") or 0), int(body.get("part") or 0)
+    except (TypeError, ValueError):
+        return jsonify(error="bad position"), 400
+    done = bool(body.get("ended")) or (dur > 0 and (pos > dur - 30 or pos / dur > 0.95))
+    prev = q("SELECT done FROM watch WHERE owner=? AND job_id=?", (g.owner, jid), one=True)
+    q("INSERT INTO watch (owner, job_id, part, pos, dur, done, updated) VALUES (?,?,?,?,?,?,?) "
+      "ON CONFLICT(owner, job_id) DO UPDATE SET part=excluded.part, pos=excluded.pos, dur=excluded.dur, "
+      "done=excluded.done, updated=excluded.updated",
+      # once seen to the end it stays 已看完, even when it's watched again
+      (g.owner, jid, part, pos, dur, int(done or bool(prev and prev["done"])), time.time()))
+    return jsonify(ok=True, done=done)
+
+
+@app.post("/api/jobs/<int:jid>/<action>")
+def job_action(jid, action):
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    if action == "cancel":
+        return jsonify(msg=pipeline.cancel_job(jid))
+    if action == "retry":
+        return jsonify(msg=pipeline.retry_job(jid))
+    if action == "delete":
+        with_files = bool((request.get_json(silent=True) or {}).get("files"))
+        result, files = pipeline.remove_job(jid, with_files)
+        if files:
+            library.plex_refresh()
+        return jsonify(msg="removed from list" if result != "stopping" else "still stopping; remove it again in a moment",
+                       result=result, files=files)
+    return jsonify(error="unknown action"), 400
+
+
+@app.post("/api/tags/merge")
+def tags_merge():
+    if not g.admin:
+        return jsonify(error="admin only"), 403
+    return jsonify(merged=llm.merge_tags())
+
+
+@app.post("/api/jobs/remove")
+def remove_many():
+    """Batch removal: {"ids": [...], "files": true/false}"""
+    body = request.get_json(silent=True) or {}
+    with_files = bool(body.get("files"))
+    out = {"removed": 0, "stopping": 0, "files": 0}
+    for jid in body.get("ids", [])[:500]:
+        if isinstance(jid, int) and visible(jid):
+            result, files = pipeline.remove_job(jid, with_files)
+            out[result] = out.get(result, 0) + 1
+            out["files"] += files
+    if out["files"]:
+        library.plex_refresh()
+    return jsonify(out)
+
+
+@app.get("/subs/<int:jid>/<int:n>/bi")
+def subs_bilingual(jid, n):
+    """Chinese above English in one track: the Chinese cues, each with the English said meanwhile under it."""
+    m = library.job_media(jid, n)
+    pair = library.bilingual_pair(m) if m else None
+    if not pair:
+        return "", 404
+    zh, en = library.srt_cues(pair[0]), library.srt_cues(pair[1])
+
+    def ts(t):
+        h, rem = divmod(t, 3600)
+        mm, sec = divmod(rem, 60)
+        return f"{int(h):02}:{int(mm):02}:{sec:06.3f}"
+    out, j = ["WEBVTT", ""], 0
+    same = len(zh) == len(en) and all(abs(x[0] - y[0]) < 0.01 for x, y in zip(zh, en))  # translated line by line
+    for i, (a, b, t) in enumerate(zh):
+        if same:
+            said = en[i][2]
+        else:  # different files: the English said mostly within this cue
+            while j < len(en) and en[j][1] <= a:
+                j += 1
+            said = " ".join(x for s, e, x in en[j:j + 4] if min(b, e) - max(a, s) > (e - s) / 2)
+        out += [f"{ts(a)} --> {ts(b)}", t] + ([said] if said else []) + [""]
+    return Response("\n".join(out), mimetype="text/vtt")
+
+
+@app.get("/play/<int:jid>/<int:n>")
+def play(jid, n):
+    m = library.job_media(jid, n)
+    if not m:
+        return "", 404
+    path = Path(m["path"])
+    if path.suffix.lower() in library.BROWSER_DIRECT:
+        return send_file(path, conditional=True)  # supports Range requests, so seeking works
+    # Browsers can't open MKV/AVI/TS (or APE/WMA): repackage once as MP4 into a cache and serve that with
+    # Range support (iPhones refuse video without it). Video is copied; only odd audio gets re-encoded.
+    cached = library.remux_for_browser(path)
+    if cached:
+        return send_file(cached, conditional=True)
+    return "", 415
+
+
+@app.get("/subs/<int:jid>/<int:n>/<int:k>")
+def subs(jid, n, k):
+    m = library.job_media(jid, n)
+    if not m or not 0 <= k < len(m["subs"]):
+        return "", 404
+    text = Path(m["subs"][k]).read_text(errors="ignore")
+    if not text.startswith("WEBVTT"):  # SRT -> WebVTT: header + dot as the millisecond separator
+        text = "WEBVTT\n\n" + re.sub(r"(\d\d:\d\d:\d\d),(\d\d\d)", r"\1.\2", text.replace("\r", ""))
+    return Response(text, mimetype="text/vtt")
+
+
+@app.get("/frame/<int:jid>/<int:n>")
+def frame(jid, n):
+    """The frame `t` seconds into a video (a search found something there), cached."""
+    m = library.job_media(jid, n)
+    try:
+        t = max(0.0, float(request.args.get("t", "0")))
+    except ValueError:
+        return "", 400
+    if not m:
+        return "", 404
+    out = MEDIA / ".cache" / "frames" / f"{jid}-{n}-{int(t)}.jpg"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t), "-i", m["path"], "-frames:v", "1", "-vf", "scale=640:-2",
+                        str(out)], capture_output=True, timeout=60)
+    return send_file(out, max_age=86400) if out.exists() else ("", 404)
+
+
+@app.get("/thumb/<int:jid>")
+def thumb(jid):
+    row = q("SELECT thumb, files FROM jobs WHERE id=?", (jid,), one=True)
+    if not (library.token_ok(jid, 0) or visible(jid)) or not row:
+        return "", 404
+    thumb = row["thumb"]
+    if not thumb or not Path(thumb).exists():
+        # the file was renamed or moved: use the cover that sits with the media now, and remember it
+        thumb = next((f for f in json.loads(row["files"] or "[]") if f.endswith(".jpg") and Path(f).exists()), None)
+        if not thumb:
+            return "", 404
+        q("UPDATE jobs SET thumb=? WHERE id=?", (thumb, jid))
+    return send_file(thumb, max_age=3600)
+
+
+def setup_app():
+    app.secret_key = secret_key()
+    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                      MAX_CONTENT_LENGTH=10 << 20)  # uploads are only .torrent files
+    app.permanent_session_lifetime = 365 * 86400
+    # big uploads (随记 videos) are spooled to temp files: keep those on the disks, not the SD card / RAM
+    tmp = INCOMPLETE / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(tmp)
+
+
+# The other modules, imported last: they import this one too, and are only used at run time
+from . import board, channels, core, library, llm, notes, pipeline, search  # noqa: E402
