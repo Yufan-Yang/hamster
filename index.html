@@ -203,6 +203,9 @@
   .desc .toggle { color: var(--blue); margin-top: 4px; cursor: pointer; }
   .desc ul { margin: 10px 0 0; padding-left: 0; list-style: none; }
   .desc li { margin: 4px 0; padding-left: 16px; position: relative; }
+  .desc li.jump { cursor: pointer; }
+  .desc li.jump:hover { background: var(--bg); }
+  .desc li .at { font-weight: normal; background: var(--ink); color: var(--bg); padding: 0 4px; font-variant-numeric: tabular-nums; }
   .desc li::before { content: "■"; position: absolute; left: 0; color: var(--accent); }
   .card.is-hidden .cover { opacity: .45; }
   .badge.hid { background: var(--muted); color: var(--bg); }
@@ -1262,7 +1265,7 @@ function openWatch(id, part = 0, t = 0) {
     <div class="desc" id="desc" onclick="this.classList.add('open')">
       <div class="sum">${hl(a.summary || "")}</div>
       <div class="more">
-        ${(a.key_points || []).length ? `<ul>${a.key_points.map(p => `<li>${hl(p)}</li>`).join("")}</ul>` : ""}
+        ${(a.key_points || []).length ? `<ul id="points">${a.key_points.map(p => `<li>${hl(p)}</li>`).join("")}</ul>` : ""}
         ${file ? `<div class="meta" style="margin-top:10px">位置：${esc(file.replace("/mnt/media/", ""))}</div>` : ""}
         ${a.note ? `<div class="meta">注：${esc(a.note)}</div>` : ""}
         <div class="toggle" onclick="event.stopPropagation(); $('#desc').classList.remove('open')">收起</div>
@@ -1281,6 +1284,7 @@ function openWatch(id, part = 0, t = 0) {
     </div>
     ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
     <div id="similarBox"></div>
+    <div id="chapters"></div>
     ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
     ${hitList(j)}
     ${desc}`;
@@ -1289,6 +1293,7 @@ function openWatch(id, part = 0, t = 0) {
   updateWatchStatus();
   if (m) setupMediaSession(j);
   loadSimilar(id);
+  loadPointTimes(id);
   const el = $("#watchBody video, #watchBody audio");
   if (el) {
     let last = 0;
@@ -1296,6 +1301,25 @@ function openWatch(id, part = 0, t = 0) {
     el.addEventListener("pause", () => saveWatch());
     el.addEventListener("ended", () => saveWatch(true));
   }
+}
+// the summary's key points, each with the moment it's talked about: click to jump there
+async function loadPointTimes(id) {
+  let r;
+  try { r = await (await fetch(`/api/points/${id}`)).json(); } catch (e) { return; }
+  if (!watching || watching.id !== id) return;
+  const ch = (r.chapters || {})[String(watching.part)] || [];
+  if (ch.length && $("#chapters")) $("#chapters").innerHTML = `<div class="hits"><div class="psec">章节</div>${ch.map(c =>
+    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`).join("")}</div>`;
+  const ul = $("#points");
+  if (!ul) return;
+  const multi = ((state.jobs.find(j => j.id === id) || {}).media || []).length > 1;
+  [...ul.children].forEach((li, i) => {
+    const at = (r.times || [])[i];
+    if (!at) return;
+    li.classList.add("jump");
+    li.insertAdjacentHTML("afterbegin", `<b class="at">${multi ? `P${at.part + 1} ` : ""}${dur(at.t) || "0:00"}</b> `);
+    li.onclick = e => { e.stopPropagation(); seekTo(id, at.part, at.t); };
+  });
 }
 // the same content elsewhere in the library: a re-upload, a clip of this, or what this is a clip of
 async function loadSimilar(id) {

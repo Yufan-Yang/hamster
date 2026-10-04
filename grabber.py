@@ -133,6 +133,66 @@ def heavy_slot(kind, job_id=None):
             h.close()  # closing releases the lock
 
 
+# ---------------------------------------------------------------- wake-ups between processes
+#
+# The web page, the worker and the job processes share the database; when one changes something another one is
+# waiting for (a job queued, a task published, a download finished), it rings a bell instead of the others asking
+# the database every few seconds. A bell is a datagram to a UNIX socket each long-running process listens on;
+# waiting is with a timeout, so a lost ring only means a short delay.
+
+WAKE_DIR = STATE / "wake"
+_bell = threading.Condition()
+_rings = {}
+
+
+def ring(*topics):
+    """Something about `topics` ("jobs", "tasks") changed: wake whoever waits on it, in any process."""
+    import socket
+    msg = ",".join(topics).encode()
+    with _bell:  # this process too
+        for t in topics:
+            _rings[t] = _rings.get(t, 0) + 1
+        _bell.notify_all()
+    for f in WAKE_DIR.glob("*.sock") if WAKE_DIR.exists() else []:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+                sock.setblocking(False)
+                sock.sendto(msg, str(f))
+        except OSError:
+            pass  # that process isn't running
+
+
+def listen_bell(name):
+    """Hear rings from other processes (call once per long-running process)."""
+    import socket
+    WAKE_DIR.mkdir(parents=True, exist_ok=True)
+    path = WAKE_DIR / f"{name}-{os.getpid()}.sock"
+    for old in WAKE_DIR.glob(f"{name}-*.sock"):
+        old.unlink(missing_ok=True)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    sock.bind(str(path))
+
+    def loop():
+        while True:
+            topics = sock.recv(256).decode(errors="ignore").split(",")
+            with _bell:
+                for t in topics:
+                    _rings[t] = _rings.get(t, 0) + 1
+                _bell.notify_all()
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def bell_mark(topic):
+    """Note where the rings are before looking, so a ring that comes while looking isn't missed."""
+    with _bell:
+        return _rings.get(topic, 0)
+
+
+def bell_wait(topic, mark, timeout):
+    with _bell:
+        _bell.wait_for(lambda: _rings.get(topic, 0) != mark, timeout)
+
+
 # ---------------------------------------------------------------- database
 
 def log_usage(kind, purpose="", job_id=None, amount=0, tokens_in=0, tokens_out=0, seconds=0, cost=None, cache_hit=0):
@@ -367,7 +427,7 @@ def add_job_ex(url, source="web", chat_id=None, msg_id=None, owner=None, device=
             # Still downloading: wait for it; finish_links() fills this in when it's done
             update(job_id, ref=source_job["id"], status="linked")
         return job_id, "linked"
-    download_wakeup.set()
+    ring("jobs")
     return job_id, "new"
 
 
@@ -383,7 +443,7 @@ def finish_links(source_id):
             update(r["id"], **{f: src[f] for f in SHARED_FIELDS})
         else:  # the original was cancelled: download it for this account after all
             update(r["id"], ref=None, status="queued", progress=0)
-            download_wakeup.set()
+            ring("jobs")
 
 
 def job_dict(row):
@@ -1542,16 +1602,17 @@ def run_job(job_id):
             update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=None, error=str(e)[:1000])
     finally:
         finish_links(job_id)
+        ring("jobs", "tasks")  # a download slot is free; the CPU may be (the Pi's idle work waits for that)
         notify(job_id)
 
 
-download_wakeup = threading.Event()
 finishing = []  # job processes past their final status, still doing finishing touches
 claim_lock = threading.Lock()
 
 
 def worker_loop():
     while True:
+        mark = bell_mark("jobs")
         with claim_lock:
             # failed jobs whose automatic retry is due go back in the queue
             if q("SELECT 1 FROM jobs WHERE status='failed' AND retry_at IS NOT NULL AND retry_at<=? LIMIT 1", (time.time(),), one=True):
@@ -1569,7 +1630,7 @@ def worker_loop():
             if row:
                 update(row["id"], status="downloading", stage="starting", cancel=0)
         if not row:
-            time.sleep(2)  # the page adds jobs from another process; polling is cheap
+            bell_wait("jobs", mark, 60)  # a new job rings; a due automatic retry is found within the minute
             continue
         jid = row["id"]
         # Each job in its own lower-priority process: it gets its own CPU core and can't slow the page
@@ -1756,7 +1817,6 @@ def retry_job(jid):
     if not row or row["status"] not in ("failed", "cancelled"):
         return f"#{jid} can't be retried"
     update(jid, status="queued", error="", progress=0, stage="", ref=None, attempts=0, retry_at=None, cancel=0)
-    download_wakeup.set()
     return f"Retrying #{jid}"
 
 
@@ -2800,12 +2860,14 @@ WORKER_FRESH = 300
 PREFER_WAIT = 3 * 86400  # e.g. a Mac that claims but never finishes
 LEASE = 300  # seconds a claim lasts without a heartbeat
 PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops counting as around
-PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu"}
+# "now": CPU work someone is waiting for (a note just made): done right away, not only in idle time
+PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now"}
 
 
-def task(kind, label, pool, prefer=None, remote=False, then=None):
+def task(kind, label, pool, prefer=None, remote=False, then=None, prefer_wait=PREFER_WAIT):
     def register(run):
-        TASK_KINDS[kind] = {"label": label, "pool": pool, "prefer": prefer, "remote": remote, "then": then, "run": run}
+        TASK_KINDS[kind] = {"label": label, "pool": pool, "prefer": prefer, "remote": remote, "then": then, "run": run,
+                            "prefer_wait": prefer_wait}
         return run
     return register
 
@@ -2826,6 +2888,13 @@ def _write(sql, args=()):
 
 def task_payload(kind, target):
     """What a task needs to know about its target, filled in by the Pi (a publisher only names the target)."""
+    n = re.fullmatch(r"note:(\d+)", target)
+    if n:
+        row = q("SELECT text, media FROM notes WHERE id=?", (int(n.group(1)),), one=True)
+        if not row:
+            raise ValueError(f"no note {n.group(1)}")
+        return {"note": int(n.group(1)), "title": (row["text"] or "随记")[:30],
+                "files": [{"file": m["file"], "kind": m["kind"]} for m in json.loads(row["media"]) if m.get("todo")]}
     d = re.fullmatch(r"digest:(.+):(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)", target)
     if d:
         return {"owner": d.group(1), "start": d.group(2), "end": d.group(3), "title": f"{d.group(2)} ~ {d.group(3)}"}
@@ -2856,6 +2925,7 @@ def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_bef
     _write("INSERT OR IGNORE INTO tasks (kind, target, priority, payload, parent, published_by, not_before, created, "
            "updated) VALUES (?,?,?,?,?,?,?,?,?)", (kind, target, priority, payload, parent, by, not_before, now, now))
     row = q("SELECT id, state FROM tasks WHERE kind=? AND target=?", (kind, target), one=True)
+    ring("tasks")
     if force and row["state"] in ("done", "failed"):
         _write("UPDATE tasks SET state='queued', priority=?, payload=?, parent=?, published_by=?, result=NULL, "
                "progress=NULL, error='', attempts=0, worker=NULL, lease_until=NULL, not_before=?, updated=? "
@@ -2914,15 +2984,15 @@ def claim_task(worker, caps):
         return None
     alive = {c for r in q("SELECT caps FROM workers WHERE seen > ? AND name != ?", (now - WORKER_FRESH, worker))
              for c in json.loads(r["caps"])}
-    # leave a preferred worker's tasks to it while it's around (unless they've waited long)
+    # leave a preferred worker's tasks to it while it's around (unless they've waited long enough)
     waived = [k for k in kinds if TASK_KINDS[k].get("prefer") and TASK_KINDS[k]["prefer"] not in caps
               and TASK_KINDS[k]["prefer"] in alive]
     marks = ",".join("?" * len(kinds))
     cond = f"state='queued' AND kind IN ({marks}) AND COALESCE(not_before, 0) <= ?"
     args = [*kinds, now]
-    if waived:
-        cond += f" AND NOT (kind IN ({','.join('?' * len(waived))}) AND created > ?)"
-        args += [*waived, now - PREFER_WAIT]
+    for k in waived:  # until it has waited that kind's prefer_wait
+        cond += " AND NOT (kind = ? AND created > ?)"
+        args += [k, now - TASK_KINDS[k]["prefer_wait"]]
     for _ in range(5):  # another worker may take the same row first: try the next one
         row = q(f"SELECT * FROM tasks WHERE {cond} ORDER BY priority DESC, id DESC LIMIT 1", args, one=True)
         if not row:
@@ -2975,6 +3045,7 @@ def fail_task(tid, worker, error, retry=True):
 
 def release_task(tid, worker):
     """Paused for other work (not a failure): back on the board with its progress, the try not counted."""
+    ring("tasks")
     _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, attempts=MAX(attempts-1, 0), updated=? "
            "WHERE id=? AND worker=? AND state='running'", (time.time(), tid, worker))
 
@@ -3055,6 +3126,7 @@ def pi_save_subs(task, beat):
         plex_refresh()  # Plex picks up the new subtitle file
         maybe_translate(task, path, lang)
         publish("similar", f"job:{jid}", task["priority"] - 3, parent=task["id"], force=True)
+        publish("chapters", task["target"], task["priority"] - 1, parent=task["id"], force=True)
     drop_parent_result(task, {"language": lang, "lines": len(segs), "audio_seconds": res.get("audio_seconds")})
     return {"lines": len(segs), "language": lang}
 
@@ -3069,6 +3141,7 @@ def pi_summarize(task, beat):
     a.pop("note", None)
     a = summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
     update(jid, analysis=a, stage="")
+    publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True)  # key points changed
     vids = [f for f in json.loads(row["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
     if vids:
         threading.Thread(target=plex_set_metadata, args=([(vids[0], a)],), daemon=True).start()
@@ -3349,6 +3422,49 @@ def pi_similar(task, beat):
     return {"found": found, "shingles": nsh, "frames": 0 if frames is None else len(frames)}
 
 
+CHAPTERS_SYSTEM = """You split a video into chapters from its timed subtitles, for a Chinese viewer.
+Each input line starts with its time [h:mm:ss]. Give 4-12 chapters covering the whole video in order: where each
+starts (seconds, taken from a line's time) and a short Chinese title (at most 16 characters) naming the topic, not
+"第一部分". Then, for each numbered KEY POINT, the time (seconds) where it is said or argued most directly, or null.
+Reply with one JSON object: {{"chapters": [{{"t": <seconds>, "title": "..."}}], "points": [<seconds or null>, ...]}}"""
+
+
+@task("chapters", "章节", "ai-quick", remote=True)
+def pi_chapters(task, beat):
+    """Chapters of a video, and where each key point of its summary is said, from its subtitles (one AI call
+    without thinking: ~¥0.03 for an hour and a half). The watch page lists both; a click jumps there."""
+    jid, n = task["payload"]["job"], task["payload"]["part"]
+    rows = q("SELECT t, text FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕' AND t IS NOT NULL ORDER BY t",
+             (jid, n))
+    if len(rows) < 20:
+        return {"skipped": "too few subtitles"}
+    blocks, cur, start = [], [], None
+    for r in rows:  # ~30-second blocks keep the input small
+        if start is None:
+            start = r["t"]
+        cur.append(r["text"])
+        if r["t"] - start >= 30:
+            blocks.append(f"[{int(start // 3600)}:{int(start % 3600 // 60):02}:{int(start % 60):02}] {' '.join(cur)}")
+            cur, start = [], None
+    if cur:
+        blocks.append(f"[{int(start // 3600)}:{int(start % 3600 // 60):02}:{int(start % 60):02}] {' '.join(cur)}")
+    a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
+    points = (a.get("key_points") or []) if n == 0 else []
+    user = "SUBTITLES:\n" + "\n".join(blocks)[:80000] + "\n\nKEY POINTS:\n" + "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
+    out = llm_json(CHAPTERS_SYSTEM, user, {"chapters": "array", "points": "array"}, 4000, {}, "chapters", jid, think=False)
+    end = rows[-1]["t"]
+    chapters = sorted(({"t": float(c["t"]), "title": str(c.get("title") or "")[:24]} for c in out.get("chapters") or []
+                       if isinstance(c, dict) and isinstance(c.get("t"), (int, float)) and 0 <= c["t"] <= end + 60),
+                      key=lambda c: c["t"])
+    times = [float(t) if isinstance(t, (int, float)) and 0 <= t <= end + 60 else None for t in (out.get("points") or [])]
+    a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
+    a.setdefault("chapters", {})[str(n)] = chapters
+    if n == 0 and len(times) == len(points):
+        a["point_times"] = times
+    update(jid, analysis=a)
+    return {"chapters": len(chapters), "points": sum(t is not None for t in times)}
+
+
 @task("index_subs", "整理已有字幕", "light", remote=True)
 def pi_index_subs(task, beat):
     path, subs = task_media(task)
@@ -3360,6 +3476,7 @@ def pi_index_subs(task, beat):
     for t, text in cues:
         q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, t, text))
     maybe_translate(task, path, subs)
+    publish("chapters", task["target"], task["priority"] - 1, parent=task["id"], force=True)
     return {"lines": len(cues), "file": Path(subs[0]).name}
 
 
@@ -3503,7 +3620,7 @@ def box_busy():
     """Something someone is waiting for needs the CPU: a download being processed, a note being transcribed.
     (Plain downloading doesn't count: it's network-bound.)"""
     return bool(q("SELECT 1 FROM jobs WHERE status='processing' LIMIT 1", one=True)
-                or q("SELECT 1 FROM notes WHERE pending=1 LIMIT 1", one=True))
+                or q("SELECT 1 FROM tasks WHERE kind='note_media' AND state='running' LIMIT 1", one=True))
 
 
 def pi_idle():
@@ -3515,6 +3632,7 @@ def light_loop(pool="light"):
     of, so done right away, here."""
     worker = pi_worker(pool)
     while True:
+        mark = bell_mark("tasks")
         try:
             claimed = claim_task(*worker)
             if claimed:
@@ -3522,7 +3640,7 @@ def light_loop(pool="light"):
                 continue
         except Exception:
             traceback.print_exc()
-        time.sleep(3)
+        bell_wait("tasks", mark, 60)  # a publish rings; a delayed retry or a lease running out within the minute
 
 
 def heavy_loop():
@@ -3530,24 +3648,40 @@ def heavy_loop():
     one task at a time in its own lowest-priority process, which pauses (progress kept) when something comes in."""
     time.sleep(30)
     while True:
+        mark = bell_mark("tasks")
         try:
             if IDLE_WORK and not box_busy() and mem_available_mb() > 1000:
                 claimed = claim_task(*pi_worker("cpu"))
                 if claimed:
-                    subprocess.run(["nice", "-n", "19", sys.executable, __file__, "task", str(claimed["id"])])
+                    subprocess.run(["nice", "-n", "19", sys.executable, __file__, "task", str(claimed["id"]), PI_WORKERS["cpu"]])
                     continue
             else:
                 seen_worker(*pi_worker("cpu"))
         except Exception:
             traceback.print_exc()
-        time.sleep(20)
+        bell_wait("tasks", mark, 120)  # a publish or a finished download rings
 
 
-def run_task_process(tid):
-    """`grabber.py task N`: the heavy worker's process for one task it claimed."""
-    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, PI_WORKERS["cpu"]), one=True)
+def now_loop():
+    """Worker thread: CPU work someone is waiting for (a note just made), right away, in its own process."""
+    worker = pi_worker("now")
+    while True:
+        mark = bell_mark("tasks")
+        try:
+            claimed = claim_task(*worker)
+            if claimed:
+                subprocess.run(["nice", "-n", "15", sys.executable, __file__, "task", str(claimed["id"]), worker[0]])
+                continue
+        except Exception:
+            traceback.print_exc()
+        bell_wait("tasks", mark, 60)
+
+
+def run_task_process(tid, worker):
+    """`grabber.py task N WORKER`: the process for one task a CPU worker claimed."""
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
     if row:
-        run_claimed(task_dict(row), PI_WORKERS["cpu"])
+        run_claimed(task_dict(row), worker)
 
 
 def board_summary():
@@ -3574,6 +3708,28 @@ def board_summary():
                for r in q("SELECT * FROM workers ORDER BY seen DESC")]
     return {"kinds": kinds, "running": running, "failed": failed, "workers": workers, "enabled": IDLE_WORK,
             "busy": box_busy()}
+
+
+def publish_chapters_once():
+    """Once: chapters for the videos that have subtitles already (off-peak: half price)."""
+    if kv_get("board_chapters"):
+        return
+    when = offpeak_from()
+    for r in q("SELECT DISTINCT ref, part FROM seg WHERE kind='job' AND src='字幕'"):
+        try:
+            publish("chapters", f"job:{r['ref']}:{r['part']}", 5, not_before=when)
+        except ValueError:
+            pass
+    kv_set("board_chapters", True)
+
+
+def publish_pending_notes():
+    """Notes whose attachments the old loop hadn't done yet (before notes were tasks)."""
+    for r in q("SELECT id FROM notes WHERE pending=1"):
+        try:
+            publish("note_media", f"note:{r['id']}", 60)
+        except ValueError:
+            pass
 
 
 def publish_similar_once():
@@ -3780,7 +3936,7 @@ def backfill_usage():
 
 USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm", "summarize"): "AI 总结（看字幕）",
                ("llm", "earlier"): "AI 分类+总结（统计开始前，未细分）", ("llm", "translate"): "AI 翻译字幕",
-               ("llm", "digest"): "AI 追更周报", ("llm", "tags"): "AI 合并同义标签",
+               ("llm", "digest"): "AI 追更周报", ("llm", "chapters"): "AI 章节", ("llm", "tags"): "AI 合并同义标签",
                ("whisper", "job"): "语音转文字 · 新下载（抽样 6 分钟）", ("whisper", "note"): "语音转文字 · 随记",
                ("whisper", "idle"): "语音转文字 · 闲时生成字幕（Pi）",
                ("whisper", "mac"): "语音转文字 · 完整字幕（Mac）", ("encode", "plex"): "转码（Plex / 手机能播）",
@@ -3881,10 +4037,11 @@ def api_claim():
         return jsonify(task=None)
     deadline = time.time() + min(float(body.get("wait") or 0), 25)
     while True:
+        mark = bell_mark("tasks")
         task = claim_task(worker, caps)
         if task or time.time() >= deadline:
             return jsonify(task=task)
-        time.sleep(2)
+        bell_wait("tasks", mark, max(0.1, deadline - time.time()))
 
 
 @app.post("/api/tasks/<int:tid>/heartbeat")
@@ -3993,6 +4150,18 @@ def api_task_keyframes(tid):
         finally:
             os.unlink(out.name)
     return Response(stream(), mimetype="application/x-tar")
+
+
+@app.get("/api/tasks/<int:tid>/note-file")
+def api_task_note_file(tid):
+    """One attachment of the note a note_media task is about."""
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    name = request.args.get("file", "")
+    if not task or name not in [f["file"] for f in task["payload"].get("files", [])]:
+        return jsonify(error="not your task / not its file"), 404
+    return send_file(NOTES_DIR / name, conditional=True)
 
 
 @app.get("/api/tasks/<int:tid>/cover")
@@ -4269,6 +4438,8 @@ def note_add():
     media = save_note_files(nid, files)
     q("UPDATE notes SET media=?, pending=? WHERE id=?",
       (json.dumps(media, ensure_ascii=False), int(any(m["todo"] for m in media)), nid))
+    if media:
+        publish("note_media", f"note:{nid}", 60, force=True)
     return jsonify(note=note_dict(note_row(nid)))
 
 
@@ -4309,6 +4480,7 @@ def note_add_media(nid):
     row = note_row(nid)  # re-read: saving big files takes a while
     q("UPDATE notes SET media=?, pending=1, updated=? WHERE id=?",
       (json.dumps(json.loads(row["media"]) + added, ensure_ascii=False), time.time(), nid))
+    publish("note_media", f"note:{nid}", 60, force=True)
     return jsonify(note=note_dict(note_row(nid)))
 
 
@@ -4339,59 +4511,68 @@ def note_file(nid, n, what="file"):
     return send_file(path, conditional=True, max_age=86400)  # Range requests: videos seek, iPhones play them
 
 
-def note_media_loop():
-    """Worker: video posters, durations and speech-to-text for new notes, one note at a time in its own process."""
-    while True:
-        row = q("SELECT id FROM notes WHERE pending=1 ORDER BY id LIMIT 1", one=True)
-        if not row:
-            time.sleep(3)
-            continue
-        proc = subprocess.run(["nice", "-n", "15", sys.executable, __file__, "note-media", str(row["id"])])
-        if proc.returncode != 0:
-            q("UPDATE notes SET pending=0 WHERE id=?", (row["id"],))  # don't retry forever
-
-
-def process_note(nid):
-    """Photos: text on them (OCR) and what they look like (CLIP); videos: poster, what's said and how the poster
-    looks; voice: what's said. All of it makes the note searchable."""
+def note_files(nid):
     row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)
-    if not row:
-        return
-    done = {}
-    for m in json.loads(row["media"]):
-        if not m.get("todo"):
-            continue
-        path, extra = NOTES_DIR / m["file"], {}
+    return [m for m in json.loads(row["media"]) if m.get("todo")] if row else []
+
+
+@task("note_media", "识别随记附件", "now", prefer="gpu", prefer_wait=90, then="save_note_media")
+def pi_note_media(task, beat):
+    """Photos: the text on them and what they look like; videos: what's said and what the first frame looks like;
+    voice: what's said. Worked out here when the Mac doesn't take it within a minute and a half."""
+    out = {}
+    for m in note_files(task["payload"]["note"]):
+        path, item = NOTES_DIR / m["file"], {}
         try:
-            gps = photo_gps(path) if m["kind"] == "image" else video_gps(path) if m["kind"] == "video" else None
-            if gps:
-                extra["gps"], extra["place"] = [round(gps[0], 5), round(gps[1], 5)], place_name(*gps)
             if m["kind"] == "image":
-                extra["ocr"] = "\n".join(ocr_text(path))
-                picture = path
+                item["ocr"] = "\n".join(ocr_text(path))
+                v = clip_image(path)
             else:
-                extra["duration"] = float(ffprobe(path).get("format", {}).get("duration") or 0) or None
-                picture = None
-                if m["kind"] == "video" and grab_frame(path, path.with_suffix(".poster.jpg")):
-                    picture = path.with_suffix(".poster.jpg")
-                    extra["poster"] = picture.name
+                item["duration"] = float(ffprobe(path).get("format", {}).get("duration") or 0) or None
+                v = clip_image(path, t=min(1.0, (item["duration"] or 2) / 2)) if m["kind"] == "video" else None
                 # the prompt steers Chinese towards simplified characters (search is by simplified text)
                 text, _ = transcribe(None, path, None, prompt="以下是普通话的日常随记，用简体中文。", model=NOTE_WHISPER_MODEL,
                                      purpose="note")
-                extra["transcript"] = (text or "").strip()
-            if picture:
-                v = clip_image(picture)
-                if v is not None:
-                    q("DELETE FROM vec WHERE kind='note' AND ref=? AND src=?", (nid, "照片:" + m["file"]))
-                    store_vec("note", nid, 0, None, "照片:" + m["file"], v)
+                item["transcript"] = (text or "").strip()
+            item["vector"] = vec_to(v) if v is not None else None
+        except Exception as e:
+            traceback.print_exc()
+            item["error"] = str(e)[:200]
+        out[m["file"]] = item
+    return {"items": out}
+
+
+@task("save_note_media", "保存随记识别", "light")
+def pi_save_note_media(task, beat):
+    """Write what was worked out into the note; the Pi adds what needs the file itself (a video's poster, where a
+    photo or video was taken)."""
+    nid = task["payload"]["note"]
+    items = parent_result(task).get("items") or {}
+    row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)
+    if not row:
+        return {"skipped": "note deleted"}
+    media = json.loads(row["media"])
+    for m in media:
+        it = items.get(m["file"])
+        if it is None:
+            continue
+        path = NOTES_DIR / m["file"]
+        m.update({k: it[k] for k in ("ocr", "transcript", "duration") if k in it}, todo=False)
+        try:
+            gps = photo_gps(path) if m["kind"] == "image" else video_gps(path) if m["kind"] == "video" else None
+            if gps:
+                m["gps"], m["place"] = [round(gps[0], 5), round(gps[1], 5)], place_name(*gps)
+            if m["kind"] == "video" and grab_frame(path, path.with_suffix(".poster.jpg")):
+                m["poster"] = path.with_suffix(".poster.jpg").name
         except Exception:
             traceback.print_exc()
-        done[m["file"]] = extra
-    # re-read: the note may have been edited meanwhile
-    row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)
-    if row:
-        media = [{**m, **done[m["file"]], "todo": False} if m["file"] in done else m for m in json.loads(row["media"])]
-        q("UPDATE notes SET media=?, pending=0 WHERE id=?", (json.dumps(media, ensure_ascii=False), nid))
+        q("DELETE FROM vec WHERE kind='note' AND ref=? AND src=?", (nid, "照片:" + m["file"]))
+        if it.get("vector"):
+            store_vec("note", nid, 0, None, "照片:" + m["file"], vec_from(it["vector"]))
+    q("UPDATE notes SET media=?, pending=? WHERE id=?",
+      (json.dumps(media, ensure_ascii=False), int(any(m.get("todo") for m in media)), nid))
+    drop_parent_result(task, {"items": len(items)})
+    return {"items": len(items)}
 
 
 def delete_job_files(row):
@@ -4469,6 +4650,60 @@ def remove_job(jid, with_files):
     if with_files and shared:
         return "kept_shared", 0
     return "removed", files
+
+
+def point_times(jid):
+    """When each of the summary's key points is talked about: the 45-second stretch of subtitles that shares the
+    most (rarer) two-character pieces with the point. Free (no AI), and good enough to jump close to it;
+    points that match nothing well get no time."""
+    import math
+    row = q("SELECT analysis, ref FROM jobs WHERE id=?", (jid,), one=True)
+    a = json.loads(row["analysis"] or "{}")
+    points = a.get("key_points") or []
+    source = row["ref"] or jid  # an entry linked to another account's download shares its subtitles
+    lines = q("SELECT part, t, text FROM seg WHERE kind='job' AND ref=? AND src IN ('字幕','译文') AND t IS NOT NULL "
+              "ORDER BY src='译文' DESC, part, t", (source,))
+    if not points or not lines:
+        return []
+    zh_first = any(r["text"] and re.search(r"[\u4e00-\u9fff]", r["text"]) for r in lines[:50])
+    lines = [r for r in lines if not zh_first or re.search(r"[\u4e00-\u9fff]", r["text"] or "")]
+
+    def grams(text):
+        t = re.sub(r"[\W_]+", "", text.casefold())
+        return {t[i:i + 2] for i in range(len(t) - 1)}
+    windows = []
+    for i, r in enumerate(lines):
+        text, j = [], i
+        while j < len(lines) and lines[j]["part"] == r["part"] and lines[j]["t"] - r["t"] < 45:
+            text.append(lines[j]["text"])
+            j += 1
+        windows.append((r["part"], r["t"], grams(" ".join(text))))
+    df = {}
+    for _, _, gr in windows:
+        for x in gr:
+            df[x] = df.get(x, 0) + 1
+    idf = {x: math.log(len(windows) / n) for x, n in df.items()}
+    out = []
+    for p in points:
+        pg = grams(p)
+        total = sum(idf.get(x, 0) for x in pg) or 1
+        best = max(windows, key=lambda w: sum(idf.get(x, 0) for x in pg & w[2]))
+        score = sum(idf.get(x, 0) for x in pg & best[2]) / total
+        out.append({"part": best[0], "t": round(best[1], 1)} if score >= 0.3 else None)
+    return out
+
+
+@app.get("/api/points/<int:jid>")
+def key_point_times(jid):
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    row = q("SELECT analysis, ref FROM jobs WHERE id=?", (jid,), one=True)
+    a = json.loads(row["analysis"] or "{}")
+    if row["ref"]:  # linked entry: the downloading job has the chapters
+        a = {**json.loads(q("SELECT analysis FROM jobs WHERE id=?", (row["ref"],), one=True)["analysis"] or "{}"), **a}
+    times = [{"part": 0, "t": t} if t is not None else None for t in a["point_times"]] if a.get("point_times") \
+        else point_times(jid)
+    return jsonify(times=times, chapters=a.get("chapters") or {})
 
 
 @app.get("/api/similar/<int:jid>")
@@ -4813,6 +5048,7 @@ def setup_app():
 def main_web():
     init_db()
     setup_app()
+    listen_bell("web")
     ensure_admin()
     threading.Thread(target=warm_probes, daemon=True).start()
     if (CLIP_DIR / "text.onnx").exists():
@@ -4826,16 +5062,19 @@ def main_web():
 def main_worker():
     init_db(reset=True)
     setup_app()
+    listen_bell("worker")
     INCOMPLETE.mkdir(parents=True, exist_ok=True)
     for _ in range(DOWNLOAD_WORKERS):
         threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=sweep_loop, daemon=True).start()
     threading.Thread(target=sub_loop, daemon=True).start()
-    threading.Thread(target=note_media_loop, daemon=True).start()
+    threading.Thread(target=now_loop, daemon=True).start()
     migrate_to_board()
     publish_frames_once()
     publish_translations_once()
     publish_similar_once()
+    publish_pending_notes()
+    publish_chapters_once()
     threading.Thread(target=backfill_published, daemon=True).start()
     threading.Thread(target=light_loop, daemon=True).start()
     threading.Thread(target=light_loop, args=("ai",), daemon=True).start()
@@ -4867,11 +5106,8 @@ if __name__ == "__main__":
         main_worker()
     elif mode == "run-job":
         main_run_job(int(sys.argv[2]))
-    elif mode == "note-media":
-        init_db()
-        process_note(int(sys.argv[2]))
     elif mode == "task":
         init_db()
-        run_task_process(int(sys.argv[2]))
+        run_task_process(int(sys.argv[2]), sys.argv[3] if len(sys.argv) > 3 else PI_WORKERS["cpu"])
     else:
         main_web()

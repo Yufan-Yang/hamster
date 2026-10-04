@@ -40,7 +40,7 @@ FFMPEG = shutil.which("ffmpeg") or "/usr/local/Homebrew/bin/ffmpeg"  # launchd's
 OUTBOX = HERE / "outbox.jsonl"
 UNLOAD_AFTER = 600  # free the model's ~2 GB of memory after this long without work
 NAME = "mac-" + socket.gethostname().split(".")[0]
-CAPS = ["transcribe", "cover", "frames", "gpu"]  # the task kinds this does, and that it has a GPU
+CAPS = ["transcribe", "cover", "frames", "note_media", "gpu"]  # the task kinds this does, and that it has a GPU
 CLIP = HERE / "models" / "clip" / "vision.onnx"  # the Pi's image model (same file: same vectors), copied over
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the same shot (talk shows: a handful)
@@ -276,7 +276,48 @@ def do_frames(task):
     return {"frames": kept, "keyframes": len(members), "seconds": round(time.time() - started, 1)}
 
 
-HANDLERS = {"transcribe": do_transcribe, "cover": do_cover, "frames": do_frames}
+def open_picture(path):
+    """A PIL image of any photo, HEIC too (macOS's sips converts what Pillow can't read)."""
+    from PIL import Image, ImageOps
+    try:
+        with Image.open(path) as im:
+            return ImageOps.exif_transpose(im).convert("RGB")
+    except Exception:
+        jpg = str(path) + ".jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(path), "--out", jpg], capture_output=True, check=True)
+        with Image.open(jpg) as im:
+            return ImageOps.exif_transpose(im).convert("RGB")
+
+
+def do_note_media(task):
+    """A 随记's new attachments: photos (what's in them, text on them), videos (what's said, the first frame),
+    voice (what's said). The Pi adds the rest (poster file, where it was taken)."""
+    from urllib.parse import quote
+    items = {}
+    for f in task["payload"].get("files", []):
+        it = {}
+        with fetch(task, f"note-file?file={quote(f['file'])}", Path(f["file"]).suffix) as tmp:
+            if f["kind"] == "image":
+                it["vector"] = b64(clip_vectors([open_picture(tmp.name)])[0])
+                it["ocr"] = "\n".join(read_text(tmp.name))
+            else:
+                audio = decode(tmp.name)
+                it["duration"] = round(len(audio) / 16000, 1)
+                if f["kind"] == "video":
+                    frame = tmp.name + ".png"
+                    subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(min(1.0, it["duration"] / 2)), "-i", tmp.name,
+                                    "-frames:v", "1", frame], capture_output=True)
+                    if Path(frame).exists():
+                        it["vector"] = b64(clip_vectors([open_picture(frame)])[0])
+                        Path(frame).unlink()
+                if len(audio) > 16000:
+                    lang, segs = transcribe(audio)
+                    it["transcript"] = "\n".join(t for _, _, t in segs)
+        items[f["file"]] = it
+    return {"items": items}
+
+
+HANDLERS = {"transcribe": do_transcribe, "cover": do_cover, "frames": do_frames, "note_media": do_note_media}
 
 
 class Busy(Exception):
