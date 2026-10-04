@@ -34,7 +34,9 @@ INCOMPLETE = MEDIA / ".incomplete"
 NOTES_DIR = MEDIA / ".notes"
 NOTE_MAX_UPLOAD = 4 << 30  # one note's files at most (phone videos are big)
 STATE = Path(os.environ.get("STATE_DIR", "/var/lib/grabber"))
-DB_PATH = STATE / "grabber.db"
+# On the Pi the database lives on a hard disk (DB_PATH=/mnt/disk1/.grabber/grabber.db): it's written all day, which
+# wears out an SD card; the disks spin anyway
+DB_PATH = Path(os.environ.get("DB_PATH") or STATE / "grabber.db")
 COOKIES = STATE / "cookies.txt"  # optional Netscape cookies file for sites that need a login
 PORT = int(os.environ.get("PORT", "8088"))
 # Access from outside the home arrives through a reverse tunnel from the VPS to this loopback-only port
@@ -133,10 +135,11 @@ def heavy_slot(kind, job_id=None):
 
 # ---------------------------------------------------------------- database
 
-def log_usage(kind, purpose="", job_id=None, amount=0, tokens_in=0, tokens_out=0, seconds=0):
+def log_usage(kind, purpose="", job_id=None, amount=0, tokens_in=0, tokens_out=0, seconds=0, cost=None, cache_hit=0):
     try:
-        q("INSERT INTO usage (ts, kind, purpose, job_id, amount, tokens_in, tokens_out, seconds) VALUES (?,?,?,?,?,?,?,?)",
-          (time.time(), kind, purpose, job_id, amount, tokens_in, tokens_out, round(seconds, 1)))
+        q("INSERT INTO usage (ts, kind, purpose, job_id, amount, tokens_in, tokens_out, seconds, cost, cache_hit) "
+          "VALUES (?,?,?,?,?,?,?,?,?,?)",
+          (time.time(), kind, purpose, job_id, amount, tokens_in, tokens_out, round(seconds, 1), cost, cache_hit))
     except Exception:
         traceback.print_exc()  # bookkeeping must never break a job
 
@@ -146,6 +149,7 @@ def db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # readers and the writer in other processes don't block each other
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")  # with WAL: still consistent after a power cut, far fewer syncs
     return conn
 
 
@@ -199,8 +203,30 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS vec (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, ref INTEGER, part INTEGER DEFAULT 0,
         t REAL, src TEXT, base REAL, v BLOB);
     CREATE INDEX IF NOT EXISTS vec_ref ON vec (kind, ref);
-    -- idle work per item ("subs:12:0" ...): done / failed / partial, with what's needed to resume
-    CREATE TABLE IF NOT EXISTS idle (key TEXT PRIMARY KEY, state TEXT, data TEXT, updated REAL);
+    -- the task board (see "the task board"): one row per kind of work and target, e.g. transcribe job:12:0
+    CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, target TEXT NOT NULL,
+        priority INTEGER DEFAULT 0, state TEXT DEFAULT 'queued', payload TEXT DEFAULT '{}', progress TEXT, result TEXT,
+        worker TEXT, lease_until REAL, attempts INTEGER DEFAULT 0, not_before REAL, error TEXT DEFAULT '',
+        parent INTEGER, published_by TEXT, created REAL, updated REAL, UNIQUE (kind, target));
+    CREATE INDEX IF NOT EXISTS tasks_queue ON tasks (state, priority, id);
+    -- who claims tasks and what they can do
+    CREATE TABLE IF NOT EXISTS workers (name TEXT PRIMARY KEY, caps TEXT, seen REAL, task INTEGER, paused TEXT);
+    -- same content uploaded twice, or a clip of a longer video: per job a fingerprint (MinHash of what's said,
+    -- mean of its frames), and the pairs found
+    CREATE TABLE IF NOT EXISTS fingerprints (job_id INTEGER PRIMARY KEY, minhash BLOB, shingles INTEGER,
+        frames BLOB, nframes INTEGER, duration REAL, updated REAL);
+    CREATE TABLE IF NOT EXISTS similar (a INTEGER, b INTEGER, kind TEXT, a_in_b REAL, b_in_a REAL, updated REAL,
+        PRIMARY KEY (a, b));
+    -- 追更周报: per account, what the followed uploaders put out in a week, summarised
+    CREATE TABLE IF NOT EXISTS digests (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, start TEXT, end TEXT,
+        body TEXT, created REAL);
+    -- where each account (or anonymous browser) is in each video: 继续观看 on every device, 已看完
+    CREATE TABLE IF NOT EXISTS watch (owner TEXT, job_id INTEGER, part INTEGER DEFAULT 0, pos REAL, dur REAL,
+        done INTEGER DEFAULT 0, updated REAL, PRIMARY KEY (owner, job_id));
+    -- temperatures every 5 minutes (CPU, each disk), for "highest in the last day" in 资源使用
+    CREATE TABLE IF NOT EXISTS health (ts REAL, cpu REAL, disks TEXT);
+    -- DeepSeek balance over time: drops are what was really charged
+    CREATE TABLE IF NOT EXISTS balance (ts REAL, currency TEXT, total REAL);
     """)
     cols = [r[1] for r in DB.execute("PRAGMA table_info(jobs)")]
     if "transcript" not in cols:
@@ -222,6 +248,15 @@ def init_db(reset=False):
         DB.execute("ALTER TABLE jobs ADD COLUMN device TEXT")  # which device sent it, e.g. "Mac · Chrome"
     if "label" not in [r[1] for r in DB.execute("PRAGMA table_info(devices)")]:
         DB.execute("ALTER TABLE devices ADD COLUMN label TEXT")
+    if "paused" not in [r[1] for r in DB.execute("PRAGMA table_info(workers)")]:
+        DB.execute("ALTER TABLE workers ADD COLUMN paused TEXT")  # why a worker isn't taking tasks (a game...)
+    ucols = [r[1] for r in DB.execute("PRAGMA table_info(usage)")]
+    if "cost" not in ucols:
+        DB.execute("ALTER TABLE usage ADD COLUMN cost REAL")  # CNY, LLM calls only
+        DB.execute("ALTER TABLE usage ADD COLUMN cache_hit INTEGER DEFAULT 0")  # input tokens served from DeepSeek's cache
+        for r in DB.execute("SELECT id, ts, tokens_in, tokens_out FROM usage WHERE kind='llm' AND purpose != 'earlier'").fetchall():
+            # before costs were kept: priced as if no input came from the cache (an upper bound)
+            DB.execute("UPDATE usage SET cost=?, cache_hit=-1 WHERE id=?", (llm_cost(LLM_MODEL, 0, r[2], r[3], r[1]), r[0]))
     if "segments" not in cols:
         DB.execute("ALTER TABLE jobs ADD COLUMN segments TEXT")  # speech-to-text lines with their times
     if "backfill" not in cols:
@@ -412,9 +447,13 @@ def unique_path(p: Path):
 # ---------------------------------------------------------------- download: yt-dlp
 
 def ytdlp_opts(job_id, workdir, extra=None):
+    last = [0.0]
+
     def hook(d):
         check_cancel(job_id)
-        if d["status"] == "downloading":
+        # yt-dlp reports many times a second; the page polls every few seconds. Every write lands on the SD card
+        if d["status"] == "downloading" and time.time() - last[0] >= 3:
+            last[0] = time.time()
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             done = d.get("downloaded_bytes") or 0
             pct = done * 100 / total if total else 0
@@ -692,11 +731,12 @@ def aria2(job_id, args, as_bt=False):
         # Torrents run as `bt`, which the firewall keeps off the proxy
         cmd = ["sudo", "-n", "-u", "bt"] + cmd
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    tail, cancelled = [], False
+    tail, cancelled, last = [], False, 0.0
     for line in proc.stdout:
         tail = (tail + [line.strip()])[-15:]
         m = ARIA_PROGRESS.search(line)
-        if m:
+        if m and time.time() - last >= 3:  # aria2 prints every second: write every 3 s at most
+            last = time.time()
             update(job_id, progress=float(m.group(3)), speed=(m.group(4) + "/s") if m.group(4) else "")
         if cancel_requested(job_id):
             cancelled = True
@@ -927,12 +967,50 @@ Reply with one JSON object with exactly these keys:
 {fields}"""
 
 
-def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None):
-    """max_tokens includes the model's reasoning tokens; only tokens actually used are billed."""
+# DeepSeek's list prices, CNY per 1M tokens at peak: (input from cache, input not from cache, output incl. reasoning).
+# Off-peak is half; peak is 01:00-04:00 and 06:00-10:00 UTC on weekdays (Chinese public holidays are off-peak all
+# day; not known here, so those days are priced as peak). https://api-docs.deepseek.com/quick_start/pricing, 2026-10.
+# LLM_PRICE="hit,miss,output" overrides. The DeepSeek balance (record_balance) shows what was really charged.
+LLM_PRICES = {"deepseek-flash": (0.04, 2.0, 8.0), "deepseek-v4-pro": (0.30, 9.0, 27.0)}
+
+
+def llm_cost(model, hit, miss, out, when):
+    try:
+        price = tuple(float(x) for x in os.environ["LLM_PRICE"].split(","))
+    except (KeyError, ValueError):
+        price = LLM_PRICES.get(model) or LLM_PRICES.get(LLM_MODEL)
+    if not price:
+        return None
+    t = time.gmtime(when)
+    if not (t.tm_wday < 5 and (1 <= t.tm_hour < 4 or 6 <= t.tm_hour < 10)):
+        price = tuple(p / 2 for p in price)
+    return round((hit * price[0] + miss * price[1] + out * price[2]) / 1e6, 6)
+
+
+def record_balance():
+    """DeepSeek account balance (free to ask), so 资源使用 can show what was really charged, not only list prices."""
+    if not LLM_API_KEY or "deepseek" not in LLM_BASE_URL:
+        return
+    r = requests.get(f"{LLM_BASE_URL}/user/balance", headers={"Authorization": f"Bearer {LLM_API_KEY}"}, timeout=20)
+    info = next((b for b in r.json().get("balance_infos", []) if float(b.get("total_balance") or 0) > 0),
+                (r.json().get("balance_infos") or [None])[0])
+    if info:
+        last = q("SELECT total FROM balance ORDER BY ts DESC LIMIT 1", one=True)
+        total = float(info["total_balance"])
+        if not last or abs(last["total"] - total) > 1e-9 or time.time() - kv_get("balance_logged", 0) > 6 * 3600:
+            q("INSERT INTO balance (ts, currency, total) VALUES (?,?,?)", (time.time(), info["currency"], total))
+            kv_set("balance_logged", time.time())
+
+
+def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, think=True):
+    """max_tokens includes the model's reasoning tokens; only tokens actually used are billed.
+    think=False: no reasoning at all, for mechanical work (translating lines, matching tags) where it only costs:
+    thinking took ~5,000 of the ~6,000 output tokens of a 60-line subtitle batch."""
+    thinking = ({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}) if think else \
+        ({"thinking": {"type": "disabled"}} if "deepseek" in LLM_BASE_URL else {})
     r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
                       headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                      json={"model": LLM_MODEL, "max_tokens": max_tokens,
-                            **({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}),
+                      json={"model": LLM_MODEL, "max_tokens": max_tokens, **thinking,
                             "response_format": {"type": "json_object"},
                             "messages": [
                                 {"role": "system", "content": system.format(
@@ -944,8 +1022,13 @@ def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None):
     u = body.get("usage") or {}
     usage["calls"] = usage.get("calls", 0) + 1
     usage["tokens"] = usage.get("tokens", 0) + (u.get("total_tokens") or 0)
+    hit = u.get("prompt_cache_hit_tokens") or 0
+    miss = u.get("prompt_cache_miss_tokens", (u.get("prompt_tokens") or 0) - hit)
+    cost = llm_cost(body.get("model") or LLM_MODEL, hit, miss, u.get("completion_tokens") or 0, time.time())
+    if cost is not None:
+        usage["cost"] = round(usage.get("cost", 0) + cost, 6)
     log_usage("llm", purpose, job_id, amount=1, tokens_in=u.get("prompt_tokens") or 0,
-              tokens_out=u.get("completion_tokens") or 0)
+              tokens_out=u.get("completion_tokens") or 0, cost=cost, cache_hit=hit)
     content = body["choices"][0]["message"].get("content") or ""
     if not content.strip():
         # Happens when reasoning uses up max_tokens or the JSON mode returns nothing
@@ -1129,7 +1212,7 @@ def merge_tags_if_new():
             ask = [t for t in new if t not in mapping]
             if ask and LLM_API_KEY:
                 out = llm_json(MATCH_SYSTEM, "EXISTING tags (most used first):\n" + "\n".join(known) +
-                               "\n\nNEW tags:\n" + "\n".join(ask), {"same": "object"}, 4000, {}, "tags")
+                               "\n\nNEW tags:\n" + "\n".join(ask), {"same": "object"}, 4000, {}, "tags", think=False)
                 for t, same in (out.get("same") or {}).items():
                     if t in ask and isinstance(same, str) and same in known and same != t:
                         mapping[t] = same
@@ -1149,7 +1232,10 @@ def summarize(job_id, a, transcript, transcript_note):
     try:
         out = llm_json(SUMMARY_SYSTEM, user, SUMMARY_FIELDS, 8000, a.setdefault("usage", {}), "summarize", job_id)
         a["summary"] = str(out["summary"] or a["summary"])
-        a["key_points"] = [str(x) for x in out["key_points"]] if isinstance(out["key_points"], list) else []
+        points = out["key_points"]
+        if isinstance(points, str):  # now and then a single string instead of a list
+            points = [x.strip(" -•·") for x in re.split(r"[\n；;]+", points)]
+        a["key_points"] = [str(x) for x in points if str(x).strip()] if isinstance(points, list) else []
     except Exception as e:
         a["note"] = f"AI summary failed: {e}"
     return a
@@ -1370,23 +1456,17 @@ def process(job_id):
                                           **({"people_in_it": staff} if staff else {})},
                          guess)
             add_people_tags(a, staff)
+            if re.fullmatch(r"\d{8}", str(meta.get("upload_date") or "")):  # when it came out (for 追更周报)
+                d = meta["upload_date"]
+                a["published"] = f"{d[:4]}-{d[4:6]}-{d[6:]}"
             subs = sorted(m.parent.glob(glob.escape(m.stem) + "*.srt"))
             transcript, note = (srt_to_text(subs[0]), f"(from subtitles {subs[0].name[len(m.stem):]})") if subs else (None, "")
-            # Only transcribe and summarise when the classifier says the content is worth it
-            deferred = not transcript and job.get("backfill")
-            if deferred:
-                a["note"] = "speech-to-text left for idle time; summarised once full subtitles exist"
-            if a.get("needs_transcript") and LLM_API_KEY and not deferred:
-                if not transcript:
-                    try:
-                        transcript, (lang, cut) = transcribe(job_id, m, m)
-                        note = f"(speech-to-text, language {lang}) {cut}"
-                    except Cancelled:
-                        raise
-                    except Exception as e:
-                        a["note"] = f"transcription failed: {e}"
-                if transcript:
-                    a = summarize(job_id, a, transcript, note)
+            # Subtitles that came with it: summarise now (when the classifier says it's worth it). Otherwise the
+            # task board makes them (transcribe -> save_subs -> summarize), on the Mac when it's there
+            if transcript and a.get("needs_transcript") and LLM_API_KEY:
+                a = summarize(job_id, a, transcript, note)
+            elif not transcript and a.get("needs_transcript"):
+                a["note"] = "summarised once subtitles have been made"
             if transcript:
                 update(job_id, transcript=transcript[:200_000])
         a.setdefault("tags", [])
@@ -1423,6 +1503,10 @@ def process(job_id):
     update(job_id, status="done", stage="", progress=100, files=final_files, analysis=analysis,
            title=analysis.get("title") or job["title"], thumb=thumb_url)
     log_usage("download", kind, job_id, amount=sum(Path(f).stat().st_size for f in final_files if Path(f).exists()))
+    try:  # its slow work goes on the task board: links you sent first, older videos of followed uploaders last
+        publish_job_work(job_id, 10 if job.get("backfill") else 50, force=True)
+    except Exception:
+        traceback.print_exc()
     for f in final_files:  # so the list doesn't have to ffprobe it later
         if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT:
             probe_of(f)
@@ -1470,8 +1554,9 @@ def worker_loop():
     while True:
         with claim_lock:
             # failed jobs whose automatic retry is due go back in the queue
-            q("UPDATE jobs SET status='queued', retry_at=NULL WHERE status='failed' AND retry_at IS NOT NULL AND retry_at<=?",
-              (time.time(),))
+            if q("SELECT 1 FROM jobs WHERE status='failed' AND retry_at IS NOT NULL AND retry_at<=? LIMIT 1", (time.time(),), one=True):
+                q("UPDATE jobs SET status='queued', retry_at=NULL WHERE status='failed' AND retry_at IS NOT NULL AND retry_at<=?",
+                  (time.time(),))
             # links you send go first; followed channels' videos take at most SUB_WORKERS slots, newest first
             # (a job parked waiting for the speech-to-text/encoder slot doesn't count, so downloads keep going
             # meanwhile; one worker always stays free for links you send)
@@ -1935,6 +2020,9 @@ def client_ip():
 @app.before_request
 def identify():
     g.external = is_external()
+    if request.path.startswith("/api/compute/"):  # the Mac worker: token, no cookie, not a browser
+        g.device, g.new_device, g.user, g.admin, g.owner = "", False, None, False, None
+        return
     g.device = request.cookies.get(DEVICE_COOKIE) or ""
     g.new_device = not re.fullmatch(r"[0-9a-f]{32}", g.device)
     if g.new_device:
@@ -2005,6 +2093,7 @@ def sign_in(name):
     q("DELETE FROM subs WHERE owner=? AND key IN (SELECT key FROM subs WHERE owner=?)", (g.device, f"user:{name}"))
     q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     q("UPDATE notes SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    q("UPDATE OR IGNORE watch SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     # bring this device's privacy settings into the account
     dev, acc = privacy_get(g.device), privacy_get(f"user:{name}")
     privacy_set(f"user:{name}", list(dict.fromkeys(acc["tags"] + dev["tags"])), list(dict.fromkeys(acc["ids"] + dev["ids"])))
@@ -2393,13 +2482,24 @@ def jobs():
             d["hits"] = hits + seen
             # matched only by how it looks: after the text matches, most alike first
             (only_looks if d.get("match_where") in ("画面", "封面") and not hits else out).append(d)
-        out += sorted(only_looks, key=lambda d: -looks[d["id"]][0][0])
+        # at most a dozen: further down the list the likeness gets thin
+        out += sorted(only_looks, key=lambda d: -looks[d["id"]][0][0])[:12]
     else:
         unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
         finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY id DESC LIMIT ?", (*scope_args, limit + 1))
         more = len(finished) > limit
-        out = [job_dict(r) for r in sorted(rows + finished[:limit], key=lambda r: r["id"], reverse=True)]
+        if request.args.get("ids"):  # particular videos (opened from a digest, a note...), wherever they are
+            wanted = [int(x) for x in request.args["ids"].split(",") if x.isdigit()][:50]
+            finished += q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(wanted))})", (*scope_args, *wanted)) if wanted else []
+            finished = list({r["id"]: r for r in finished}.values())
+            limit = len(finished)
+        shown = {r["id"] for r in rows + finished[:limit]}
+        # videos you're in the middle of are always there, also when they're further back than the first page
+        resume = [r["job_id"] for r in q("SELECT job_id FROM watch WHERE owner=? AND done=0 AND pos > 15 "
+                                         "ORDER BY updated DESC LIMIT 12", (g.owner,)) if r["job_id"] not in shown]
+        extra = q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(resume))})", (*scope_args, *resume)) if resume else []
+        out = [job_dict(r) for r in sorted(rows + finished[:limit] + extra, key=lambda r: r["id"], reverse=True)]
     # privacy mode: hidden items aren't even sent unless they've been revealed with the password
     prefs, show_hidden = privacy_get(g.owner), revealed()
     hidden_count = 0
@@ -2412,7 +2512,11 @@ def jobs():
             d["hidden"] = True
         kept.append(d)
     out = kept
+    watched = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=?", (g.owner,))}
     for d in out:
+        w = watched.get(d["id"])
+        if w:
+            d["watch"] = {"part": w["part"], "pos": w["pos"], "dur": w["dur"], "done": bool(w["done"]), "at": w["updated"]}
         if d["status"] == "linked" and d.get("ref"):  # show the original download's progress
             src = q("SELECT status, stage, progress, speed, title, thumb FROM jobs WHERE id=?", (d["ref"],), one=True)
             if src:
@@ -2496,7 +2600,10 @@ def sub_avatar(sid):
 
 CLIP_DIR = STATE / "models" / "clip"
 CLIP_REPO = "https://huggingface.co/Xenova/chinese-clip-vit-base-patch16/resolve/main/"
-CLIP_MARGIN = float(os.environ.get("CLIP_MARGIN", "0.08"))  # how clearly above its baseline a picture must match
+# How clearly above its own baseline a picture must match, by what it is. Measured on 2,545 frames: things that
+# are in them (卡车 大桥 地图 士兵 沙漠 ...) top out at 0.055-0.13 with all of the top 6 right; things that aren't
+# (猫 钢琴 篮球 雪山 ...) stay below 0.05. Covers are designed graphics, photos were calibrated on the 随记 photos.
+CLIP_MARGINS = {"画面": 0.055, "封面": 0.065, "照片": 0.07}
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 # everyday words: a picture's average likeness to these is its baseline (some pictures resemble everything a bit)
 CLIP_ANCHORS = ["人", "男人", "女人", "孩子", "一群人", "人脸", "文字", "屏幕", "电脑", "手机", "房间", "桌子", "街道", "城市",
@@ -2507,6 +2614,8 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
 IDLE_WHISPER_MODEL = os.environ.get("IDLE_WHISPER_MODEL", "small")
 FRAME_EVERY = int(os.environ.get("FRAME_EVERY", "20"))
 IDLE_WORK = os.environ.get("IDLE_WORK", "1") != "0"
+# The Mac mini as a compute worker (mac_worker.py): it asks for work over the LAN with this token
+COMPUTE_TOKEN = os.environ.get("COMPUTE_TOKEN", "").strip()
 _models = {}
 _model_lock = threading.Lock()
 
@@ -2621,11 +2730,14 @@ def vec_matrix():
     after = _vecs["last"] if _vecs["key"] and top["n"] - _vecs["rows"] == top["m"] - _vecs["last"] else 0
     rows = q("SELECT id, kind, ref, part, t, src, base, v FROM vec WHERE id > ? ORDER BY id", (after,))
     meta = [(r["kind"], r["ref"], r["part"], r["t"], r["src"]) for r in rows]
-    base = np.array([r["base"] for r in rows], np.float32)
-    m = np.frombuffer(b"".join(r["v"] for r in rows), np.float32).reshape(len(rows), -1) if rows else np.zeros((0, 512), np.float32)
+    # the bar to clear: the picture's baseline plus the margin for its kind
+    bar = np.array([r["base"] + CLIP_MARGINS[r["src"].split(":")[0]] for r in rows], np.float32)
+    # half precision: a frame every few seconds of 150 hours of video is ~100k vectors, 100 MB instead of 200
+    m = np.frombuffer(b"".join(r["v"] for r in rows), np.float32).reshape(len(rows), -1).astype(np.float16) \
+        if rows else np.zeros((0, 512), np.float16)
     if after:
-        meta, base, m = _vecs["meta"] + meta, np.concatenate([_vecs["base"], base]), np.concatenate([_vecs["m"], m])
-    _vecs.update(key=(top["m"], top["n"]), rows=top["n"], last=top["m"], meta=meta, base=base, m=m)
+        meta, bar, m = _vecs["meta"] + meta, np.concatenate([_vecs["bar"], bar]), np.concatenate([_vecs["m"], m])
+    _vecs.update(key=(top["m"], top["n"]), rows=top["n"], last=top["m"], meta=meta, bar=bar, m=m)
     return _vecs
 
 
@@ -2639,10 +2751,10 @@ def visual_hits(term, kind, allowed):
         if not len(V["meta"]):
             return {}
         import numpy as np
-        sims = V["m"] @ clip_text(term)
-        margin = sims - V["base"]
-        # clearly above the picture's own baseline, and above how much everything looks like this word
-        idx = np.where((margin >= CLIP_MARGIN) & (sims >= float(np.median(sims)) + 0.04))[0]
+        qv = clip_text(term).astype(np.float32)
+        sims = np.concatenate([V["m"][i:i + 20000].astype(np.float32) @ qv for i in range(0, len(V["m"]), 20000)])
+        margin = sims - V["bar"]  # >= 0: clearly looks like it
+        idx = np.where(margin >= 0)[0]
     except Exception:
         traceback.print_exc()
         return {}
@@ -2657,186 +2769,684 @@ def visual_hits(term, kind, allowed):
 def forget_index(jid):
     q("DELETE FROM seg WHERE kind='job' AND ref=?", (jid,))
     q("DELETE FROM vec WHERE kind='job' AND ref=?", (jid,))
-    for prefix in ("cover", "cues", "subs", "frames"):
-        q("DELETE FROM idle WHERE key=? OR key LIKE ?", (f"{prefix}:{jid}", f"{prefix}:{jid}:%"))
+    q("DELETE FROM tasks WHERE target=? OR target LIKE ?", (f"job:{jid}", f"job:{jid}:%"))
 
 
-# ---- idle work
+# ---- the task board
+#
+# Everything slow is a task on one board: the `tasks` table, here on the Pi because it's always on. Anyone may
+# publish: the Pi when something happens (a download finished, a note was added), a finished task (transcribe ->
+# save_subs -> summarize), the Mac (`task publish ...`). Anyone may claim what it can do, through the same steps:
+#     claim (what I can do) -> heartbeat (progress; keeps the lease) -> done (result) | fail (retry or give up)
+# Claimers: the Pi's own workers (a light one for library writes and AI calls, a heavy one for CPU work in idle
+# time) and the Mac mini (mac/mac_worker.py, over HTTP). A lease that isn't renewed runs out and the task goes back
+# on the board: a Mac that sleeps or a process that dies only means someone picks the task up later.
+# Only the Pi changes the library (files, database): what the Mac works out comes back as a result, and a Pi task
+# writes it.
 
-def idle_get(key):
-    row = q("SELECT state, data FROM idle WHERE key=?", (key,), one=True)
-    return (row["state"], json.loads(row["data"] or "{}")) if row else (None, {})
+# Every kind of task is declared once, with @task on the function that does it on the Pi:
+#   label    how 资源使用 names it
+#   pool     which of the Pi's own workers takes it: "light" (library writes, ~no CPU), "ai" (LLM calls; a long
+#            translation), "ai-quick" (LLM calls that mustn't wait behind one), "cpu" (heavy, idle time only)
+#   prefer   while a worker with this trait ("gpu": the Mac) is around, the Pi leaves the kind to it (unless the task
+#            has waited PREFER_WAIT)
+#   remote   a remote worker (the Mac, scripts) may publish it
+#   then     what's published when it's done (whoever did it): a kind (its result is written by that Pi task), or a
+#            function (task, result)
+# A worker claims by listing the kinds it can do (plus "gpu" if it has one). "save_*" kinds write what a worker
+# worked out into the library, so only the Pi does them.
+TASK_KINDS = {}
+WORKER_FRESH = 300
+PREFER_WAIT = 3 * 86400  # e.g. a Mac that claims but never finishes
+LEASE = 300  # seconds a claim lasts without a heartbeat
+PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops counting as around
+PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu"}
 
 
-def idle_set(key, state, data=None):
-    q("INSERT INTO idle (key, state, data, updated) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
-      "state=excluded.state, data=excluded.data, updated=excluded.updated",
-      (key, state, json.dumps(data or {}, ensure_ascii=False), time.time()))
+def task(kind, label, pool, prefer=None, remote=False, then=None):
+    def register(run):
+        TASK_KINDS[kind] = {"label": label, "pool": pool, "prefer": prefer, "remote": remote, "then": then, "run": run}
+        return run
+    return register
 
 
-def mem_available_mb():
+def pi_worker(pool):
+    """(name, kinds it takes) of one of the Pi's own workers. The "ai" worker also takes the quick AI kinds."""
+    pools = {pool, "ai-quick"} if pool == "ai" else {pool}
+    return PI_WORKERS[pool], [k for k, v in TASK_KINDS.items() if v["pool"] in pools]
+
+
+def _write(sql, args=()):
+    """One statement; how many rows it changed (for compare-and-set updates other processes may race)."""
+    with db_lock:
+        cur = DB.execute(sql, args)
+        DB.commit()
+        return cur.rowcount
+
+
+def task_payload(kind, target):
+    """What a task needs to know about its target, filled in by the Pi (a publisher only names the target)."""
+    d = re.fullmatch(r"digest:(.+):(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)", target)
+    if d:
+        return {"owner": d.group(1), "start": d.group(2), "end": d.group(3), "title": f"{d.group(2)} ~ {d.group(3)}"}
+    m = re.fullmatch(r"job:(\d+)(?::(\d+))?", target)
+    if not m:
+        raise ValueError(f"unknown target {target}")
+    row = q("SELECT * FROM jobs WHERE id=?", (int(m.group(1)),), one=True)
+    if not row or row["status"] != "done":
+        raise ValueError(f"no finished job {m.group(1)}")
+    a = json.loads(row["analysis"] or "{}")
+    out = {"job": row["id"], "title": a.get("title") or row["title"]}
+    if m.group(2) is not None:
+        media = playable(job_dict(row))
+        n = int(m.group(2))
+        if n >= len(media):
+            raise ValueError(f"job {row['id']} has no file {n}")
+        out.update(part=n, duration=duration_of(media[n]["path"]) or 0, language=whisper_lang(a.get("language")))
+    return out
+
+
+def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_before=None):
+    """Put a task on the board; one per kind and target (publishing it again is a no-op unless `force`, which runs
+    a finished one again). Returns its id."""
+    if kind not in TASK_KINDS:
+        raise ValueError(f"unknown kind {kind}")
+    payload = json.dumps(task_payload(kind, target), ensure_ascii=False)
+    now = time.time()
+    _write("INSERT OR IGNORE INTO tasks (kind, target, priority, payload, parent, published_by, not_before, created, "
+           "updated) VALUES (?,?,?,?,?,?,?,?,?)", (kind, target, priority, payload, parent, by, not_before, now, now))
+    row = q("SELECT id, state FROM tasks WHERE kind=? AND target=?", (kind, target), one=True)
+    if force and row["state"] in ("done", "failed"):
+        _write("UPDATE tasks SET state='queued', priority=?, payload=?, parent=?, published_by=?, result=NULL, "
+               "progress=NULL, error='', attempts=0, worker=NULL, lease_until=NULL, not_before=?, updated=? "
+               "WHERE id=? AND state IN ('done','failed')", (priority, payload, parent, by, not_before, now, row["id"]))
+    return row["id"]
+
+
+def publish_job_work(jid, priority, force=False):
+    """A finished download's slow work: subtitles where there are none (speech-to-text, except songs), indexing the
+    subtitle files it came with, the cover."""
+    row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+    if not row or row["status"] != "done" or row["ref"]:
+        return
+    a = json.loads(row["analysis"] or "{}")
+    music = a.get("library") == "Music" or a.get("folder") == "Music Videos"  # speech-to-text can't do songs
+    for n, m in enumerate(playable(job_dict(row))):
+        if m["subs"]:
+            publish("index_subs", f"job:{jid}:{n}", priority, force=force)
+        elif not music:
+            publish("transcribe", f"job:{jid}:{n}", priority, force=force)
+        if Path(m["path"]).suffix.lower() in VIDEO_EXT:
+            publish("frames", f"job:{jid}:{n}", priority - 1, force=force)
+    if row["thumb"] and Path(row["thumb"]).exists():
+        publish("cover", f"job:{jid}", priority, force=force)
+
+
+_seen_written = {}
+
+
+def seen_worker(name, caps, task=None, paused=None):
+    # at most once a minute unless something changed: three workers asking every few seconds wore the SD card
+    state = (json.dumps(sorted(caps)), task, paused)
+    last = _seen_written.get(name)
+    if last and last[0] == state and time.time() - last[1] < 60:
+        return
+    _seen_written[name] = (state, time.time())
+    q("INSERT INTO workers (name, caps, seen, task, paused) VALUES (?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+      "caps=excluded.caps, seen=excluded.seen, task=excluded.task, paused=excluded.paused",
+      (name, json.dumps(sorted(caps)), time.time(), task, paused))
+
+
+def task_dict(row):
+    return {"id": row["id"], "kind": row["kind"], "target": row["target"], "priority": row["priority"],
+            "payload": json.loads(row["payload"]), "progress": json.loads(row["progress"] or "null")}
+
+
+def claim_task(worker, caps):
+    """The most urgent task this worker can do, now leased to it; None if there's nothing."""
+    caps, now = set(caps), time.time()
+    seen_worker(worker, caps)
+    # leases that ran out: back on the board (keeping any progress); looked for first, so a quiet board isn't written
+    if q("SELECT 1 FROM tasks WHERE state='running' AND lease_until < ? LIMIT 1", (now,), one=True):
+        _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL WHERE state='running' AND lease_until < ?", (now,))
+    kinds = [k for k in TASK_KINDS if k in caps]
+    if not kinds:
+        return None
+    alive = {c for r in q("SELECT caps FROM workers WHERE seen > ? AND name != ?", (now - WORKER_FRESH, worker))
+             for c in json.loads(r["caps"])}
+    # leave a preferred worker's tasks to it while it's around (unless they've waited long)
+    waived = [k for k in kinds if TASK_KINDS[k].get("prefer") and TASK_KINDS[k]["prefer"] not in caps
+              and TASK_KINDS[k]["prefer"] in alive]
+    marks = ",".join("?" * len(kinds))
+    cond = f"state='queued' AND kind IN ({marks}) AND COALESCE(not_before, 0) <= ?"
+    args = [*kinds, now]
+    if waived:
+        cond += f" AND NOT (kind IN ({','.join('?' * len(waived))}) AND created > ?)"
+        args += [*waived, now - PREFER_WAIT]
+    for _ in range(5):  # another worker may take the same row first: try the next one
+        row = q(f"SELECT * FROM tasks WHERE {cond} ORDER BY priority DESC, id DESC LIMIT 1", args, one=True)
+        if not row:
+            return None
+        if _write("UPDATE tasks SET state='running', worker=?, lease_until=?, attempts=attempts+1, updated=? "
+                  "WHERE id=? AND state='queued'", (worker, now + LEASE, now, row["id"])):
+            seen_worker(worker, caps, row["id"])
+            return task_dict(row) | {"lease": LEASE}
+    return None
+
+
+def heartbeat_task(tid, worker, progress=None):
+    """Still on it (and how far): the lease is renewed. False if the task isn't this worker's any more."""
+    seen_worker(worker, json.loads((q("SELECT caps FROM workers WHERE name=?", (worker,), one=True) or {"caps": "[]"})["caps"]), tid)
+    return bool(_write("UPDATE tasks SET lease_until=?, progress=COALESCE(?, progress), updated=? "
+                       "WHERE id=? AND worker=? AND state='running'",
+                       (time.time() + LEASE, None if progress is None else json.dumps(progress, ensure_ascii=False),
+                        time.time(), tid, worker)))
+
+
+def complete_task(tid, worker, result):
+    if not _write("UPDATE tasks SET state='done', result=?, lease_until=NULL, updated=? WHERE id=? AND worker=? "
+                  "AND state='running'", (json.dumps(result, ensure_ascii=False), time.time(), tid, worker)):
+        return False
+    task = q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
     try:
-        return next(int(l.split()[1]) // 1024 for l in open("/proc/meminfo") if l.startswith("MemAvailable"))
+        then = TASK_KINDS.get(task["kind"], {}).get("then")
+        if isinstance(then, str):  # a Pi task writes the result into the library
+            publish(then, task["target"], task["priority"], parent=task["id"], force=True)
+        elif then:
+            then(task, result)
     except Exception:
-        return 0
+        traceback.print_exc()
+    return True
 
 
-def box_busy():
-    """Something someone is waiting for needs the CPU: a download being processed, a note being transcribed.
-    (Plain downloading doesn't count: it's network-bound.)"""
-    return bool(q("SELECT 1 FROM jobs WHERE status='processing' LIMIT 1", one=True)
-                or q("SELECT 1 FROM notes WHERE pending=1 LIMIT 1", one=True))
+def fail_task(tid, worker, error, retry=True):
+    """retry: try again later (after 1, 4, 9... minutes; at most 5 times); else it stays failed."""
+    row = q("SELECT attempts FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
+    if not row:
+        return False
+    if retry and row["attempts"] < 5:
+        _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, error=?, not_before=?, updated=? WHERE id=?",
+               (str(error)[:1000], time.time() + 60 * row["attempts"] ** 2, time.time(), tid))
+    else:
+        _write("UPDATE tasks SET state='failed', worker=NULL, lease_until=NULL, error=?, updated=? WHERE id=?",
+               (str(error)[:1000], time.time(), tid))
+    return True
 
 
-IDLE_LABELS = {"cues": "整理已有字幕", "cover": "识别封面", "frames": "识别画面", "subs": "生成字幕"}
+def release_task(tid, worker):
+    """Paused for other work (not a failure): back on the board with its progress, the try not counted."""
+    _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, attempts=MAX(attempts-1, 0), updated=? "
+           "WHERE id=? AND worker=? AND state='running'", (time.time(), tid, worker))
 
 
-def idle_plan():
-    """Idle work still to do, in order: index subtitle files that exist (no model, quick) and covers, then per
-    video, newest first, what's on screen every FRAME_EVERY s and full subtitles where there are none."""
-    states = {r["key"]: r["state"] for r in q("SELECT key, state FROM idle")}
-    todo, later = [], []
-    for r in q("SELECT * FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id DESC"):
-        d = job_dict(r)
-        if r["thumb"] and Path(r["thumb"]).exists() and f"cover:{r['id']}" not in states:
-            todo.append(f"cover:{r['id']}")
-        for n, m in enumerate(playable(d)):
-            dur = duration_of(m["path"]) or 0
-            if m["subs"] and states.get(f"subs:{r['id']}:{n}") != "done" and f"cues:{r['id']}:{n}" not in states:
-                todo.insert(0, f"cues:{r['id']}:{n}")
-            if Path(m["path"]).suffix.lower() in VIDEO_EXT and states.get(f"frames:{r['id']}:{n}") in (None, "partial"):
-                later.append((f"frames:{r['id']}:{n}", dur))
-            a = json.loads(r["analysis"] or "{}")
-            music = a.get("library") == "Music" or a.get("folder") == "Music Videos"  # speech-to-text can't do songs
-            if not m["subs"] and not music and states.get(f"subs:{r['id']}:{n}") in (None, "partial"):
-                later.append((f"subs:{r['id']}:{n}", dur))
-    return todo + [k for k, _ in later]
+def task_media(task):
+    p = task["payload"]
+    row = q("SELECT * FROM jobs WHERE id=?", (p["job"],), one=True)
+    media = playable(job_dict(row)) if row else []
+    if p.get("part") is None or p["part"] >= len(media):
+        raise ValueError("the file is gone")
+    return Path(media[p["part"]]["path"]), media[p["part"]]["subs"]
 
 
-def idle_backlog():
-    """What idle work is left, for 资源使用."""
-    left = {}
-    for key in idle_plan():
-        kind, jid, *rest = key.split(":")
-        c = left.setdefault(kind, {"label": IDLE_LABELS[kind], "items": 0, "hours": 0})
-        c["items"] += 1
-        if kind in ("subs", "frames"):
-            row = q("SELECT * FROM jobs WHERE id=?", (int(jid),), one=True)
-            media = playable(job_dict(row)) if row else []
-            n = int(rest[0])
-            if n < len(media):
-                state, data = idle_get(key)
-                c["hours"] += max(0, (duration_of(media[n]["path"]) or 0) - data.get("until", 0)) / 3600
-    for c in left.values():
-        c["hours"] = round(c["hours"], 1)
-    return left
+# ---- what happens when a task is done (on the Pi, whoever did it)
+
+def after_transcribe(task, result):
+    p = json.loads(task["payload"])
+    log_usage("whisper", "mac" if task["worker"] != PI_WORKERS["cpu"] else "idle", p["job"],
+              amount=float(result.get("audio_seconds") or 0), seconds=float(result.get("seconds") or 0))
+    publish("save_subs", task["target"], task["priority"], parent=task["id"], force=True)
 
 
-def idle_loop():
-    """Worker thread: when nothing else needs the CPU, run the next piece of idle work in its own lowest-priority
-    process. That process checks between chunks and stops (keeping its progress) as soon as something comes in."""
-    time.sleep(30)
-    while True:
-        try:
-            if IDLE_WORK and not box_busy() and mem_available_mb() > 1000:
-                plan = idle_plan()
-                if plan:
-                    key = plan[0]
-                    kv_set("idle_now", {"key": key, "since": time.time()})
-                    proc = subprocess.run(["nice", "-n", "19", sys.executable, __file__, "idle", key])
-                    kv_set("idle_now", None)
-                    if proc.returncode not in (0, 3):  # 3 = paused for other work
-                        idle_set(key, "failed", {"code": proc.returncode})
-                    if proc.returncode != 3:
-                        continue
-        except Exception:
-            traceback.print_exc()
-        time.sleep(20)
+def parent_result(task):
+    row = q("SELECT result FROM tasks WHERE id=(SELECT parent FROM tasks WHERE id=?)", (task["id"],), one=True)
+    return json.loads(row["result"] or "{}") if row else {}
 
 
-def idle_ok():
-    return not box_busy() and mem_available_mb() > 500
+def drop_parent_result(task, summary):
+    """Once written into the library, the bulky result (vectors, every subtitle line) isn't needed on the board."""
+    _write("UPDATE tasks SET result=? WHERE id=(SELECT parent FROM tasks WHERE id=?)",
+           (json.dumps(summary, ensure_ascii=False), task["id"]))
 
+
+def vec_from(b64):
+    import base64
+    import numpy as np
+    v = np.frombuffer(base64.b64decode(b64), np.float16).astype(np.float32)
+    return v / np.linalg.norm(v)
+
+
+def vec_to(v):
+    import base64
+    import numpy as np
+    return base64.b64encode(np.asarray(v, np.float16).tobytes()).decode()
+
+
+# ---- the Pi's own work for each kind
 
 class Paused(Exception):
     pass
 
 
-def run_idle(key):
-    kind, jid, *rest = key.split(":")
-    jid, n = int(jid), int(rest[0]) if rest else 0
-    row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
-    if not row:
+@task("save_subs", "保存字幕", "light")
+def pi_save_subs(task, beat):
+    """The subtitles a transcribe task worked out: .srt next to the video (player, Plex), lines into the search
+    index, the transcript; then the summary that waited for them."""
+    res = parent_result(task)
+    segs = [[float(a), float(b), str(t).strip()] for a, b, t in res.get("segments") or [] if str(t).strip()]
+    lang = re.sub(r"[^a-z-]", "", str(res.get("language") or "und"))[:8] or "und"
+    path, _ = task_media(task)
+    jid, n = task["payload"]["job"], task["payload"]["part"]
+
+    def ts(t):
+        h, rem = divmod(t, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{int(h):02}:{int(m):02}:{int(sec):02},{int((sec % 1) * 1000):03}"
+    if segs:
+        srt = path.with_name(f"{path.stem}.{lang}.srt")
+        srt.write_text("\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(segs, 1)))
+        q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
+        for a, _, t in segs:
+            q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, a, t))
+        if n == 0:
+            update(jid, transcript="\n".join(t for _, _, t in segs)[:200_000])
+            a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
+            if a.get("needs_transcript") and not a.get("key_points") and LLM_API_KEY:
+                publish("summarize", f"job:{jid}", task["priority"], parent=task["id"], force=True)
+        plex_refresh()  # Plex picks up the new subtitle file
+        maybe_translate(task, path, lang)
+        publish("similar", f"job:{jid}", task["priority"] - 3, parent=task["id"], force=True)
+    drop_parent_result(task, {"language": lang, "lines": len(segs), "audio_seconds": res.get("audio_seconds")})
+    return {"lines": len(segs), "language": lang}
+
+
+@task("summarize", "AI 总结", "ai-quick", remote=True)
+def pi_summarize(task, beat):
+    jid = task["payload"]["job"]
+    row = q("SELECT analysis, transcript, files FROM jobs WHERE id=?", (jid,), one=True)
+    a = json.loads(row["analysis"] or "{}")
+    if not row["transcript"]:
+        return {"skipped": "no transcript"}
+    a.pop("note", None)
+    a = summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
+    update(jid, analysis=a, stage="")
+    vids = [f for f in json.loads(row["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
+    if vids:
+        threading.Thread(target=plex_set_metadata, args=([(vids[0], a)],), daemon=True).start()
+    return {"summary": bool(a.get("key_points"))}
+
+
+def offpeak_from(when=None):
+    """The next moment DeepSeek charges half (see llm_cost); `when` itself if it already does."""
+    t = when or time.time()
+    while (lambda g: g.tm_wday < 5 and (1 <= g.tm_hour < 4 or 6 <= g.tm_hour < 10))(time.gmtime(t)):
+        t += 900
+    return t
+
+
+def sub_lang(path, stem):
+    """The language code in a subtitle file's name: "Talk.en-orig.srt" -> "en-orig"."""
+    return Path(path).name[len(stem) + 1:].rsplit(".", 1)[0]
+
+
+def maybe_translate(task, path, subs_or_lang):
+    """English subtitles and no Chinese ones yet: translate them (off-peak, at half the price)."""
+    langs = [subs_or_lang] if isinstance(subs_or_lang, str) else [sub_lang(x, path.stem) for x in subs_or_lang]
+    if any(l.split("-")[0] == "en" for l in langs) and not any(l.split("-")[0] == "zh" for l in langs) and LLM_API_KEY:
+        publish("translate", task["target"], task["priority"] - 2, parent=task["id"], not_before=offpeak_from())
+
+
+def srt_cues(path):
+    """[(start, end, text)] of an .srt/.vtt, consecutive repeats merged and overlaps cut (auto captions roll: each
+    cue starts before the last one ends)."""
+    out = []
+    text = Path(path).read_text(errors="ignore").replace("\r", "")
+    stamp = r"(?:(\d+):)?(\d\d):(\d\d)[.,](\d+)"
+    for block in re.split(r"\n\s*\n", text):
+        m = re.search(stamp + r"\s*-->\s*" + stamp, block)
+        if not m:
+            continue
+        g = m.groups()
+        a = int(g[0] or 0) * 3600 + int(g[1]) * 60 + int(g[2]) + float("0." + g[3])
+        b = int(g[4] or 0) * 3600 + int(g[5]) * 60 + int(g[6]) + float("0." + g[7])
+        line = re.sub(r"<[^>]+>", "", block[m.end():].split("\n", 1)[-1]).replace("\n", " ").strip()
+        if not line:
+            continue
+        if out and out[-1][2] == line:
+            out[-1][1] = b
+            continue
+        if out and out[-1][1] > a:
+            out[-1][1] = a
+        out.append([a, b, line])
+    return out
+
+
+def write_srt(path, cues):
+    def ts(t):
+        h, rem = divmod(t, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{int(h):02}:{int(m):02}:{int(sec):02},{int((sec % 1) * 1000):03}"
+    Path(path).write_text("\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(cues, 1)))
+
+
+TRANSLATE_SYSTEM = """You translate a video's subtitles from {src} into natural Simplified Chinese.
+The input is consecutive subtitle lines, numbered; auto-generated captions break sentences anywhere and have no
+punctuation. Give exactly one Chinese line per input line, in the same order: you may move a few words between
+neighbouring lines so the Chinese reads naturally, but every line must stay about where its words are said.
+Keep names, terms and code identifiers that are usually left untranslated; use the common Chinese renderings
+of well-known names. Reply with one JSON object: {{"lines": ["...", ...]}} with exactly as many lines as given."""
+
+
+@task("translate", "翻译字幕", "ai")
+def pi_translate(task, beat):
+    """Chinese subtitles for an English video: X.zh.srt next to it (Plex shows it as Chinese; the page also offers
+    both together), and the Chinese lines go into search (a Chinese search finds the English moment)."""
+    path, subs = task_media(task)
+    jid, n = task["payload"]["job"], task["payload"]["part"]
+    en = sorted((x for x in subs if sub_lang(x, path.stem).split("-")[0] == "en"),
+                key=lambda x: sub_lang(x, path.stem) != "en")  # the uploader's own .en before the automatic -orig
+    if not en or any(sub_lang(x, path.stem).split("-")[0] == "zh" for x in subs):
+        return {"skipped": "no English subtitles, or Chinese ones already"}
+    cues = srt_cues(en[0])
+    # carry on from what an earlier run (stopped by a restart) translated already
+    prog = task["progress"] or {}
+    out = prog.get("out") if prog.get("from") == Path(en[0]).name else None
+    out = out or []
+    i, size, usage = len(out), 60, {}
+    while i < len(cues):
+        batch = cues[i:i + size]
+        user = "\n".join(f"{k + 1}. {t}" for k, (_, _, t) in enumerate(batch))
+        try:
+            got = llm_json(TRANSLATE_SYSTEM.replace("{src}", "English"), user, {"lines": "array of strings"}, 12000,
+                           usage, "translate", jid, think=False)["lines"]
+        except Exception:
+            got = None
+        if not isinstance(got, list) or len(got) != len(batch):
+            if size > 8:  # the model merged or split lines: try smaller pieces
+                size //= 2
+                continue
+            got = [t for _, _, t in batch]  # give up on these few: keep the English
+        out += [[a, b, str(t).strip()] for (a, b, _), t in zip(batch, got)]
+        i += len(batch)
+        size = min(60, size * 2)
+        beat({"pct": round(i / len(cues) * 100), "from": Path(en[0]).name, "out": out})
+    write_srt(path.with_name(f"{path.stem}.zh.srt"), out)
+    q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='译文'", (jid, n))
+    for a, _, t in out:
+        q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'译文',?)", (jid, n, round(a, 1), t))
+    plex_refresh()
+    return {"lines": len(out), "from": Path(en[0]).name, "calls": usage.get("calls"), "cost": usage.get("cost")}
+
+
+DIGEST_SYSTEM = """You write a digest of the videos some followed uploaders published in a period (usually a week), for
+the person following them, in Simplified Chinese. For each uploader: an overview of 2-4 sentences on what they
+covered and their main views (not a list of titles), then one short line per video saying what it's about. Finally
+one sentence for the whole period. Be concrete: names, places, claims, numbers. The ids are only for the JSON:
+never mention a video's id in the text.
+Reply with one JSON object: {"headline": "...", "uploaders": [{"sub": <id>, "overview": "...",
+"videos": [{"job": <id>, "line": "..."}]}]}"""
+
+
+def digest_videos(owner, start, end):
+    """The followed uploaders' videos that came out from `start` to `end` (dates) and are downloaded: by their
+    upload date, or when that isn't known, by when a weekly check (not the first look back) fetched them."""
+    subs = {r["id"]: r for r in q("SELECT * FROM subs WHERE owner=?", (owner,))}
+    t0 = time.mktime(time.strptime(start, "%Y-%m-%d"))
+    t1 = time.mktime(time.strptime(end, "%Y-%m-%d")) + 86400
+    out = {}
+    for r in q("SELECT * FROM jobs WHERE status='done' AND owner=? AND source LIKE 'sub:%'", (owner,)):
+        sid = int(r["source"][4:])
+        a = json.loads(r["analysis"] or "{}")
+        pub = a.get("published")
+        if sid in subs and ((start <= pub <= end) if pub else (not r["backfill"] and t0 <= r["created"] < t1)):
+            out.setdefault(sid, []).append((pub or time.strftime("%Y-%m-%d", time.localtime(r["created"])), r, a))
+    return subs, {sid: sorted(v, key=lambda x: x[0]) for sid, v in out.items()}
+
+
+@task("digest", "追更周报", "ai-quick")
+def pi_digest(task, beat):
+    p = task["payload"]
+    subs, found = digest_videos(p["owner"], p["start"], p["end"])
+    body = {"start": p["start"], "end": p["end"], "headline": "", "uploaders": []}
+    if found:
+        parts = []
+        for sid, vids in found.items():
+            parts.append(f"Uploader {sid}: {subs[sid]['name']}")
+            for pub, r, a in vids:
+                points = "；".join(a.get("key_points") or [])
+                parts.append(f"- video {r['id']} ({pub}): {a.get('title') or r['title']}\n  {a.get('summary', '')}"
+                             + (f"\n  要点：{points}" if points else ""))
+        out = llm_json(DIGEST_SYSTEM.replace("{", "{{").replace("}", "}}"), "\n".join(parts)[:60000],
+                       {"headline": "string", "uploaders": "array"}, 8000, {}, "digest")
+        body["headline"] = str(out.get("headline") or "")
+        for u in out.get("uploaders") or []:
+            sid = as_int(u.get("sub"))
+            if sid in found:
+                titles = {r["id"]: (a.get("title") or r["title"], pub) for pub, r, a in found[sid]}
+                body["uploaders"].append({"sub": sid, "name": subs[sid]["name"], "overview": str(u.get("overview") or ""),
+                                          "videos": [{"job": as_int(v.get("job")), "line": str(v.get("line") or ""),
+                                                      "title": titles[as_int(v.get("job"))][0],
+                                                      "published": titles[as_int(v.get("job"))][1]}
+                                                     for v in u.get("videos") or [] if as_int(v.get("job")) in titles]})
+    q("DELETE FROM digests WHERE owner=? AND start=? AND end=?", (p["owner"], p["start"], p["end"]))
+    q("INSERT INTO digests (owner, start, end, body, created) VALUES (?,?,?,?,?)",
+      (p["owner"], p["start"], p["end"], json.dumps(body, ensure_ascii=False), time.time()))
+    return {"uploaders": len(body["uploaders"]), "videos": sum(len(u["videos"]) for u in body["uploaders"])}
+
+
+def backfill_published():
+    """Once, in the background: upload dates for videos downloaded before they were kept (B站: its API; YouTube:
+    yt-dlp), so 追更周报 can tell what came out when."""
+    if kv_get("published_backfilled"):
         return
-    media = playable(job_dict(row))
-    try:
-        if kind == "cover":
-            idle_cover(key, jid, row["thumb"])
-        elif n < len(media):
-            {"cues": idle_cues, "frames": idle_frames, "subs": idle_subs}[kind](key, jid, n, Path(media[n]["path"]),
-                                                                               media[n]["subs"])
+    for r in q("SELECT id, url, analysis FROM jobs WHERE status='done' AND source LIKE 'sub:%'"):
+        a = json.loads(r["analysis"] or "{}")
+        if a.get("published"):
+            continue
+        day = None
+        try:
+            bv = re.search(r"(BV[0-9A-Za-z]{10})", r["url"])
+            if bv:
+                data = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": bv.group(1)},
+                                    timeout=15, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"}).json().get("data") or {}
+                if data.get("pubdate"):
+                    day = time.strftime("%Y-%m-%d", time.localtime(data["pubdate"]))
+                time.sleep(1)
+            elif "youtu" in r["url"]:
+                info = ytdlp_probe(r["url"]) or {}
+                d = str(info.get("upload_date") or "")
+                day = f"{d[:4]}-{d[4:6]}-{d[6:]}" if re.fullmatch(r"\d{8}", d) else None
+        except Exception:
+            traceback.print_exc()
+        if day:
+            a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (r["id"],), one=True)["analysis"] or "{}")
+            a["published"] = day
+            update(r["id"], analysis=a)
+    kv_set("published_backfilled", True)
+
+
+def publish_digests():
+    """Monday mornings: last week's digest for every account that follows someone."""
+    now = time.localtime()
+    if now.tm_wday != 0 or now.tm_hour < 8:
+        return
+    end = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+    start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+    for r in q("SELECT DISTINCT owner FROM subs"):
+        publish("digest", f"digest:{r['owner']}:{start}:{end}", 40)
+
+
+# ---- the same content twice: a re-upload, or a clip of a longer video
+
+MINHASH_N = 128
+_mh = {}
+
+
+def minhash(text):
+    """(MinHash signature, number of distinct 6-character shingles) of what's said, punctuation and spaces dropped."""
+    import numpy as np
+    import zlib
+    t = re.sub(r"[\W_]+", "", text.casefold())
+    sh = {zlib.crc32(t[i:i + 6].encode()) for i in range(max(len(t) - 5, 0))}
+    if not sh:
+        return None, 0
+    if "ab" not in _mh:
+        rng = np.random.default_rng(42)  # the same permutations everywhere, every time
+        _mh["ab"] = (rng.integers(1, (1 << 31) - 1, MINHASH_N, dtype=np.uint64), rng.integers(0, (1 << 31) - 1, MINHASH_N, dtype=np.uint64))
+    a, b = _mh["ab"]
+    x = np.fromiter(sh, np.uint64)
+    sig = ((x[:, None] * a[None, :] + b[None, :]) % np.uint64((1 << 31) - 1)).min(axis=0)
+    return sig.astype(np.uint32), len(sh)
+
+
+def job_frames(jid):
+    import numpy as np
+    rows = q("SELECT v FROM vec WHERE kind='job' AND ref=? AND src='画面' ORDER BY part, t", (jid,))
+    return np.stack([np.frombuffer(r["v"], np.float32) for r in rows]) if rows else None
+
+
+@task("similar", "找重复和切片", "light")
+def pi_similar(task, beat):
+    """Fingerprint this video, then compare it with every other one: candidates by fingerprint (cheap), checked frame by
+    frame and by what's said. "same": most of each is in the other; "clip": most of the shorter one is in the longer."""
+    import numpy as np
+    jid = task["payload"]["job"]
+    row = q("SELECT transcript FROM jobs WHERE id=?", (jid,), one=True)
+    sig, nsh = minhash(row["transcript"] or "")
+    frames = job_frames(jid)
+    mean = (frames.mean(0) / np.linalg.norm(frames.mean(0))).astype(np.float32) if frames is not None else None
+    dur = sum(duration_of(m["path"]) or 0 for m in playable(job_dict(q("SELECT * FROM jobs WHERE id=?", (jid,), one=True))))
+    q("INSERT OR REPLACE INTO fingerprints (job_id, minhash, shingles, frames, nframes, duration, updated) VALUES (?,?,?,?,?,?,?)",
+      (jid, sig.tobytes() if sig is not None else None, nsh, mean.tobytes() if mean is not None else None,
+       0 if frames is None else len(frames), dur, time.time()))
+    q("DELETE FROM similar WHERE a=? OR b=?", (jid, jid))
+    found = 0
+    for o in q("SELECT * FROM fingerprints WHERE job_id != ? AND job_id IN (SELECT id FROM jobs WHERE status='done' AND ref IS NULL)", (jid,)):
+        said_ab = said_ba = 0.0
+        if sig is not None and o["minhash"]:
+            jac = float((sig == np.frombuffer(o["minhash"], np.uint32)).mean())
+            if jac > 0.02:  # containment from Jaccard and the two set sizes
+                said_ab = min(1, jac * (nsh + o["shingles"]) / ((1 + jac) * nsh))
+                said_ba = min(1, jac * (nsh + o["shingles"]) / ((1 + jac) * o["shingles"]))
+        # What's said decides when both have enough of it (a talk show's episodes share a studio: their frames look
+        # alike). Frames decide only for videos with little speech, and must match more (0.8 against 0.6).
+        if nsh >= 300 and o["shingles"] >= 300:
+            ab, ba, need = said_ab, said_ba, 0.6
         else:
-            idle_set(key, "done")
-    except Paused:
-        sys.exit(3)
+            if not (mean is not None and o["frames"] and len(frames) >= 10 and o["nframes"] >= 10
+                    and float(mean @ np.frombuffer(o["frames"], np.float32)) > 0.85):
+                continue
+            other = job_frames(o["job_id"])
+            sims = frames @ other.T
+            seen_ab, seen_ba = float((sims.max(1) > 0.92).mean()), float((sims.max(0) > 0.92).mean())
+            ab, ba, need = seen_ab, seen_ba, 0.8
+        kind = "same" if ab >= need and ba >= need else "clip" if max(ab, ba) >= need else None
+        if kind:
+            a, b = (jid, o["job_id"]) if jid < o["job_id"] else (o["job_id"], jid)
+            a_in_b, b_in_a = (ab, ba) if a == jid else (ba, ab)
+            q("INSERT OR REPLACE INTO similar (a, b, kind, a_in_b, b_in_a, updated) VALUES (?,?,?,?,?,?)",
+              (a, b, kind, round(a_in_b, 3), round(b_in_a, 3), time.time()))
+            found += 1
+    return {"found": found, "shingles": nsh, "frames": 0 if frames is None else len(frames)}
 
 
-def idle_cover(key, jid, thumb):
-    started = time.time()
-    v = clip_image(thumb)
-    if v is not None:
-        store_vec("job", jid, 0, None, "封面", v)
-    for line in ocr_text(thumb):
-        q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,0,NULL,'封面文字',?)", (jid, line))
-    log_usage("clip", "cover", jid, amount=1, seconds=time.time() - started)
-    idle_set(key, "done")
-
-
-def idle_cues(key, jid, n, path, subs):
+@task("index_subs", "整理已有字幕", "light", remote=True)
+def pi_index_subs(task, beat):
+    path, subs = task_media(task)
+    jid, n = task["payload"]["job"], task["payload"]["part"]
+    if not subs:
+        return {"lines": 0}
     q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
-    sub = subs[0]  # the first track; others are usually the same lines in another language
-    for t, text in _cues(sub, Path(sub).stat().st_mtime):
+    cues = _cues(subs[0], Path(subs[0]).stat().st_mtime)  # the first track; others are mostly the same lines translated
+    for t, text in cues:
         q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, t, text))
-    idle_set(key, "done", {"file": Path(sub).name})
+    maybe_translate(task, path, subs)
+    return {"lines": len(cues), "file": Path(subs[0]).name}
 
 
-def idle_frames(key, jid, n, path, subs):
-    """What's on screen, every FRAME_EVERY seconds (a frame much like the one before is skipped)."""
-    state, data = idle_get(key)
-    t, dur, prev, count, started = data.get("until", 3), duration_of(str(path)) or 0, None, 0, time.time()
-    try:
-        while t < dur:
-            if not idle_ok():
-                raise Paused()
-            v = clip_image(path, t)
-            if v is not None and (prev is None or float(v @ prev) < 0.95):
-                store_vec("job", jid, n, t, "画面", v)
+def job_thumb(task):
+    row = q("SELECT thumb FROM jobs WHERE id=?", (task["payload"]["job"],), one=True)
+    if not row or not row["thumb"] or not Path(row["thumb"]).exists():
+        raise ValueError("no cover")
+    return Path(row["thumb"])
+
+
+@task("cover", "识别封面", "cpu", prefer="gpu", remote=True, then="save_cover")
+def pi_cover(task, beat):
+    """What the cover looks like and the text on it, worked out on the Pi's CPU (~30 s; the Mac takes ~0.2 s)."""
+    thumb, started = job_thumb(task), time.time()
+    v = clip_image(thumb)
+    return {"vector": vec_to(v) if v is not None else None, "lines": ocr_text(thumb), "seconds": round(time.time() - started, 1)}
+
+
+@task("save_cover", "保存封面识别", "light")
+def pi_save_cover(task, beat):
+    jid, res = task["payload"]["job"], parent_result(task)
+    q("DELETE FROM vec WHERE kind='job' AND ref=? AND src='封面'", (jid,))
+    q("DELETE FROM seg WHERE kind='job' AND ref=? AND src='封面文字'", (jid,))
+    if res.get("vector"):
+        store_vec("job", jid, 0, None, "封面", vec_from(res["vector"]))
+    for line in res.get("lines") or []:
+        q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,0,NULL,'封面文字',?)", (jid, str(line)))
+    log_usage("clip", "cover", jid, amount=1, seconds=float(res.get("seconds") or 0))
+    drop_parent_result(task, {"lines": len(res.get("lines") or [])})
+    return {"lines": len(res.get("lines") or [])}
+
+
+def keyframes(path, out_dir):
+    """The video's keyframes (every few seconds; the encoder puts them at cuts too) as 224x224 JPEGs named by
+    time. Only keyframes are decoded, so the Pi does an hour in about a minute and a half."""
+    proc = subprocess.run(["nice", "-n", "10", "ffmpeg", "-v", "info", "-nostats", "-skip_frame", "nokey", "-i", str(path),
+                           "-an", "-fps_mode", "vfr", "-vf", "scale=224:224:flags=bicubic,showinfo", "-q:v", "4",
+                           str(out_dir / "%06d.jpg")], capture_output=True, text=True)
+    times = [float(t) for t in re.findall(r"pts_time:([\d.]+)", proc.stderr)]
+    files = sorted(out_dir.glob("*.jpg"))
+    return [(t, f) for t, f in zip(times, files)]
+
+
+@task("frames", "识别画面", "cpu", prefer="gpu", remote=True, then="save_frames")
+def pi_frames(task, beat):
+    """What's on screen, keyframe by keyframe, on the Pi's CPU (~3 s a frame; the Mac does them 100x faster).
+    A frame much like the last one kept is skipped."""
+    path, _ = task_media(task)
+    started, kept, prev = time.time(), [], None
+    with tempfile.TemporaryDirectory(dir=INCOMPLETE / "tmp") as tmp:
+        frames = keyframes(path, Path(tmp))
+        for i, (t, f) in enumerate(frames):
+            if i % 20 == 0 and (not pi_idle() or not beat({"pct": round(i / max(len(frames), 1) * 100)})):
+                raise Paused()  # starts over next time: the keyframes are quick, the vectors are the slow part
+            v = clip_image(f)
+            if v is not None and (prev is None or float(v @ prev) < 0.85):  # same shot as the last kept: skip
+                kept.append([round(t, 2), vec_to(v)])
                 prev = v
-            t += FRAME_EVERY
-            count += 1
-            if count % 10 == 0:
-                idle_set(key, "partial", {"until": t})
-        idle_set(key, "done", {"until": t})
-    except Paused:
-        idle_set(key, "partial", {"until": t})
-        raise
-    finally:
-        if count:
-            log_usage("clip", "frames", jid, amount=count, seconds=time.time() - started)
+    return {"frames": kept, "keyframes": len(frames), "seconds": round(time.time() - started, 1)}
 
 
-def idle_subs(key, jid, n, path, subs):
-    """Full subtitles with speech-to-text, 90 seconds at a time (resumable), saved as a .srt next to the video:
-    the player and Plex show them, and search can jump to the moment something is said."""
+@task("save_frames", "保存画面识别", "light")
+def pi_save_frames(task, beat):
+    jid, n, res = task["payload"]["job"], task["payload"]["part"], parent_result(task)
+    q("DELETE FROM vec WHERE kind='job' AND ref=? AND part=? AND src='画面'", (jid, n))
+    for t, b64 in res.get("frames") or []:
+        store_vec("job", jid, n, float(t), "画面", vec_from(b64))
+    log_usage("clip", "frames", jid, amount=res.get("keyframes") or 0, seconds=float(res.get("seconds") or 0))
+    publish("similar", f"job:{jid}", task["priority"] - 3, parent=task["id"], force=True)
+    drop_parent_result(task, {"kept": len(res.get("frames") or []), "keyframes": res.get("keyframes")})
+    return {"kept": len(res.get("frames") or [])}
+
+
+@task("transcribe", "转文字", "cpu", prefer="gpu", remote=True, then=after_transcribe)
+def pi_transcribe(task, beat):
+    """Speech-to-text on the Pi's CPU (whisper small, ~1x realtime) when no Mac is around: 90 seconds at a time,
+    the progress kept on the board, so a pause loses nothing."""
     from faster_whisper import WhisperModel
     import numpy as np
-    state, data = idle_get(key)
-    until, segs, lang = data.get("until", 0), data.get("segs", []), data.get("lang")
-    dur, chunk, started, heard = duration_of(str(path)) or 0, 90, time.time(), 0
+    path, _ = task_media(task)
+    prog = task["progress"] if (task["progress"] or {}).get("by") == "pi" else {}
+    until, segs, lang = prog.get("until", 0), prog.get("segs", []), prog.get("language") or task["payload"].get("language")
+    dur, chunk, started = duration_of(str(path)) or 0, 90, time.time()
     model = None
     try:
         while until < dur:
-            if not idle_ok():
+            if not pi_idle():
                 raise Paused()
             pcm = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(until), "-i", str(path), "-t", str(chunk), "-vn",
                                   "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], capture_output=True).stdout
@@ -2856,35 +3466,180 @@ def idle_subs(key, jid, n, path, subs):
                                             **WHISPER_FAST)
                 segs += [[round(until + s.start, 2), round(until + s.end, 2), s.text.strip()] for s in found if s.text.strip()]
             until += chunk
-            heard += len(audio) / 16000
-            idle_set(key, "partial", {"until": until, "segs": segs, "lang": lang})
-    except Paused:
-        log_usage("whisper", "idle", jid, amount=heard, seconds=time.time() - started)
-        raise
-    log_usage("whisper", "idle", jid, amount=heard, seconds=time.time() - started)
+            if not beat({"by": "pi", "until": until, "segs": segs, "language": lang, "pct": round(min(until / dur, 1) * 100)}):
+                raise Paused()  # the task isn't ours any more
+    finally:
+        prog_seconds = time.time() - started
+    return {"language": lang, "segments": segs, "audio_seconds": round(min(until, dur), 1), "seconds": round(prog_seconds, 1)}
 
-    def ts(t):
-        h, rem = divmod(t, 3600)
-        m, sec = divmod(rem, 60)
-        return f"{int(h):02}:{int(m):02}:{int(sec):02},{int((sec % 1) * 1000):03}"
-    if segs:
-        srt = path.with_name(f"{path.stem}.{lang or 'und'}.srt")
-        srt.write_text("\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(segs, 1)))
-        q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
-        for a, _, t in segs:
-            q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, a, t))
-        if n == 0:
-            transcript = "\n".join(t for _, _, t in segs)[:200_000]
-            update(jid, transcript=transcript)
-            row = q("SELECT analysis, files FROM jobs WHERE id=?", (jid,), one=True)
-            a = json.loads(row["analysis"] or "{}")
-            if a.get("needs_transcript") and not a.get("key_points") and LLM_API_KEY:
-                a.pop("note", None)
-                a = summarize(jid, a, transcript, f"(speech-to-text of the whole video, language {lang})")
-                update(jid, analysis=a, stage="")
-                plex_set_metadata([(path, a)])
-        plex_refresh()  # Plex picks up the new subtitle file
-    idle_set(key, "done", {"lang": lang, "lines": len(segs)})
+
+def run_claimed(task, worker):
+    """Do a claimed task here and report back."""
+    beat = lambda progress=None: heartbeat_task(task["id"], worker, progress)  # noqa: E731
+    try:
+        result = TASK_KINDS[task["kind"]]["run"](task, beat)
+    except Paused:
+        release_task(task["id"], worker)
+        return "paused"
+    except ValueError as e:  # the target is gone or doesn't fit: no point trying again
+        fail_task(task["id"], worker, e, retry=False)
+        return "failed"
+    except Exception as e:
+        traceback.print_exc()
+        fail_task(task["id"], worker, e)
+        return "failed"
+    complete_task(task["id"], worker, result)
+    return "done"
+
+
+def mem_available_mb():
+    try:
+        return next(int(l.split()[1]) // 1024 for l in open("/proc/meminfo") if l.startswith("MemAvailable"))
+    except Exception:
+        return 0
+
+
+def box_busy():
+    """Something someone is waiting for needs the CPU: a download being processed, a note being transcribed.
+    (Plain downloading doesn't count: it's network-bound.)"""
+    return bool(q("SELECT 1 FROM jobs WHERE status='processing' LIMIT 1", one=True)
+                or q("SELECT 1 FROM notes WHERE pending=1 LIMIT 1", one=True))
+
+
+def pi_idle():
+    return not box_busy() and mem_available_mb() > 500
+
+
+def light_loop(pool="light"):
+    """Worker thread: writing results into the library ("light"), or AI calls ("ai", "ai-quick"); no CPU to speak
+    of, so done right away, here."""
+    worker = pi_worker(pool)
+    while True:
+        try:
+            claimed = claim_task(*worker)
+            if claimed:
+                run_claimed(claimed, worker[0])
+                continue
+        except Exception:
+            traceback.print_exc()
+        time.sleep(3)
+
+
+def heavy_loop():
+    """Worker thread: CPU work (speech-to-text when no Mac is around, covers) when nothing else needs the CPU,
+    one task at a time in its own lowest-priority process, which pauses (progress kept) when something comes in."""
+    time.sleep(30)
+    while True:
+        try:
+            if IDLE_WORK and not box_busy() and mem_available_mb() > 1000:
+                claimed = claim_task(*pi_worker("cpu"))
+                if claimed:
+                    subprocess.run(["nice", "-n", "19", sys.executable, __file__, "task", str(claimed["id"])])
+                    continue
+            else:
+                seen_worker(*pi_worker("cpu"))
+        except Exception:
+            traceback.print_exc()
+        time.sleep(20)
+
+
+def run_task_process(tid):
+    """`grabber.py task N`: the heavy worker's process for one task it claimed."""
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, PI_WORKERS["cpu"]), one=True)
+    if row:
+        run_claimed(task_dict(row), PI_WORKERS["cpu"])
+
+
+def board_summary():
+    """The board for 资源使用: per kind how many wait / run / are done / failed, who's working on what."""
+    kinds = {k: {"label": v["label"], "queued": 0, "running": 0, "done": 0, "failed": 0, "hours": 0.0}
+             for k, v in TASK_KINDS.items()}
+    for r in q("SELECT kind, state, COUNT(*) n, SUM(CASE WHEN state IN ('queued','running') "
+               "THEN json_extract(payload, '$.duration') ELSE 0 END) secs FROM tasks GROUP BY kind, state"):
+        if r["kind"] in kinds:
+            kinds[r["kind"]][r["state"]] = r["n"]
+            kinds[r["kind"]]["hours"] += (r["secs"] or 0) / 3600
+    for k in kinds.values():
+        k["hours"] = round(k["hours"], 1)
+    running = [{"id": r["id"], "kind": r["kind"], "label": TASK_KINDS.get(r["kind"], {}).get("label", r["kind"]),
+                "worker": r["worker"], "title": json.loads(r["payload"]).get("title"),
+                "pct": (json.loads(r["progress"] or "{}") or {}).get("pct")}
+               for r in q("SELECT * FROM tasks WHERE state='running' ORDER BY updated DESC")]
+    failed = [{"id": r["id"], "label": TASK_KINDS.get(r["kind"], {}).get("label", r["kind"]),
+               "title": json.loads(r["payload"]).get("title"), "error": (r["error"] or "")[:200]}
+              for r in q("SELECT * FROM tasks WHERE state='failed' ORDER BY updated DESC LIMIT 5")]
+    workers = [{"name": r["name"], "caps": json.loads(r["caps"]), "seen": r["seen"],
+                "online": time.time() - r["seen"] < WORKER_FRESH, "task": r["task"],
+                "paused": json.loads(r["paused"])["why"] if r["paused"] else None}
+               for r in q("SELECT * FROM workers ORDER BY seen DESC")]
+    return {"kinds": kinds, "running": running, "failed": failed, "workers": workers, "enabled": IDLE_WORK,
+            "busy": box_busy()}
+
+
+def publish_similar_once():
+    """Once: look for re-uploads and clips among what's already there (after its frames and subtitles are in)."""
+    if kv_get("board_similar"):
+        return
+    for r in q("SELECT id FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id"):
+        try:
+            publish("similar", f"job:{r['id']}", 1)
+        except ValueError:
+            pass
+    kv_set("board_similar", True)
+
+
+def publish_translations_once():
+    """Once: English videos already in the library get Chinese subtitles too."""
+    if kv_get("board_translate"):
+        return
+    for r in q("SELECT id, backfill FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id"):
+        row = q("SELECT * FROM jobs WHERE id=?", (r["id"],), one=True)
+        for n, m in enumerate(playable(job_dict(row))):
+            if m["subs"]:
+                fake = {"target": f"job:{r['id']}:{n}", "priority": 9 if r["backfill"] else 29, "id": None}
+                maybe_translate(fake, Path(m["path"]), m["subs"])
+    kv_set("board_translate", True)
+
+
+def publish_frames_once():
+    """Once (boards made before frames were a task): what's on screen in every video there is."""
+    if kv_get("board_frames"):
+        return
+    for r in q("SELECT id, backfill FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id"):
+        row = q("SELECT * FROM jobs WHERE id=?", (r["id"],), one=True)
+        for n, m in enumerate(playable(job_dict(row))):
+            if Path(m["path"]).suffix.lower() in VIDEO_EXT:
+                publish("frames", f"job:{r['id']}:{n}", 9 if r["backfill"] else 29)
+    kv_set("board_frames", True)
+
+
+def migrate_to_board():
+    """Once: the work the old idle loop still had to do becomes tasks (newest videos get the higher ids, so they go
+    first); its bookkeeping tables go."""
+    if kv_get("board_migrated"):
+        return
+    states = {r["key"]: r["state"] for r in q("SELECT key, state FROM idle")} if \
+        q("SELECT name FROM sqlite_master WHERE name='idle'", one=True) else {}
+    for r in q("SELECT id, backfill FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id"):
+        row = q("SELECT * FROM jobs WHERE id=?", (r["id"],), one=True)
+        a = json.loads(row["analysis"] or "{}")
+        music = a.get("library") == "Music" or a.get("folder") == "Music Videos"
+        pri = 10 if r["backfill"] else 30
+        for n, m in enumerate(playable(job_dict(row))):
+            if Path(m["path"]).suffix.lower() in VIDEO_EXT:
+                publish("frames", f"job:{r['id']}:{n}", pri - 1)
+            if m["subs"] and states.get(f"cues:{r['id']}:{n}") != "done" and states.get(f"subs:{r['id']}:{n}") != "done":
+                publish("index_subs", f"job:{r['id']}:{n}", pri)
+            elif not m["subs"] and not music and states.get(f"subs:{r['id']}:{n}") != "done":
+                publish("transcribe", f"job:{r['id']}:{n}", pri)
+        if row["thumb"] and Path(row["thumb"]).exists() and states.get(f"cover:{r['id']}") != "done":
+            publish("cover", f"job:{r['id']}", pri)
+    _write("DROP TABLE IF EXISTS lease")
+    kv_set("board_frames", True)  # a fresh migration already published frames below
+    _write("DROP TABLE IF EXISTS idle")
+    kv_set("board_migrated", True)
+    kv_set("idle_now", None)
+    kv_set("mac_seen", None)
 
 
 # ---------------------------------------------------------------- 资源使用: what the box has been doing
@@ -2927,10 +3682,82 @@ def record_traffic():
     kv_set("traffic_last", last)
 
 
+def read_health():
+    """The Pi now: CPU temperature, fan, load, memory, SD card, and the disks' SMART readings (written by the
+    root timer disk-health, which reads them every 15 minutes without waking sleeping disks)."""
+    def first(path, conv=str):
+        try:
+            return conv(open(path).read().strip())
+        except Exception:
+            return None
+    try:
+        disks = json.load(open("/run/disk-health.json"))["disks"]
+    except Exception:
+        disks = []
+    sd = shutil.disk_usage("/")
+    return {"cpu_temp": (first("/sys/class/thermal/thermal_zone0/temp", int) or 0) / 1000 or None,
+            "fan": first("/run/fan-level"), "load": os.getloadavg(), "cores": os.cpu_count(),
+            "mem_available": mem_available_mb(), "mem_total": next((int(l.split()[1]) // 1024 for l in open("/proc/meminfo")
+                                                                    if l.startswith("MemTotal")), None),
+            "uptime": first("/proc/uptime", lambda x: float(x.split()[0])), "sd_free": sd.free, "sd_total": sd.total,
+            "disks": disks}
+
+
+def record_health():
+    h = read_health()
+    q("INSERT INTO health (ts, cpu, disks) VALUES (?,?,?)",
+      (time.time(), h["cpu_temp"], json.dumps({d["serial"]: d["temp"] for d in h["disks"] if not d.get("asleep")})))
+    q("DELETE FROM health WHERE ts < ?", (time.time() - 30 * 86400,))
+
+
+def health_summary():
+    """Now, the day's highs, and what's worth a warning (thresholds: WD Red/white-label drives are rated to 65 °C;
+    above ~55 °C wear goes up; any reallocated/pending/uncorrectable sector means the disk has started failing)."""
+    h = read_health()
+    day = q("SELECT cpu, disks FROM health WHERE ts > ?", (time.time() - 86400,))
+    h["cpu_max"] = max([r["cpu"] or 0 for r in day] + [h["cpu_temp"] or 0]) or None
+    highs = {}
+    for r in day:
+        for serial, t in json.loads(r["disks"] or "{}").items():
+            if t is not None:
+                highs[serial] = max(highs.get(serial, 0), t)
+    for d in h["disks"]:
+        if d.get("temp") is not None and not d.get("asleep"):
+            highs[d["serial"]] = max(highs.get(d["serial"], 0), d["temp"])
+    warnings = []
+    if (h["cpu_temp"] or 0) >= 75:
+        warnings.append(f"CPU {h['cpu_temp']:.0f}°C，偏热")
+    for d in h["disks"]:
+        d["temp_max"] = highs.get(d["serial"])
+        name = f"{d['mount'] or d['dev']}（{round((d.get('size') or 0) / 1e12)}TB）"
+        if d.get("passed") is False:
+            warnings.append(f"{name} SMART 自检不通过，尽快换盘")
+        bad = (d.get("reallocated") or 0) + (d.get("pending") or 0) + (d.get("uncorrectable") or 0)
+        if bad:
+            warnings.append(f"{name} 有 {bad} 个坏扇区（重映射/待处理/不可修复），开始老化了")
+        hot = max(d.get("temp") or 0, d.get("temp_max") or 0)
+        if hot >= 55:
+            warnings.append(f"{name} 最高到过 {hot}°C，{'过热' if hot >= 60 else '偏热'}，注意散热")
+    h["warnings"] = warnings
+    return h
+
+
 def traffic_loop():
     while True:
         try:
             record_traffic()
+        except Exception:
+            traceback.print_exc()
+        try:
+            record_health()
+        except Exception:
+            traceback.print_exc()
+        try:
+            publish_digests()
+        except Exception:
+            traceback.print_exc()
+        try:
+            record_balance()
         except Exception:
             traceback.print_exc()
         time.sleep(300)
@@ -2952,9 +3779,11 @@ def backfill_usage():
 
 
 USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm", "summarize"): "AI 总结（看字幕）",
-               ("llm", "earlier"): "AI 分类+总结（统计开始前，未细分）", ("llm", "tags"): "AI 合并同义标签",
+               ("llm", "earlier"): "AI 分类+总结（统计开始前，未细分）", ("llm", "translate"): "AI 翻译字幕",
+               ("llm", "digest"): "AI 追更周报", ("llm", "tags"): "AI 合并同义标签",
                ("whisper", "job"): "语音转文字 · 新下载（抽样 6 分钟）", ("whisper", "note"): "语音转文字 · 随记",
-               ("whisper", "idle"): "语音转文字 · 闲时生成字幕", ("encode", "plex"): "转码（Plex / 手机能播）",
+               ("whisper", "idle"): "语音转文字 · 闲时生成字幕（Pi）",
+               ("whisper", "mac"): "语音转文字 · 完整字幕（Mac）", ("encode", "plex"): "转码（Plex / 手机能播）",
                ("ocr", "picture"): "识别图中文字", ("clip", "cover"): "识别封面", ("clip", "frames"): "识别视频画面"}
 
 
@@ -2970,24 +3799,218 @@ def usage_summary():
     jobs = {r["status"]: r["n"] for r in q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
     work = []
     for r in q("SELECT kind, purpose, COUNT(*) n, SUM(amount) amount, SUM(tokens_in) tin, SUM(tokens_out) tout, "
-               "SUM(seconds) secs FROM usage WHERE ts >= ? GROUP BY kind, purpose ORDER BY kind, purpose", (since,)):
+               "SUM(seconds) secs, SUM(cost) cost, SUM(MAX(cache_hit, 0)) hit, SUM(cache_hit < 0) guessed, COUNT(cost) priced "
+               "FROM usage WHERE ts >= ? GROUP BY kind, purpose ORDER BY kind, purpose", (since,)):
         work.append({"kind": r["kind"], "purpose": r["purpose"], "name": USAGE_NAMES.get((r["kind"], r["purpose"]),
                      f"{r['kind']} {r['purpose']}"), "count": r["n"], "amount": r["amount"] or 0,
-                     "tokens_in": r["tin"] or 0, "tokens_out": r["tout"] or 0, "seconds": r["secs"] or 0})
+                     "tokens_in": r["tin"] or 0, "tokens_out": r["tout"] or 0, "seconds": r["secs"] or 0,
+                     "cost": r["cost"] if r["priced"] else None, "cache_hit": r["hit"] or 0, "guessed": r["guessed"] or 0})
+    bal = q("SELECT ts, currency, total FROM balance ORDER BY ts", ())
+    charged = sum(max(0, a["total"] - b["total"]) for a, b in zip(bal, bal[1:]) if b["ts"] >= since)  # rises are top-ups
     finished = q("SELECT COUNT(*) n FROM usage WHERE kind='download' AND ts >= ?", (since,), one=True)["n"]
-    now = kv_get("idle_now")
-    if now:
-        kind = now["key"].split(":")[0]
-        row = q("SELECT title, analysis FROM jobs WHERE id=?", (int(now["key"].split(":")[1]),), one=True)
-        now["label"] = IDLE_LABELS.get(kind, kind)
-        now["title"] = (json.loads(row["analysis"] or "{}").get("title") or row["title"]) if row else ""
-        state, data = idle_get(now["key"])
-        now["until"] = data.get("until")
     return jsonify(days=days, traffic=traffic, traffic_total=total, jobs=jobs, finished=finished, work=work,
-                   idle={"now": now, "left": idle_backlog(), "enabled": IDLE_WORK, "busy": box_busy()},
+                   balance={"total": bal[-1]["total"], "currency": bal[-1]["currency"], "since": bal[0]["ts"],
+                            "charged": round(charged, 4)} if bal else None,
+                   board=board_summary(), health=health_summary(),
                    index={"lines": q("SELECT COUNT(*) n FROM seg", one=True)["n"],
                           "pictures": q("SELECT COUNT(*) n FROM vec", one=True)["n"]},
                    disk={"free": shutil.disk_usage(MEDIA).free, "total": shutil.disk_usage(MEDIA).total})
+
+
+# ---------------------------------------------------------------- the task board over HTTP (the Mac mini, scripts)
+#
+# mac/mac_worker.py on the Mac mini claims tasks here (pull: the Pi never has to reach the Mac, and a Mac that's
+# asleep or off simply stops asking) and publishes its own. LAN only, with COMPUTE_TOKEN.
+
+WHISPER_LANGS = {"zh": ("中文", "汉语", "普通话", "国语", "chinese", "mandarin", "zh"), "yue": ("粤语", "广东话", "cantonese"),
+                 "en": ("英语", "英文", "english", "en"), "ja": ("日语", "日文", "japanese", "ja"),
+                 "ko": ("韩语", "韩文", "korean", "ko"), "fr": ("法语", "french"), "de": ("德语", "german"),
+                 "es": ("西班牙语", "spanish"), "ru": ("俄语", "russian")}
+
+
+def whisper_lang(language):
+    """The classifier's idea of the language ("中文", "English", "zh-CN"...) as a Whisper code, if it's clearly one.
+    Whisper guessing from a few seconds goes wrong on films with little talk (a Japanese film came out as Korean)."""
+    text = str(language or "").casefold()
+    found = {code for code, names in WHISPER_LANGS.items()
+             if any(n == text or n == text.split("-")[0] or ((len(n) > 2 or not n.isascii()) and n in text) for n in names)}
+    return found.pop() if len(found) == 1 else None  # several ("中英双语"): let Whisper find out
+
+
+def compute_auth():
+    if g.external or not COMPUTE_TOKEN or not hmac.compare_digest(request.headers.get("X-Compute-Token", ""), COMPUTE_TOKEN):
+        return jsonify(error="forbidden"), 403
+    return None
+
+
+def _worker():
+    return str((request.get_json(silent=True) or {}).get("worker") or request.args.get("worker") or "")[:40] or None
+
+
+@app.post("/api/tasks/publish")
+def api_publish():
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    kind, target = str(body.get("kind", "")), str(body.get("target", ""))
+    if not TASK_KINDS.get(kind, {}).get("remote"):
+        return jsonify(error=f"may not publish {kind!r}"), 403
+    try:
+        tid = publish(kind, target, int(body.get("priority") or 20), by=_worker() or "remote", force=bool(body.get("force")))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(id=tid)
+
+
+@app.post("/api/tasks/claim")
+def api_claim():
+    """The next task this worker can do (caps), waiting up to `wait` seconds (at most 25) for one to come in."""
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    worker, caps = _worker(), [str(c) for c in body.get("caps") or []]
+    if not worker:
+        return jsonify(error="worker name missing"), 400
+    if body.get("paused"):
+        # still there, just not taking tasks for a while (a game in front): others keep leaving it its kinds,
+        # until it's been paused for PREFER_WAIT
+        row = q("SELECT paused, seen FROM workers WHERE name=?", (worker,), one=True)
+        since = json.loads(row["paused"]).get("since") if row and row["paused"] else time.time()
+        if time.time() - since < PREFER_WAIT_PAUSED:
+            seen_worker(worker, caps, paused=json.dumps({"why": str(body["paused"])[:40], "since": since}))
+        return jsonify(task=None)
+    deadline = time.time() + min(float(body.get("wait") or 0), 25)
+    while True:
+        task = claim_task(worker, caps)
+        if task or time.time() >= deadline:
+            return jsonify(task=task)
+        time.sleep(2)
+
+
+@app.post("/api/tasks/<int:tid>/heartbeat")
+def api_heartbeat(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    return jsonify(ok=heartbeat_task(tid, _worker(), body.get("progress")))
+
+
+@app.post("/api/tasks/<int:tid>/done")
+def api_done(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    if not complete_task(tid, _worker(), body.get("result") or {}):
+        return jsonify(error="not your task (any more)"), 409
+    return jsonify(ok=True)
+
+
+@app.post("/api/tasks/<int:tid>/fail")
+def api_fail(tid):
+    if (denied := compute_auth()):
+        return denied
+    body = request.get_json(silent=True) or {}
+    return jsonify(ok=fail_task(tid, _worker(), body.get("error", ""), retry=bool(body.get("retry", True))))
+
+
+@app.post("/api/tasks/ingest")
+def api_ingest():
+    """The Mac's drop folder (~/拾光投递): a file dropped there becomes a 随记 of `account`, with the file's date."""
+    if (denied := compute_auth()):
+        return denied
+    request.max_content_length = NOTE_MAX_UPLOAD
+    account = str(request.form.get("account", ""))
+    if not q("SELECT 1 FROM users WHERE name=?", (account,), one=True):
+        return jsonify(error=f"no account {account!r}"), 400
+    g.owner, g.device_label = f"user:{account}", "Mac mini · 投递"
+    return note_add()
+
+
+@app.post("/api/tasks/<int:tid>/release")
+def api_release(tid):
+    """Not a failure: the worker is wanted for something else (a game on the Mac). Back on the board, progress kept."""
+    if (denied := compute_auth()):
+        return denied
+    release_task(tid, _worker())
+    return jsonify(ok=True)
+
+
+@app.get("/api/tasks/<int:tid>/audio")
+def api_task_audio(tid):
+    """The task's video's first sound track as it is (no re-encoding: the Pi only unpacks it, ~60 MB an hour of
+    AAC); the worker decodes it. Re-encoding here made the Pi the bottleneck: 2 minutes for 27 minutes of sound."""
+    if (denied := compute_auth()):
+        return denied
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, _worker()), one=True)
+    if not row:
+        return jsonify(error="not your task"), 404
+    try:
+        path, _ = task_media({"payload": json.loads(row["payload"])})
+    except ValueError as e:
+        return jsonify(error=str(e)), 404
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "matroska", "-"],
+                            stdout=subprocess.PIPE)
+
+    def stream():
+        try:
+            while chunk := proc.stdout.read(1 << 16):
+                yield chunk
+        finally:
+            proc.kill()
+            proc.wait()
+    return Response(stream(), mimetype="audio/x-matroska")
+
+
+def my_task(tid):
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, _worker()), one=True)
+    return task_dict(row) if row else None
+
+
+@app.get("/api/tasks/<int:tid>/keyframes")
+def api_task_keyframes(tid):
+    """The task's video's keyframes as a tar of 224x224 JPEGs named by their time in seconds (~3 MB for 24 min)."""
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    if not task:
+        return jsonify(error="not your task"), 404
+    import tarfile
+    path, _ = task_media(task)
+    (INCOMPLETE / "tmp").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=INCOMPLETE / "tmp") as tmp:
+        frames = keyframes(path, Path(tmp))
+        out = tempfile.NamedTemporaryFile(dir=INCOMPLETE / "tmp", suffix=".tar", delete=False)
+        with tarfile.open(fileobj=out, mode="w") as tar:
+            for t, f in frames:
+                tar.add(f, arcname=f"{t:.2f}.jpg")
+        out.close()
+
+    def stream():
+        try:
+            with open(out.name, "rb") as f:
+                while chunk := f.read(1 << 16):
+                    yield chunk
+        finally:
+            os.unlink(out.name)
+    return Response(stream(), mimetype="application/x-tar")
+
+
+@app.get("/api/tasks/<int:tid>/cover")
+def api_task_cover(tid):
+    if (denied := compute_auth()):
+        return denied
+    task = my_task(tid)
+    if not task:
+        return jsonify(error="not your task"), 404
+    return send_file(job_thumb(task))
+
+
+@app.get("/api/tasks")
+def api_board():
+    """The board (for `task board` on the Mac and for 资源使用)."""
+    if g.external and not g.user and (denied := compute_auth()):
+        return denied
+    return jsonify(board_summary())
 
 
 # ---------------------------------------------------------------- 随记: everyday notes
@@ -3064,9 +4087,79 @@ def _note_find(hay, low, tok):
     return None
 
 
+# ---- where a photo or video was taken: its GPS, named offline from GeoNames' cities (nothing is sent anywhere)
+
+GEO_DIR = STATE / "models" / "geo"
+COUNTRY_ZH = {"CN": "", "HK": "香港", "MO": "澳门", "TW": "台湾", "US": "美国", "CA": "加拿大", "JP": "日本", "KR": "韩国",
+              "GB": "英国", "FR": "法国", "DE": "德国", "IT": "意大利", "ES": "西班牙", "PT": "葡萄牙", "NL": "荷兰",
+              "CH": "瑞士", "AT": "奥地利", "TH": "泰国", "SG": "新加坡", "MY": "马来西亚", "ID": "印度尼西亚", "VN": "越南",
+              "PH": "菲律宾", "AU": "澳大利亚", "NZ": "新西兰", "IN": "印度", "RU": "俄罗斯", "AE": "阿联酋", "TR": "土耳其",
+              "EG": "埃及", "MX": "墨西哥", "BR": "巴西", "IS": "冰岛", "NO": "挪威", "SE": "瑞典", "FI": "芬兰", "DK": "丹麦"}
+_places = {}
+
+
+def place_name(lat, lon):
+    """The biggest town within ~30 km (else the nearest one): "上海", "温莎 · 加拿大". (GeoNames lists city
+    districts too; the nearest alone gave "黄浦" for the Bund and "Yoyogi" for Tokyo.)"""
+    import numpy as np
+    if "names" not in _places:
+        import zipfile
+        from opencc import OpenCC
+        cc = OpenCC("t2s")
+        rows = []
+        with zipfile.ZipFile(GEO_DIR / "cities15000.zip") as z:
+            for line in z.read("cities15000.txt").decode().splitlines():
+                f = line.split("\t")
+                # the Chinese name most of its Chinese alternatives agree on (深圳/深圳市 over an old name 宝安)
+                alts = [cc.convert(a).removesuffix("市") for a in f[3].split(",") if re.fullmatch(r"[\u4e00-\u9fff]{1,8}", a)]
+                zh = max(set(alts), key=lambda a: (alts.count(a), -len(a))) if alts else None
+                if f[7] == "PPLX":  # a section of a city
+                    continue
+                rows.append((float(f[4]), float(f[5]), zh or f[1], f[8],
+                             int(f[14] or 0)))
+        _places["xy"] = np.radians(np.array([(r[0], r[1]) for r in rows]))
+        _places["names"] = [(r[2], r[3]) for r in rows]
+        _places["pop"] = np.array([r[4] for r in rows], np.float64)
+    la, lo = np.radians(lat), np.radians(lon)
+    xy = _places["xy"]
+    d = (xy[:, 0] - la) ** 2 + ((xy[:, 1] - lo) * np.cos(la)) ** 2  # flat-earth distance: fine at this scale
+    nearest = int(np.argmin(d))
+    # the biggest town nearby in the same country (Windsor stays in Canada, not Detroit across the river)
+    near = [i for i in np.where(d < (30 / 6371) ** 2)[0] if _places["names"][i][1] == _places["names"][nearest][1]]
+    best = max(near, key=lambda i: _places["pop"][i]) if near else nearest
+    name, country = _places["names"][best]
+    zh = COUNTRY_ZH.get(country, country)
+    return f"{name} · {zh}" if zh and zh != name else name
+
+
+def photo_gps(path):
+    """(lat, lon) from a photo's EXIF, or None (most pictures sent from a phone's browser have it stripped)."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            gps = im.getexif().get_ifd(0x8825)
+        if not gps or 2 not in gps or 4 not in gps:
+            return None
+        def deg(v, ref):
+            x = float(v[0]) + float(v[1]) / 60 + float(v[2]) / 3600
+            return -x if ref in ("S", "W") else x
+        return deg(gps[2], gps.get(1, "N")), deg(gps[4], gps.get(3, "E"))
+    except Exception:
+        return None
+
+
+def video_gps(path):
+    """(lat, lon) from a phone video's metadata (ISO 6709, e.g. "+31.2304+121.4737+004.000/"), or None."""
+    tags = ffprobe(path).get("format", {}).get("tags", {})
+    loc = next((v for k, v in tags.items() if "location" in k.lower()), "")
+    m = re.match(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)", loc)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
 def note_marks(r, term):
     """The matched bits of text when every word of `term` is in the note (text or what's said in it), else None."""
-    hay = r["text"] + "\n" + "\n".join(m.get("transcript", "") + "\n" + m.get("ocr", "") for m in json.loads(r["media"]))
+    hay = r["text"] + "\n" + "\n".join(m.get("transcript", "") + "\n" + m.get("ocr", "") + "\n" + m.get("place", "")
+                                       for m in json.loads(r["media"]))
     low, marks = hay.casefold(), []
     for tok in term.casefold().split():
         m = _note_find(hay, low, tok)
@@ -3095,7 +4188,8 @@ def note_dict(r, marks=None, seen=None):
     d = {"id": r["id"], "text": r["text"], "created": r["created"], "updated": r["updated"], "device": r["device"],
          "pending": bool(r["pending"]),
          "media": [{"kind": m["kind"], "duration": m.get("duration"), "poster": bool(m.get("poster")),
-                    "transcript": m.get("transcript", "")} for m in media]}
+                    "transcript": m.get("transcript", ""), "place": m.get("place")} for m in media],
+         "place": next((m["place"] for m in media if m.get("place")), None)}
     if marks:
         d["marks"] = marks
         missing = [k for k in marks if k not in r["text"]]
@@ -3145,7 +4239,19 @@ def notes_list():
         found = notes_search(term)
         return jsonify(notes=[note_dict(r, m, seen) for r, m, seen in found[:200]], more=False)
     rows = q(f"SELECT * FROM notes WHERE {where} ORDER BY created DESC, id DESC LIMIT 51", args)
-    return jsonify(notes=[note_dict(r, term) for r in rows[:50]], more=len(rows) > 50)
+    extra = {}
+    if not before:  # first page: 那年今天, and the places your notes were made
+        today = time.strftime("%m-%d")
+        extra["onthisday"] = [note_dict(r) for r in q(
+            "SELECT * FROM notes WHERE owner=? AND strftime('%m-%d', created, 'unixepoch', 'localtime')=? "
+            "AND strftime('%Y', created, 'unixepoch', 'localtime') < strftime('%Y', 'now', 'localtime') "
+            "ORDER BY created DESC", (g.owner, today))]
+        places = {}
+        for r in q("SELECT media FROM notes WHERE owner=?", (g.owner,)):
+            for p in {m.get("place") for m in json.loads(r["media"]) if m.get("place")}:
+                places[p] = places.get(p, 0) + 1
+        extra["places"] = sorted(places.items(), key=lambda x: -x[1])[:20]
+    return jsonify(notes=[note_dict(r, term) for r in rows[:50]], more=len(rows) > 50, **extra)
 
 
 @app.post("/api/notes")
@@ -3257,6 +4363,9 @@ def process_note(nid):
             continue
         path, extra = NOTES_DIR / m["file"], {}
         try:
+            gps = photo_gps(path) if m["kind"] == "image" else video_gps(path) if m["kind"] == "video" else None
+            if gps:
+                extra["gps"], extra["place"] = [round(gps[0], 5), round(gps[1], 5)], place_name(*gps)
             if m["kind"] == "image":
                 extra["ocr"] = "\n".join(ocr_text(path))
                 picture = path
@@ -3360,6 +4469,64 @@ def remove_job(jid, with_files):
     if with_files and shared:
         return "kept_shared", 0
     return "removed", files
+
+
+@app.get("/api/similar/<int:jid>")
+def similar_of(jid):
+    """Same content elsewhere in the library: re-uploads, clips of it, or what it's a clip of."""
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    out = []
+    for r in q("SELECT * FROM similar WHERE a=? OR b=?", (jid, jid)):
+        other = r["b"] if r["a"] == jid else r["a"]
+        if not visible(other):
+            continue
+        mine, theirs = (r["a_in_b"], r["b_in_a"]) if r["a"] == jid else (r["b_in_a"], r["a_in_b"])
+        row = q("SELECT title, analysis FROM jobs WHERE id=?", (other,), one=True)
+        rel = "same" if r["kind"] == "same" else "part_of" if mine >= theirs else "has_part"
+        out.append({"job": other, "rel": rel, "mine": mine, "theirs": theirs,
+                    "title": json.loads(row["analysis"] or "{}").get("title") or row["title"]})
+    return jsonify(similar=out)
+
+
+@app.get("/api/digests")
+def digests_list():
+    rows = q("SELECT * FROM digests WHERE owner=? ORDER BY end DESC, id DESC LIMIT 8", (g.owner,))
+    pending = q("SELECT state FROM tasks WHERE kind='digest' AND target LIKE ? AND state IN ('queued','running')",
+                (f"digest:{g.owner}:%",), one=True)
+    return jsonify(digests=[{"id": r["id"], **json.loads(r["body"]), "created": r["created"]} for r in rows],
+                   pending=bool(pending))
+
+
+@app.post("/api/digests/now")
+def digest_now():
+    """The last 7 days, now (the automatic one comes on Monday mornings)."""
+    if not q("SELECT 1 FROM subs WHERE owner=?", (g.owner,), one=True):
+        return jsonify(error="还没有追更的 UP 主"), 400
+    end = time.strftime("%Y-%m-%d")
+    start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 6 * 86400))
+    publish("digest", f"digest:{g.owner}:{start}:{end}", 70, force=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/watch/<int:jid>")
+def save_watch(jid):
+    """Where playback is (sent every ~10 s, on pause and when the page is left): picked up on any device."""
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        pos, dur, part = float(body.get("pos") or 0), float(body.get("dur") or 0), int(body.get("part") or 0)
+    except (TypeError, ValueError):
+        return jsonify(error="bad position"), 400
+    done = bool(body.get("ended")) or (dur > 0 and (pos > dur - 30 or pos / dur > 0.95))
+    prev = q("SELECT done FROM watch WHERE owner=? AND job_id=?", (g.owner, jid), one=True)
+    q("INSERT INTO watch (owner, job_id, part, pos, dur, done, updated) VALUES (?,?,?,?,?,?,?) "
+      "ON CONFLICT(owner, job_id) DO UPDATE SET part=excluded.part, pos=excluded.pos, dur=excluded.dur, "
+      "done=excluded.done, updated=excluded.updated",
+      # once seen to the end it stays 已看完, even when it's watched again
+      (g.owner, jid, part, pos, dur, int(done or bool(prev and prev["done"])), time.time()))
+    return jsonify(ok=True, done=done)
 
 
 @app.post("/api/jobs/<int:jid>/<action>")
@@ -3484,8 +4651,44 @@ def media_info(job):
              "duration": duration_of(m["path"]), "vcodec": vcodec_of(m["path"]),
              "src": f"/play/{jid}/{i}?t={media_token(jid, i)}",
              "subsrc": [f"/subs/{jid}/{i}/{k}?t={media_token(jid, i)}" for k in range(len(m["subs"]))],
-             "subs": [Path(x).name[len(Path(m["path"]).stem) + 1:].rsplit(".", 1)[0] or "字幕" for x in m["subs"]]}
+             "subs": [Path(x).name[len(Path(m["path"]).stem) + 1:].rsplit(".", 1)[0] or "字幕" for x in m["subs"]],
+             "bilingual": f"/subs/{jid}/{i}/bi?t={media_token(jid, i)}" if bilingual_pair(m) else None}
             for i, m in enumerate(playable(job))]
+
+
+def bilingual_pair(m):
+    """(Chinese, English) subtitle files of a media item, if it has both."""
+    stem = Path(m["path"]).stem
+    by = {sub_lang(x, stem): x for x in m["subs"]}
+    zh = next((by[k] for k in by if k.split("-")[0] == "zh"), None)
+    en = by.get("en") or next((by[k] for k in by if k.split("-")[0] == "en"), None)
+    return (zh, en) if zh and en else None
+
+
+@app.get("/subs/<int:jid>/<int:n>/bi")
+def subs_bilingual(jid, n):
+    """Chinese above English in one track: the Chinese cues, each with the English said meanwhile under it."""
+    m = job_media(jid, n)
+    pair = bilingual_pair(m) if m else None
+    if not pair:
+        return "", 404
+    zh, en = srt_cues(pair[0]), srt_cues(pair[1])
+
+    def ts(t):
+        h, rem = divmod(t, 3600)
+        mm, sec = divmod(rem, 60)
+        return f"{int(h):02}:{int(mm):02}:{sec:06.3f}"
+    out, j = ["WEBVTT", ""], 0
+    same = len(zh) == len(en) and all(abs(x[0] - y[0]) < 0.01 for x, y in zip(zh, en))  # translated line by line
+    for i, (a, b, t) in enumerate(zh):
+        if same:
+            said = en[i][2]
+        else:  # different files: the English said mostly within this cue
+            while j < len(en) and en[j][1] <= a:
+                j += 1
+            said = " ".join(x for s, e, x in en[j:j + 4] if min(b, e) - max(a, s) > (e - s) / 2)
+        out += [f"{ts(a)} --> {ts(b)}", t] + ([said] if said else []) + [""]
+    return Response("\n".join(out), mimetype="text/vtt")
 
 
 def job_media(jid, n):
@@ -3629,7 +4832,15 @@ def main_worker():
     threading.Thread(target=sweep_loop, daemon=True).start()
     threading.Thread(target=sub_loop, daemon=True).start()
     threading.Thread(target=note_media_loop, daemon=True).start()
-    threading.Thread(target=idle_loop, daemon=True).start()
+    migrate_to_board()
+    publish_frames_once()
+    publish_translations_once()
+    publish_similar_once()
+    threading.Thread(target=backfill_published, daemon=True).start()
+    threading.Thread(target=light_loop, daemon=True).start()
+    threading.Thread(target=light_loop, args=("ai",), daemon=True).start()
+    threading.Thread(target=light_loop, args=("ai-quick",), daemon=True).start()
+    threading.Thread(target=heavy_loop, daemon=True).start()
     threading.Thread(target=traffic_loop, daemon=True).start()
     backfill_usage()
     if TG_TOKEN:
@@ -3659,8 +4870,8 @@ if __name__ == "__main__":
     elif mode == "note-media":
         init_db()
         process_note(int(sys.argv[2]))
-    elif mode == "idle":
+    elif mode == "task":
         init_db()
-        run_idle(sys.argv[2])
+        run_task_process(int(sys.argv[2]))
     else:
         main_web()

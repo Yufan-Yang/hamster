@@ -1,0 +1,6 @@
+[Unit]
+Description=SMART health of the USB disks for 拾光 (/run/disk-health.json)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disk-health

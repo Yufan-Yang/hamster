@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Write the USB disks' SMART health to /run/disk-health.json for 拾光 (which runs unprivileged).
+Disks that are spun down are left asleep (-n standby): their last reading stays, marked as asleep."""
+import json, subprocess, time, glob, os
+
+OUT = "/run/disk-health.json"
+try:
+    old = {d["serial"]: d for d in json.load(open(OUT))["disks"]}
+except Exception:
+    old = {}
+disks = []
+for dev in sorted(glob.glob("/dev/sd?")):
+    try:
+        j = json.loads(subprocess.run(["smartctl", "-n", "standby", "-d", "sat", "-H", "-A", "-i", "-j", dev],
+                                      capture_output=True, text=True, timeout=60).stdout or "{}")
+    except Exception:
+        continue
+    serial = j.get("serial_number")
+    if j.get("smartctl", {}).get("exit_status", 0) & 2 and not serial:  # standby (or no SMART): keep the last reading
+        prev = next((d for d in old.values() if d.get("dev") == dev), None)
+        if prev:
+            disks.append({**prev, "asleep": True})
+        continue
+    if not serial:
+        continue  # the enclosure itself
+    attrs = {a["id"]: a["raw"]["value"] for a in j.get("ata_smart_attributes", {}).get("table", [])}
+    mount = subprocess.run(["findmnt", "-n", "-o", "TARGET", dev + "1"], capture_output=True, text=True).stdout.strip()
+    usage = os.statvfs(mount) if mount else None
+    disks.append({
+        "dev": dev, "model": j.get("model_name"), "serial": serial, "mount": mount,
+        "passed": j.get("smart_status", {}).get("passed"), "temp": j.get("temperature", {}).get("current"),
+        "hours": j.get("power_on_time", {}).get("hours"), "reallocated": attrs.get(5, 0), "pending": attrs.get(197, 0),
+        "uncorrectable": attrs.get(198, 0), "crc_errors": attrs.get(199, 0), "start_stops": attrs.get(4, 0),
+        "size": usage.f_blocks * usage.f_frsize if usage else None, "free": usage.f_bavail * usage.f_frsize if usage else None,
+        "asleep": False, "checked": time.time()})
+tmp = OUT + ".tmp"
+json.dump({"disks": disks, "updated": time.time()}, open(tmp, "w"))
+os.chmod(tmp, 0o644)
+os.replace(tmp, OUT)

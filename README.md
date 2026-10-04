@@ -19,6 +19,22 @@ a video frame every `FRAME_EVERY` s, and full `.srt` subtitles for videos that h
 default `small`; resumable, pauses as soon as a download needs the CPU). `IDLE_WORK=0` turns it off.
 「资源使用」 on the page sums up traffic (Xray outbounds + Wi-Fi), downloads, processing and LLM tokens by purpose.
 
+Slow work is a task on one board (`tasks` table, on the Pi): the Pi publishes when something happens (download
+finished, note added), a finished task publishes the next (transcribe → save_subs → summarize; cover/frames →
+save_*), the Mac publishes too. Workers claim what they can do with a lease kept by heartbeats: the Pi's light
+worker (library writes, AI calls), its heavy worker (CPU, idle time only) and the Mac. Only the Pi writes the
+library. `mac/`: the Mac mini worker (Whisper large-v3-turbo on its GPU, CLIP pictures, macOS text recognition,
+drop folder; it stops while a game is in front), over the LAN with `COMPUTE_TOKEN`. What it installs and how to
+undo it: `mac/README.md`.
+LLM costs: each DeepSeek call is priced from its token counts (cache hits, peak/off-peak) and the account balance is
+recorded, so 「资源使用」 shows both the list-price estimate and what was really charged.
+
+Also: 继续观看 across devices (position per account), Chinese subtitles for English videos (DeepSeek without
+thinking, off-peak; the player shows both), 追更周报 (Monday mornings, or on demand), 随记 那年今天 and places
+(photo/video GPS named offline from GeoNames cities15000 in `STATE_DIR/models/geo`), re-uploads and clips found by
+what's said (MinHash) or, for videos with little speech, by their frames. `pi/disk-health*`: a root timer that
+writes the disks' SMART data to /run/disk-health.json (needs smartmontools); 资源使用 shows it with the CPU temperature.
+
 Python packages beyond the basics: `faster-whisper`, `onnxruntime`, `onnx`, `tokenizers`, `rapidocr_onnxruntime`,
 `pypinyin`, `opencc-python-reimplemented`.
 

@@ -309,6 +309,38 @@
   .ubars div.direct { background: var(--green); }
   .ubar-l { display: flex; justify-content: space-between; color: var(--faint); }
   .uscroll { overflow-x: auto; }
+  .workers { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .wk { border: 2px solid var(--faint); color: var(--faint); padding: 0 6px; }
+  .wk.on { border-color: var(--ink); color: var(--ink); background: var(--bg); }
+  .wk.on::before { content: "● "; color: var(--green); }
+  .badge.tr { top: 0; right: 0; bottom: auto; background: var(--green); color: #fff; }
+  .watched { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; background: rgba(0,0,0,.45); }
+  .watched > div { height: 100%; background: var(--accent); }
+  #continue { margin: 0 0 22px; }
+  .contitle { font-size: 24px; line-height: 1.3; margin-bottom: 10px; }
+  .controw { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 240px); gap: 16px; overflow-x: auto;
+             padding: 0 8px 10px 0; scrollbar-width: thin; }
+  .otd { padding: 10px 14px; margin-bottom: 18px; background: var(--panel); }
+  .otdh { font-size: 24px; line-height: 1.3; color: var(--accent); }
+  .otd .note { box-shadow: none; }
+  .places { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 14px; }
+  .similar { border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 8px 12px; margin-top: 14px; }
+  .similar .psec { border-color: #1d1b26; }
+  .similar > div + div { margin-top: 6px; }
+  .similar a { text-decoration: underline; text-underline-offset: 3px; }
+  .similar .sub { color: #57536a; }
+  .digest { padding: 12px 14px; }
+  .dhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-bottom: 2px solid var(--ink); padding-bottom: 6px; }
+  .dhead b { font-weight: normal; font-size: 24px; line-height: 1.3; }
+  .dhead select { font: inherit; border: 2px solid var(--ink); background: var(--bg); color: var(--ink); }
+  .dhead .link { margin-left: auto; }
+  .dline { margin: 10px 0; background: var(--yellow); color: #1d1b26; padding: 4px 8px; }
+  .dup { margin-top: 12px; }
+  .dup b { font-weight: normal; color: var(--accent); }
+  .dup p { margin: 4px 0; }
+  .dup ul { margin: 6px 0 0; padding-left: 18px; }
+  .dup li { margin: 6px 0; }
+  .dup a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
   .notehits { margin: 0 0 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 4px 10px; cursor: pointer; }
   /* photo viewer: pinch / wheel / double-tap to zoom, drag to pan, swipe for the next photo, swipe down to close */
   #lightbox { position: fixed; inset: 0; z-index: 35; background: rgba(29,27,38,.96); overflow: hidden; touch-action: none;
@@ -397,6 +429,7 @@
 <main>
   <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
+  <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
   <div class="grid" id="grid"></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
   <div class="subs" id="subs" hidden></div>
@@ -600,6 +633,7 @@ function setChip(k) {
   chip = k; render();
   $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : "搜索标题、简介、标签、字幕…";
   if (refetch) { lastBody = ""; refresh(); }
+  if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
 }
 
 function card(j) {
@@ -623,6 +657,10 @@ function card(j) {
     : j.match ? `<div class="hit">${esc(j.match_where || "字幕")}：${hl(j.match)}</div>` : "";
   const picking = selecting ? `<span class="pick">${selected.has(j.id) ? "✓" : ""}</span>` : "";
   if (j.hidden) over += `<span class="badge left hid">已隐藏</span>`;
+  // how far you got (on any device): a bar along the bottom, or 已看完
+  const w = j.watch;
+  if (w && w.done) over += `<span class="badge tr">已看完</span>`;
+  else if (w && w.dur && w.pos > 15) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
   return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
     ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
     <div class="info"><div class="title">${hl(titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
@@ -673,6 +711,11 @@ function render() {
     chip === "failed" ? j.status === "failed" :
     chip === "device" ? phone(j) === deviceFilter : category(j) === chip);
   shown = jobs;
+  const resume = chip === "all" && !query && !selecting
+    ? state.jobs.filter(j => j.watch && !j.watch.done && j.watch.pos > 15 && j.status === "done").sort((a, b) => b.watch.at - a.watch.at).slice(0, 8) : [];
+  $("#continue").hidden = !resume.length;
+  const contHtml = resume.map(card).join("");
+  if ($("#controw").dataset.html !== contHtml) { $("#controw").innerHTML = contHtml; $("#controw").dataset.html = contHtml; }
   // Patch only the cards that changed, so covers don't reload and the page doesn't flash
   const items = mixNotes ? [...jobs.map(j => ({j, t: j.created})), ...hits.map(n => ({n, t: n.created}))].sort((a, b) => b.t - a.t)
                          : jobs.map(j => ({j}));
@@ -770,6 +813,40 @@ function subRow(s) {
     </div>
   </div>`;
 }
+/* 追更周报 */
+let digestState = {digests: [], pending: false, at: 0}, digestPick = 0;
+async function loadDigests() {
+  try { digestState = {...(await (await fetch("/api/digests")).json()), at: Date.now()}; } catch (e) { return; }
+  if (chip === "subs") { $("#subs").dataset.html = ""; renderSubs(); }
+  if (digestState.pending) setTimeout(loadDigests, 5000);  // being written: look again soon
+}
+async function makeDigest() {
+  const r = await fetch("/api/digests/now", {method: "POST"});
+  toast(r.ok ? "正在写最近 7 天的周报，一两分钟" : ((await r.json()).error || "没成功"));
+  if (r.ok) { digestState.pending = true; $("#subs").dataset.html = ""; renderSubs(); setTimeout(loadDigests, 3000); }
+}
+function digestCard() {
+  const ds = digestState.digests, d = ds[digestPick] || ds[0];
+  const head = `<div class="dhead"><b>追更周报</b>${d ? `<span class="sub">${esc(d.start)} ~ ${esc(d.end)}</span>` : ""}
+    ${ds.length > 1 ? `<select onchange="digestPick = +this.value; $('#subs').dataset.html = ''; renderSubs()">${ds.map((x, i) =>
+      `<option value="${i}"${i === digestPick ? " selected" : ""}>${esc(x.start)} ~ ${esc(x.end)}</option>`).join("")}</select>` : ""}
+    <button class="link" onclick="makeDigest()" ${digestState.pending ? "disabled" : ""}>${digestState.pending ? "正在写…" : "生成最近 7 天"}</button></div>`;
+  if (!d) return `<div class="px digest">${head}<p class="sub">每周一早上自动写上一周的；也可以现在生成最近 7 天的。</p></div>`;
+  const ups = d.uploaders.map(u => `<div class="dup"><b>${esc(u.name)}</b><p>${esc(u.overview)}</p><ul>${u.videos.map(v =>
+    `<li><a href="#" onclick="openJob(${v.job}); return false">${esc(v.title || "#" + v.job)}</a>${v.published ? `<span class="sub"> · ${esc(v.published.slice(5))}</span>` : ""}<br>${esc(v.line)}</li>`).join("")}</ul></div>`).join("");
+  return `<div class="px digest">${head}${d.headline ? `<p class="dline">${esc(d.headline)}</p>` : ""}${ups || '<p class="sub">这段时间追更的 UP 主没有新视频。</p>'}</div>`;
+}
+// a video that may not be in the list loaded so far (opened from a digest)
+async function openJob(id) {
+  if (!state.jobs.some(j => j.id === id)) {
+    try {
+      const r = await (await fetch(`/api/jobs?ids=${id}`)).json();
+      const j = r.jobs.find(x => x.id === id);
+      if (j) state.jobs.push(j); else { toast("这个视频不见了"); return; }
+    } catch (e) { toast("连不上 Pi"); return; }
+  }
+  openWatch(id);
+}
 function renderSubs() {
   const list = state.subs || [];
   const html = `<form class="subadd" onsubmit="addSub(event)">
@@ -777,6 +854,7 @@ function renderSubs() {
       <button class="btn">追更</button>
     </form>
     <div class="sub">${every(state.sub_interval || 604800)}检查一次新视频，有新的就自动下载。取消追更不会删除已经下载的视频。</div>
+    ${list.length ? digestCard() : ""}
     ${list.map(subRow).join("") || '<div class="empty" style="padding:40px 0">还没有追更的 UP 主</div>'}`;
   const el = $("#subs");
   if (el.dataset.html === html) return;
@@ -830,7 +908,8 @@ async function loadNotes(older) {
       const keepOlder = notesState.q === query && notesState.notes.length > r.notes.length && r.more;
       const edge = r.notes[r.notes.length - 1];
       const older = keepOlder ? notesState.notes.filter(n => !ids.has(n.id) && (n.created < edge.created || (n.created === edge.created && n.id < edge.id))) : [];
-      notesState = {notes: [...r.notes, ...older], more: keepOlder ? notesState.more : r.more, q: query};
+      notesState = {notes: [...r.notes, ...older], more: keepOlder ? notesState.more : r.more, q: query,
+                    onthisday: r.onthisday || [], places: r.places || []};
     }
     if (chip === "notes") { renderNotes(); schedule(); }
   } catch (e) { toast("连不上 Pi"); }
@@ -862,7 +941,7 @@ function noteCard(n) {
     : `<button class="link" onclick="editNote(${n.id})">编辑</button>
        <button class="link" style="color:var(--accent)" onclick="deleteNote(${n.id})">删除</button>`;
   return `<div class="px note" id="note${n.id}">
-    <div class="ntime"><span>${hhmm(n.created)}${n.device ? " · " + esc(n.device.replace(/^📱\s*/, "")) : ""}</span></div>
+    <div class="ntime"><span>${hhmm(n.created)}${n.place ? " · " + esc(n.place) : ""}${n.device ? " · " + esc(n.device.replace(/^📱\s*/, "")) : ""}</span></div>
     ${text}${n.match ? `<div class="nsay">${noteWhere(n)}</div>` : ""}${noteMedia(n)}
     <div class="nacts">${acts}</div>
   </div>`;
@@ -876,6 +955,15 @@ function renderNotes() {
     html += noteCard(n);
   }
   if (!notesState.notes.length) html = `<div class="empty" style="padding:40px 0">${query ? "随记里没有找到匹配的内容" : notesState.q === null ? "正在加载…" : "还没有随记。写点什么，或者拍张照片"}</div>`;
+  if (!query) {
+    // 那年今天: what you noted on this day in earlier years; and the places notes were made (tap to see those)
+    const otd = notesState.onthisday || [], places = notesState.places || [];
+    const top = (otd.length ? `<div class="px otd"><div class="otdh">那年今天</div>${otd.map(n =>
+        `<div class="nday"><b>${new Date(n.created * 1000).getFullYear()} 年 · ${new Date().getFullYear() - new Date(n.created * 1000).getFullYear()} 年前</b></div>${noteCard(n)}`).join("")}</div>` : "")
+      + (places.length ? `<div class="places"><span class="sub">地点</span>${places.map(([p, c]) =>
+        `<button class="chip" onclick="searchNotes(${esc(JSON.stringify(p))})">${esc(p)} ${c}</button>`).join("")}</div>` : "");
+    html = top + html;
+  }
   const el = $("#noteList");
   // leave the list alone while it's the same, or a playing video would restart
   if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
@@ -899,6 +987,7 @@ function whenChanged() {
 }
 /* photo viewer */
 const lb = {list: [], at: 0, s: 1, x: 0, y: 0, pts: new Map(), start: null, lastTap: 0, moved: false};
+function searchNotes(t) { $("#search").value = t; query = t; notesBody = ""; refresh(); window.scrollTo(0, 0); }
 function viewImage(nid, i) {
   const n = notesState.notes.find(x => x.id === nid);
   lb.list = n.media.map((m, k) => m.kind === "image" ? `/notefile/${nid}/${k}` : null).filter(Boolean);
@@ -1044,7 +1133,8 @@ function unattach(i) { URL.revokeObjectURL(noteFiles[i].url); noteFiles.splice(i
 
 // Photos are made smaller before upload (and HEIC becomes JPEG); videos and audio go up as they are
 async function shrink(file) {
-  if (/gif/.test(file.type) || (file.size < 3e6 && /jpeg|png|webp/.test(file.type))) return file;
+  // JPEGs up to 10 MB go as they are: re-encoding would drop their EXIF (where the photo was taken)
+  if (/gif/.test(file.type) || (file.size < 3e6 && /png|webp/.test(file.type)) || (file.size < 10e6 && /jpeg/.test(file.type))) return file;
   try {
     const bmp = await createImageBitmap(file), k = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
     const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
@@ -1141,6 +1231,9 @@ async function deleteNote(id) {
 function openWatch(id, part = 0, t = 0) {
   const j = state.jobs.find(x => x.id === id); if (!j) return;
   stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
+  // opened from the list (not from a search hit or a part button): carry on where you left off, on any device
+  const w = j.watch, resumed = arguments.length < 2 && w && !w.done && w.pos > 15 && (j.media || [])[w.part];
+  if (resumed) { part = w.part; t = w.pos; toast(`从 ${dur(w.pos)} 接着播放`); }
   watching = {id, part};
   const a = j.analysis || {}, media = j.media || [], m = media[part];
   let stage;
@@ -1159,7 +1252,7 @@ function openWatch(id, part = 0, t = 0) {
     : `<a href="${esc(j.url)}" target="_blank" rel="noopener">原链接</a>`;
   const meta = [category(j) ? esc(catName(category(j))) : null, esc(ago(j.created)), m && m.duration ? dur(m.duration) : null, src,
                 phone(j) ? esc(phone(j)) : null, j.owner_label ? "@" + esc(j.owner_label) : null,
-                a.usage && a.usage.calls ? `AI ${a.usage.calls} 次 / ${a.usage.tokens} tokens` : null].filter(Boolean);
+                a.usage && a.usage.calls ? `AI ${a.usage.calls} 次 / ${a.usage.tokens} tokens${a.usage.cost != null ? " / " + yuan(a.usage.cost) : ""}` : null].filter(Boolean);
   const parts = media.length > 1 ? `<div class="parts">${media.map((x, i) =>
     `<button class="${i === part ? "on" : ""}" onclick="openWatch(${id},${i})">${i + 1}. ${esc(x.name.slice(-24))}</button>`).join("")}</div>` : "";
   const active = ACTIVE.includes(j.status);
@@ -1186,6 +1279,8 @@ function openWatch(id, part = 0, t = 0) {
       ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
       ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
     </div>
+    ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
+    <div id="similarBox"></div>
     ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
     ${hitList(j)}
     ${desc}`;
@@ -1193,7 +1288,38 @@ function openWatch(id, part = 0, t = 0) {
   document.body.style.overflow = "hidden";
   updateWatchStatus();
   if (m) setupMediaSession(j);
+  loadSimilar(id);
+  const el = $("#watchBody video, #watchBody audio");
+  if (el) {
+    let last = 0;
+    el.addEventListener("timeupdate", () => { if (Date.now() - last > 10000) { last = Date.now(); saveWatch(); } });
+    el.addEventListener("pause", () => saveWatch());
+    el.addEventListener("ended", () => saveWatch(true));
+  }
 }
+// the same content elsewhere in the library: a re-upload, a clip of this, or what this is a clip of
+async function loadSimilar(id) {
+  let r;
+  try { r = await (await fetch(`/api/similar/${id}`)).json(); } catch (e) { return; }
+  const box = $("#similarBox");
+  if (!box || !watching || watching.id !== id || !(r.similar || []).length) return;
+  const how = x => x.rel === "same" ? "同一内容的另一个上传" : x.rel === "part_of"
+    ? `这个视频是它的切片（${Math.round(x.mine * 100)}% 的内容在它里面）` : `它是这个视频的切片（${Math.round(x.theirs * 100)}% 的内容在这里）`;
+  box.innerHTML = `<div class="similar"><div class="psec">可能是同一内容</div>${r.similar.map(x =>
+    `<div><a href="#" onclick="openJob(${x.job}); return false">${esc(x.title)}</a><br><span class="sub">${how(x)}</span></div>`).join("")}</div>`;
+}
+// where playback is, for 继续观看 on every device (also sent when the page is left)
+function saveWatch(ended) {
+  const el = $("#watchBody video, #watchBody audio");
+  if (!el || !watching || !isFinite(el.duration) || (!ended && el.currentTime < 5)) return;
+  const pos = ended ? el.duration : el.currentTime;
+  fetch(`/api/watch/${watching.id}`, {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
+    body: JSON.stringify({part: watching.part, pos, dur: el.duration, ended: !!ended})}).catch(() => {});
+  const j = state.jobs.find(x => x.id === watching.id);
+  if (j) j.watch = {part: watching.part, pos, dur: el.duration, at: Date.now() / 1000,
+                    done: !!ended || !!(j.watch && j.watch.done) || pos > el.duration - 30};
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) saveWatch(); });
 
 // a search found the words in the subtitles: every place they're said, click to jump there
 function hitLabel(h, multi) {
@@ -1218,6 +1344,7 @@ function seekTo(id, part, t) {
 /* ---------- player ----------
    Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
 function stopMedia() {
+  saveWatch();
   document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
 }
 function setupMediaSession(j) {
@@ -1226,9 +1353,12 @@ function setupMediaSession(j) {
     title: titleOf(j), artist: (j.analysis || {}).creator || "拾光",
     artwork: j.thumb ? [{src: `/thumb/${j.id}`, sizes: "640x360", type: "image/jpeg"}] : []});
 }
+const SUB_NAMES = {"zh": "中文", "en": "English", "en-orig": "English（自动）", "ja": "日本語", "ko": "한국어", "yue": "粤语"};
 function videoTag(j, m, t = 0) {
-  const tracks = m.subs.map((label, k) =>
-    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(label)}" srclang="${esc(label.split("-")[0])}"${k === 0 ? " default" : ""}>`).join("");
+  // English videos with translated subtitles: both languages together, shown by default
+  const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="中英双语" srclang="zh" default>` : "";
+  const tracks = bi + m.subs.map((label, k) =>
+    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}"${k === 0 && !bi ? " default" : ""}>`).join("");
   return `<video controls autoplay playsinline preload="metadata" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
 }
 function updateWatchStatus() {
@@ -1476,6 +1606,9 @@ function bytes(n) {
   n = n || 0;
   for (const u of ["B", "KB", "MB", "GB", "TB"]) { if (n < 1024 || u === "TB") return (u === "B" ? n : n.toFixed(n < 10 ? 2 : 1)) + " " + u; n /= 1024; }
 }
+// money: enough digits that a single call (a fraction of a fen) doesn't show as ¥0.00
+function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 10 ? 2 : n >= 0.1 ? 3 : 4)); }
+function workerName(n) { return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）"}[n] || (/mac/i.test(n || "") ? "Mac mini" : n || ""); }
 function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
 async function openUsage(days) {
@@ -1496,14 +1629,30 @@ async function openUsage(days) {
   const proc = work.filter(w => !["download", "llm"].includes(w.kind));
   const dlBytes = dl.reduce((a, w) => a + w.amount, 0), dlCount = dl.reduce((a, w) => a + w.count, 0);
   const tokIn = llm.reduce((a, w) => a + w.tokens_in, 0), tokOut = llm.reduce((a, w) => a + w.tokens_out, 0);
-  const j = u.jobs || {}, idle = u.idle || {}, now = idle.now;
-  const left = Object.values(idle.left || {});
+  const cost = llm.reduce((a, w) => a + (w.cost || 0), 0);
+  const j = u.jobs || {}, board = u.board || {workers: [], running: [], failed: [], kinds: {}};
+  const kinds = Object.values(board.kinds).filter(k => k.queued + k.running + k.done + k.failed);
   const stat = (v, k) => `<div class="ustat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
   const tab = [[1, "今天"], [7, "7 天"], [30, "30 天"], [3650, "全部"]].map(([d, n]) =>
     `<button class="${d === usageDays ? "on" : ""}" onclick="openUsage(${d})">${n}</button>`).join("");
+  const h = u.health || {disks: [], warnings: []};
+  const hours2 = x => x == null ? "–" : x >= 24 * 365 ? (x / 24 / 365).toFixed(1) + " 年" : Math.round(x / 24) + " 天";
   $("#usageBody").innerHTML = `
     <h2>资源使用</h2>
-    <div class="utab">${tab}</div>
+    <div class="usec"><b>设备状态</b><span class="sub">Pi 和两块硬盘</span></div>
+    ${h.warnings.length ? `<div class="form-err" style="margin:8px 0">${h.warnings.map(esc).join("<br>")}</div>` : `<p class="hint" style="margin:6px 0">一切正常</p>`}
+    <div class="ugrid">
+      ${stat(h.cpu_temp ? h.cpu_temp.toFixed(0) + "°C" : "–", `CPU 温度 · 今天最高 ${h.cpu_max ? h.cpu_max.toFixed(0) + "°C" : "–"}${h.fan ? " · 风扇 " + esc(h.fan) : ""}`)}
+      ${stat((h.load || [0])[0].toFixed(1), `负载（${h.cores || 4} 核）· 可用内存 ${num(h.mem_available)} MB`)}
+      ${stat(bytes(h.sd_free), `SD 卡剩余 · 已开机 ${hours2((h.uptime || 0) / 3600)}`)}
+    </div>
+    ${h.disks.length ? `<div class="uscroll"><table class="ut"><tr><th>硬盘</th><th>温度</th><th>今天最高</th><th>健康</th><th>坏扇区</th><th>通电</th><th>剩余</th></tr>
+      ${h.disks.map(d => `<tr><td title="${esc(d.model || "")}">${esc(d.mount || d.dev)}<br><span class="sub">${Math.round((d.size || 0) / 1e12)} TB</span></td>
+        <td>${d.asleep ? "休眠中" : (d.temp ?? "–") + "°C"}</td><td>${d.temp_max ? d.temp_max + "°C" : "–"}</td>
+        <td>${d.passed === false ? '<b style="color:var(--accent)">不通过</b>' : d.passed ? "通过" : "–"}</td>
+        <td>${(d.reallocated || 0) + (d.pending || 0) + (d.uncorrectable || 0)}</td><td>${hours2(d.hours)}</td>
+        <td>${bytes(d.free)}</td></tr>`).join("")}</table></div>` : ""}
+    <div class="utab" style="margin-top:14px">${tab}</div>
     <div class="usec"><b>流量</b><span class="sub">所有经过 Pi 的设备</span></div>
     <div class="ugrid">${stat(bytes(get("proxy_down")), `走代理下载 · 上传 ${bytes(get("proxy_up"))}`)}
       ${stat(bytes(get("direct_down")), `直连下载 · 上传 ${bytes(get("direct_up"))}`)}
@@ -1518,16 +1667,23 @@ async function openUsage(days) {
       ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
         w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
     </table></div>` : '<p class="hint">这段时间还没有。</p>'}
-    <div class="usec"><b>AI tokens</b><span class="sub">${esc("DeepSeek")}，按用量计费</span></div>
-    ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入</th><th>输出</th><th>合计</th></tr>
-      ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td><td>${num(w.tokens_in)}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td><td>${num(w.tokens_in + w.tokens_out)}</td></tr>`).join("")}
-      <tr><td>合计</td><td></td><td>${num(tokIn)}</td><td>${num(tokOut)}</td><td>${num(tokIn + tokOut)}</td></tr>
-    </table></div>` : '<p class="hint">这段时间没有调用。</p>'}
-    <div class="usec"><b>闲时任务</b><span class="sub">没有下载要处理时，在后台慢慢做</span></div>
-    <p style="margin:6px 0">${!idle.enabled ? "已关闭" : now ? `正在${esc(now.label)}：${esc(now.title || "")}${now.until ? `（做到 ${dur(now.until)}）` : ""}`
-      : idle.busy ? "有下载在处理，先让它" : left.length ? "马上开始" : "都做完了"}</p>
-    ${left.length ? `<div class="uscroll"><table class="ut"><tr><th>还剩</th><th>个</th><th>时长</th></tr>
-      ${left.map(c => `<tr><td>${esc(c.label)}</td><td>${num(c.items)}</td><td>${c.hours ? c.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
+    <div class="usec"><b>AI tokens 和花费</b><span class="sub">DeepSeek，按用量计费</span></div>
+    ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入<br>（缓存命中）</th><th>输出</th><th>花费</th></tr>
+      ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td>
+        <td>${num(w.tokens_in)}${w.cache_hit ? `<br>（${num(w.cache_hit)}）` : ""}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td>
+        <td>${w.cost == null ? "–" : yuan(w.cost) + (w.guessed ? "*" : "")}</td></tr>`).join("")}
+      <tr><td>合计</td><td>${num(llm.reduce((a, w) => a + (w.purpose === "earlier" ? w.amount : w.count), 0))}</td><td>${num(tokIn)}</td><td>${num(tokOut)}</td><td>${yuan(cost)}</td></tr>
+    </table></div>
+    <p class="hint">花费按 DeepSeek 标价算（工作日 9–12、14–18 点全价，其他时间半价）。${llm.some(w => w.guessed) ? "带 * 的含开始记花费前的调用，按没有缓存估算，偏高。" : ""}${
+      u.balance ? ` 账户余额 ${yuan(u.balance.total, 2)}，这段时间余额实际减少 ${yuan(u.balance.charged)}（从 ${esc(new Date(u.balance.since * 1000).toLocaleDateString("zh-CN"))} 开始记，包括这个 key 的所有用途）。` : ""}</p>` : '<p class="hint">这段时间没有调用。</p>'}
+    <div class="usec"><b>后台任务</b><span class="sub">任务板：谁能做谁领，Mac 在就交给 Mac</span></div>
+    ${board.workers.length ? `<div class="workers">${board.workers.map(w => `<span class="wk ${w.online ? "on" : ""}">${esc(workerName(w.name))} ${
+      w.online ? (w.paused ? "暂停（" + esc(w.paused) + "）" : "在线") : "离线 · " + esc(ago(w.seen))}</span>`).join("")}</div>` : ""}
+    ${board.running.length ? board.running.map(t => `<p style="margin:6px 0">${esc(workerName(t.worker))}正在${esc(t.label)}：${esc(t.title || "")}${t.pct != null ? `（${t.pct}%）` : ""}</p>`).join("")
+      : `<p style="margin:6px 0">${board.busy ? "有下载在处理，Pi 先让它" : "现在没有任务在跑"}</p>`}
+    ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
+      ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
+    ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 60))}`).join("；")}</p>` : ""}
     <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。硬盘剩余 ${bytes(u.disk.free)}。</p>
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
 }
