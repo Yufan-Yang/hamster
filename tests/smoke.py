@@ -80,6 +80,16 @@ check("jobs list", jobs_list)
 check("search text", lambda: get("/api/jobs?q=%E4%BC%8A%E6%9C%97"))  # 伊朗
 check("search pinyin note", lambda: get("/api/notes?q=yanan"))
 check("notes", lambda: get("/api/notes"))
+
+
+def whole_category():
+    d = get("/api/jobs")
+    cat, n = max(d["cats"].items(), key=lambda x: x[1])
+    got = [j for j in get(f"/api/jobs?cat={cat}")["jobs"] if j["status"] in ("done", "linked")]
+    assert len(got) == n, (cat, len(got), n)
+
+
+check("a category chip gets all of its videos", whole_category)
 check("usage", lambda: get("/api/usage?days=7"))
 check("account", lambda: get("/api/account"))
 check("digests", lambda: get("/api/digests"))

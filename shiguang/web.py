@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import traceback
 
 from flask import Response
 from flask import g
@@ -431,6 +432,17 @@ def owner_label(o):
     return o[5:] if o.startswith("user:") else "快捷指令（未识别）" if o == "shortcut" else "匿名设备" if o else "旧任务"
 
 
+def category_counts():
+    """How many finished videos each category chip has (all of them, not only the page loaded)."""
+    scope, args = scope_sql()
+    out = {}
+    for r in q(f"SELECT json_extract(analysis, '$.library') lib, json_extract(analysis, '$.folder') folder, COUNT(*) n "
+               f"FROM jobs WHERE {scope} AND status IN ('done', 'linked') GROUP BY lib, folder", args):
+        key = (r["folder"] or "Other") if r["lib"] == "Videos" else (r["lib"] or "Other")
+        out[key] = out.get(key, 0) + r["n"]
+    return out
+
+
 @app.get("/api/jobs")
 def jobs():
     term = request.args.get("q", "").strip()
@@ -442,8 +454,26 @@ def jobs():
     limit = int(request.args["limit"]) if request.args.get("limit", "").isdigit() else 100
     if sub.isdigit():  # one followed uploader's videos
         scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), max(limit, 1000)
+    cat = request.args.get("cat", "")
+    if cat:  # a category chip: every video in it (a small category can be spread over many pages of the newest)
+        field = "folder" if cat not in ("Movies", "TV", "Music", "Downloads") else "library"
+        scope += f" AND json_extract(analysis, '$.{field}') = ?" + (" AND json_extract(analysis, '$.library') = 'Videos'" if field == "folder" else "")
+        scope_args, limit = (*scope_args, cat), max(limit, 2000)
     more = False
-    if term:
+    parsed = None
+    # A sentence ("上个月小王讲伊朗、画面里有地图的片段"): an AI reads it into keywords, what's on screen, an
+    # uploader and dates (the page asks for this once typing pauses; `exact` searches the words as typed)
+    if term and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
+        try:
+            ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
+            parsed = llm.parse_query(term, ups, time.strftime("%Y-%m-%d"))
+        except Exception:
+            traceback.print_exc()
+        if parsed and not (parsed["keywords"] or parsed["visual"]) and not (parsed["uploader"] or parsed["since"]):
+            parsed = None
+    if parsed:
+        out = search.smart_search(parsed, scope, scope_args, g.owner)
+    elif term:
         # Searches titles, links, summaries, key points, tags, file paths and transcripts
         like = f"%{term}%"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ? OR url LIKE ? OR analysis LIKE ? OR files LIKE ? "
@@ -540,7 +570,10 @@ def jobs():
                    subs=subs_list(), sub_interval=channels.SUB_INTERVAL, more=more,
                    notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
                    # a search also shows matching 随记 among the videos
-                   note_hits=[notes.note_dict(r, m, seen) for r, m, seen in search.notes_search(term)[:50]] if term else [])
+                   note_hits=[notes.note_dict(r, m, seen) for r, m, seen in
+                              search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
+                   if term else [],
+                   understood=search.understood(parsed) if parsed else None, cats=category_counts())
 
 
 def subs_list():

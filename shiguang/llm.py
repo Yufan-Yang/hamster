@@ -1,5 +1,6 @@
 """The LLM (DeepSeek): classification, summaries, tags, pricing."""
 import fcntl
+import functools
 import json
 import os
 import re
@@ -348,3 +349,27 @@ def offpeak_from(when=None):
 
 # The other modules, imported last: they import this one too, and are only used at run time
 from . import library  # noqa: E402
+
+
+PARSE_SYSTEM = """You turn what someone typed into the search box of their own video library into filters.
+Today is {today}. Uploaders they follow: {uploaders}.
+Reply with one JSON object: {{"keywords": [...], "visual": ..., "uploader": ..., "since": ..., "until": ...}}
+- keywords: 1-4 short words or names (in Chinese unless the query is English) that would be in a title, summary or
+  what's said: the topics, people, places. Not filler ("片段", "视频", "讲").
+- visual: only when the query says what should be seen on screen (画面里, 镜头, 出现...): a short noun phrase, else null.
+- uploader: only when the query names one of the uploaders above: that name exactly, else null.
+- since / until: "YYYY-MM-DD" when the query gives a time (上个月, 去年, 9月, 最近一周), resolved against today; else null."""
+
+
+@functools.lru_cache(maxsize=256)
+def parse_query(text, uploaders, today):
+    """A natural-language search, as filters. ~300 tokens without thinking (≈¥0.001); cached per query and day."""
+    out = llm_json(PARSE_SYSTEM.replace("{today}", today).replace("{uploaders}", uploaders or "（无）"), text,
+                   {"keywords": "array", "visual": "string or null", "uploader": "string or null",
+                    "since": "string or null", "until": "string or null"}, 400, {}, "search", think=False)
+    day = re.compile(r"\d{4}-\d\d-\d\d")
+    return {"keywords": [str(k).strip() for k in out.get("keywords") or [] if str(k).strip()][:4],
+            "visual": str(out["visual"]).strip() if out.get("visual") else None,
+            "uploader": str(out["uploader"]).strip() if out.get("uploader") else None,
+            "since": out["since"] if isinstance(out.get("since"), str) and day.fullmatch(out["since"]) else None,
+            "until": out["until"] if isinstance(out.get("until"), str) and day.fullmatch(out["until"]) else None}

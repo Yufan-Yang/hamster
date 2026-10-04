@@ -344,6 +344,7 @@
   .dup ul { margin: 6px 0 0; padding-left: 18px; }
   .dup li { margin: 6px 0; }
   .dup a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .understood { margin: 0 0 12px; color: var(--muted); }
   .notehits { margin: 0 0 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 4px 10px; cursor: pointer; }
   /* photo viewer: pinch / wheel / double-tap to zoom, drag to pan, swipe for the next photo, swipe down to close */
   #lightbox { position: fixed; inset: 0; z-index: 35; background: rgba(29,27,38,.96); overflow: hidden; touch-action: none;
@@ -431,6 +432,7 @@
 <div class="chips" id="chips"></div>
 <main>
   <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="understood" id="understood" hidden></div>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
   <div class="grid" id="grid"></div>
@@ -610,8 +612,9 @@ function phone(j) {
 
 /* ---------- grid ---------- */
 function renderChips() {
-  const counts = {};
-  state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
+  // categories: counted over the whole library on the Pi (the list only holds a page of the newest)
+  const counts = {...(state.cats || {})};
+  if (!state.cats) state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
   const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
   const failed = state.jobs.filter(j => j.status === "failed").length;
   const list = [["all", "全部"], ["notes", `随记${state.notes ? " " + state.notes : ""}`]];
@@ -632,7 +635,8 @@ function setChip(k) {
   if (k === "device" && chip === "device") { deviceFilter = null; k = "all"; }  // click the device chip again to clear it
   if (k === "all") deviceFilter = null;
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
-  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes";
+  const isCat = x => !!(FOLDERS[x] || LIBS[x]);
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || isCat(k) || isCat(chip);
   chip = k; render();
   $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : "搜索标题、简介、标签、字幕…";
   if (refetch) { lastBody = ""; refresh(); }
@@ -706,6 +710,8 @@ function render() {
   const hits = state.note_hits || [], mixNotes = chip === "all" && !!query;
   $("#noteHits").hidden = notes || mixNotes || !query || !hits.length;
   $("#noteHits").textContent = `随记里也有 ${hits.length} 条匹配 →`;
+  $("#understood").hidden = !(query && state.understood);
+  $("#understood").innerHTML = state.understood ? `按 ${esc(state.understood)} 找 · <button class="link" onclick="searchExact()">按原文搜索</button>` : "";
   const jobs = list ? [] : state.jobs.filter(j =>
     // 首页 skips 追更 videos still waiting in line (hundreds after a backfill); they're under 下载中 and the UP chip
     chip === "all" ? !(j.status === "queued" && (j.source || "").startsWith("sub:")) :
@@ -733,7 +739,7 @@ function render() {
   }
   cardHtml = htmls;
   updateSelbar();
-  $("#more").hidden = !state.more || list || !!query;
+  $("#more").hidden = !state.more || list || !!query || !!(FOLDERS[chip] || LIBS[chip]);
   $("#empty").hidden = items.length > 0 || list;
   $("#empty").textContent = query ? "没有找到匹配的内容" : chip.startsWith("sub:") ? "还没有这个 UP 主的视频，列表获取后会自动开始下载"
     : "还没有内容，点右上角「＋ 添加」，或者直接把链接拖进来";
@@ -754,6 +760,8 @@ async function refresh() {
     const params = new URLSearchParams();
     if (query) params.set("q", query);
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
+    if (FOLDERS[chip] || LIBS[chip]) params.set("cat", chip);  // the whole category, not a page of the newest
+    if (query && smartSearch && !exactSearch) params.set("nl", "1");
     if (pageLimit > 100) params.set("limit", pageLimit);
     if (chip === "notes") loadNotes();
     const body = await (await fetch("/api/jobs" + (params.size ? "?" + params : ""))).text();
@@ -1834,7 +1842,16 @@ async function logout() { await fetch("/api/logout", {method: "POST"}); hide($("
 /* ---------- search ---------- */
 function searchFor(t) { closeWatch(); $("#search").value = t; query = t; refresh(); window.scrollTo(0, 0); }
 let searchTimer;
-$("#search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { query = $("#search").value.trim(); refresh(); }, 250); };
+// A sentence ("上个月小王讲伊朗、画面里有地图的片段") is read by the AI once typing pauses; words search right away
+let smartSearch = false, exactSearch = false;
+function looksLikeSentence(t) { return t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes"; }
+$("#search").oninput = () => {
+  clearTimeout(searchTimer);
+  const t = $("#search").value.trim();
+  exactSearch = false;
+  searchTimer = setTimeout(() => { query = t; smartSearch = looksLikeSentence(t); refresh(); }, looksLikeSentence(t) ? 900 : 250);
+};
+function searchExact() { exactSearch = true; lastBody = ""; refresh(); }
 
 refresh();
 </script>

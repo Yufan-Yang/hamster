@@ -1,6 +1,7 @@
 """Search: subtitles and text on pictures, what pictures look like (Chinese-CLIP), forgiving note search, re-uploads."""
 import functools
 import json
+import collections
 import re
 import requests
 import subprocess
@@ -10,7 +11,7 @@ import traceback
 
 from flask import g
 from pathlib import Path
-from .core import (STATE, log_usage, q)
+from .core import (STATE, job_dict, log_usage, q)
 
 
 def subtitle_hits(d, row, term, limit=30):
@@ -402,3 +403,89 @@ def point_times(jid):
 
 # The other modules, imported last: they import this one too, and are only used at run time
 from . import library  # noqa: E402
+
+
+def smart_search(parsed, scope, scope_args, owner):
+    """Videos matching a parsed natural-language search: filtered by uploader and date, ranked by how many keywords
+    they mention (title, summary, tags, what's said) and whether something on screen looks like `visual`.
+    Each result says where: subtitle lines with their times, frames that look like it."""
+    rows = q(f"SELECT * FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args)
+    subs = {f"sub:{r['id']}": r["name"] for r in q("SELECT id, name FROM subs")}
+    up, since, until = parsed.get("uploader"), parsed.get("since"), parsed.get("until")
+    cands = []
+    for r in rows:
+        d = job_dict(r)
+        a = d.get("analysis") or {}
+        if up:
+            who = " ".join([str(a.get("creator") or ""), subs.get(r["source"] or "", ""), *map(str, a.get("tags") or [])])
+            if up.casefold() not in who.casefold():
+                continue
+        day = a.get("published") or time.strftime("%Y-%m-%d", time.localtime(r["created"]))
+        if (since and day < since) or (until and day > until):
+            continue
+        cands.append((r, d))
+    by_source = {}
+    for r, d in cands:
+        by_source.setdefault(r["ref"] or r["id"], []).append(r["id"])
+    # the uploader is a filter already; a keyword that's (part of) their name only demands they say it
+    kws = [k for k in parsed.get("keywords") or [] if not (up and (k.casefold() in up.casefold() or up.casefold() in k.casefold()))]
+    said, text_hit = {}, {}
+    for k in kws:
+        like = f"%{k}%"
+        for r, d in cands:
+            blob = " ".join([titleish(d), *(t for _, t in match_fields(d, r)[:3])])
+            if k.casefold() in blob.casefold():
+                text_hit.setdefault(r["id"], set()).add(k)
+        if by_source:
+            marks = ",".join("?" * len(by_source))
+            for r in q(f"SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND ref IN ({marks}) AND text LIKE ? "
+                       "ORDER BY ref, part, t", (*by_source, like)):
+                for jid in by_source[r["ref"]]:
+                    said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"], "kw": k, "text":
+                        snippet(r["text"], k, 10, 40).strip("…") if len(r["text"]) > 50 else r["text"]})
+    looks = {}
+    if parsed.get("visual"):
+        for source, found in visual_hits(parsed["visual"], "job", set(by_source)).items():
+            for jid in by_source[source]:
+                looks[jid] = found
+    out = []
+    for r, d in cands:
+        jid = r["id"]
+        matched = text_hit.get(jid, set()) | {h["kw"] for h in said.get(jid, [])}
+        seen = [{"part": p, "t": t, "src": "画面" if t is not None else "封面", "text": f"看起来像「{parsed['visual']}」"}
+                for _, p, t, _ in looks.get(jid, [])[:5]]
+        if kws and not matched and not seen:
+            continue
+        if not kws and parsed.get("visual") and not seen:
+            continue
+        hits = sorted(said.get(jid, []), key=lambda h: (h["part"], h["t"] or 0))[:30]
+        # first what satisfies most of the search (each keyword, the look), then keywords in the title, then how much
+        # it's talked about (a video about Kenya's railway says 铁路 forty times; one mentioning it, twice)
+        title = titleish(d).casefold()
+        counts = collections.Counter(h["kw"] for h in said.get(jid, []))
+        score = (100 * (len(matched) + bool(seen)) + 20 * sum(k.casefold() in title for k in kws)
+                 + sum(min(counts[k], 15) for k in kws))
+        d["hits"] = [{k: v for k, v in h.items() if k != "kw"} for h in hits] + seen
+        if hits:
+            d["match_where"], d["match"] = hits[0]["src"], hits[0]["text"]
+        elif seen:
+            d["match_where"], d["match"] = seen[0]["src"], seen[0]["text"]
+            if seen[0]["t"] is not None:
+                d["frame"] = {"part": seen[0]["part"], "t": seen[0]["t"]}
+        out.append((score, jid, d))
+    out.sort(key=lambda x: (-x[0], -x[1]))
+    return [d for _, _, d in out[:100]]
+
+
+def understood(parsed):
+    """How the search was read, for the page: 关键词「伊朗」· 画面像「地图」· UP 主 小王Albert · 2026-09-04 起."""
+    parts = []
+    if parsed.get("keywords"):
+        parts.append("关键词" + "".join(f"「{k}」" for k in parsed["keywords"]))
+    if parsed.get("visual"):
+        parts.append(f"画面像「{parsed['visual']}」")
+    if parsed.get("uploader"):
+        parts.append(f"UP 主 {parsed['uploader']}")
+    if parsed.get("since") or parsed.get("until"):
+        parts.append(f"{parsed.get('since') or ''} ~ {parsed.get('until') or ''}".strip())
+    return " · ".join(parts)
