@@ -1342,6 +1342,14 @@ function openWatch(id, part = 0, t = 0) {
   loadPointTimes(id);
   const el = $("#watchBody video, #watchBody audio");
   if (el) {
+    // the volume you set carries over to the next video (this browser; iPhones have only the hardware buttons)
+    try {
+      const vol = JSON.parse(localStorage.getItem("playerVolume") || "null");
+      if (vol) { el.volume = Math.min(1, Math.max(0, +vol.volume || 0)); el.muted = !!vol.muted; }
+    } catch (e) {}
+    el.addEventListener("volumechange", () => {
+      try { localStorage.setItem("playerVolume", JSON.stringify({volume: el.volume, muted: el.muted})); } catch (e) {}
+    });
     let last = 0;
     el.addEventListener("timeupdate", () => { if (Date.now() - last > 10000) { last = Date.now(); saveWatch(); } });
     el.addEventListener("pause", () => saveWatch());

@@ -43,23 +43,49 @@ def pi_save_subs(task, beat):
         h, rem = divmod(t, 3600)
         m, sec = divmod(rem, 60)
         return f"{int(h):02}:{int(m):02}:{int(sec):02},{int((sec % 1) * 1000):03}"
+    old = " ".join(r["text"] for r in q("SELECT text FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕' "
+                                         "ORDER BY t", (jid, n)))
     if segs:
+        # Made again (a forced redo, a better model) and saying the same: the summary, chapters and duplicates found
+        # from the old ones still hold; only the lines and their times change
+        same = bool(old) and text_alike(old, " ".join(t for _, _, t in segs)) >= 0.85
+        when = ai_when(task["priority"])
         srt = path.with_name(f"{path.stem}.{lang}.srt")
         srt.write_text("\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(segs, 1)))
         q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
         for a, _, t in segs:
             q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, a, t))
+        a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
+        summary = False
         if n == 0:
             update(jid, transcript="\n".join(t for _, _, t in segs)[:200_000])
-            a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
             if a.get("needs_transcript") and not a.get("key_points") and LLM_API_KEY:
-                board.publish("summarize", f"job:{jid}", task["priority"], parent=task["id"], force=True)
+                # chapters come after it (they need its key points, and read the subtitles from DeepSeek's cache)
+                board.publish("summarize", f"job:{jid}", task["priority"], parent=task["id"], force=True, not_before=when)
+                summary = True
         library.plex_refresh()  # Plex picks up the new subtitle file
         maybe_translate(task, path, lang)
-        board.publish("similar", f"job:{jid}", task["priority"] - 3, parent=task["id"], force=True)
-        board.publish("chapters", task["target"], task["priority"] - 1, parent=task["id"], force=True)
+        if not same:
+            board.publish("similar", f"job:{jid}", task["priority"] - 3, parent=task["id"], force=True)
+        if not summary and (not same or str(n) not in (a.get("chapters") or {})):
+            board.publish("chapters", task["target"], task["priority"] - 1, parent=task["id"], force=True, not_before=when)
     board.drop_parent_result(task, {"language": lang, "lines": len(segs), "audio_seconds": res.get("audio_seconds")})
-    return {"lines": len(segs), "language": lang}
+    return {"lines": len(segs), "language": lang, **({"unchanged": True} if segs and same else {})}
+
+
+def text_alike(a, b):
+    """How much two transcripts say the same (0-1): shared two-character pieces, punctuation and spaces ignored."""
+    def grams(t):
+        t = re.sub(r"[\W_]+", "", t.casefold())
+        return {t[i:i + 2] for i in range(len(t) - 1)}
+    ga, gb = grams(a), grams(b)
+    return len(ga & gb) / max(len(ga | gb), 1)
+
+
+def ai_when(priority):
+    """When AI work for a task of this priority may run: links you sent and new videos of followed uploaders (50 and
+    up) right away; the backlog (older videos of followed uploaders, the library's catch-up) at DeepSeek's half price."""
+    return None if priority >= 50 else llm.offpeak_from()
 
 
 @board.task("summarize", "AI 总结", "ai-quick", remote=True)
@@ -70,10 +96,17 @@ def pi_summarize(task, beat):
     if not row["transcript"]:
         return {"skipped": "no transcript"}
     a.pop("note", None)
-    a = llm.summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
+    text, lines, _ = llm.timed_transcript(jid, 0)
+    if lines >= 20:  # the same text chapters will send, so it reads it from the cache
+        a = llm.summarize_timed(jid, a, text)
+    else:
+        a = llm.summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
     update(jid, analysis=a, stage="")
     llm.merge_tags_if_new()  # tags it brought that mean the same as ones in the library: folded in
-    board.publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True)  # key points changed
+    # chapters next (the key points changed). DeepSeek takes a few seconds to keep a request's opening for reuse;
+    # asked at once, the subtitles were paid in full twice (measured: 0 of 17k tokens from the cache; 20 s later, 16.5k)
+    board.publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True,
+                  not_before=max(ai_when(task["priority"]) or 0, time.time() + 20))
     vids = [f for f in json.loads(row["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
     if vids:
         threading.Thread(target=library.plex_set_metadata, args=([(vids[0], a)],), daemon=True).start()
@@ -280,11 +313,14 @@ def pi_similar(task, beat):
     return {"found": found, "shingles": nsh, "frames": 0 if frames is None else len(frames)}
 
 
-CHAPTERS_SYSTEM = """You split a video into chapters from its timed subtitles, for a Chinese viewer.
-Each input line starts with its time [h:mm:ss]. Give 4-12 chapters covering the whole video in order: where each
-starts (seconds, taken from a line's time) and a short Chinese title (at most 16 characters) naming the topic, not
-"第一部分". Then, for each numbered KEY POINT, the time (seconds) where it is said or argued most directly, or null.
-Reply with one JSON object: {{"chapters": [{{"t": <seconds>, "title": "..."}}], "points": [<seconds or null>, ...]}}"""
+CHAPTERS_TASK = """TASK: split this video into chapters from the subtitles above. Give 4-12 chapters covering the
+whole video in order: where each starts (seconds, taken from a block's time) and a short Chinese title (at most 16
+characters) naming the topic, not "第一部分". Then, for each numbered KEY POINT below, the time (seconds) where it is
+said or argued most directly, or null.
+Reply with one JSON object: {"chapters": [{"t": <seconds>, "title": "..."}], "points": [<seconds or null>, ...]}
+
+KEY POINTS:
+"""
 
 
 @board.task("chapters", "章节", "ai-quick", remote=True)
@@ -292,25 +328,14 @@ def pi_chapters(task, beat):
     """Chapters of a video, and where each key point of its summary is said, from its subtitles (one AI call
     without thinking: ~¥0.03 for an hour and a half). The watch page lists both; a click jumps there."""
     jid, n = task["payload"]["job"], task["payload"]["part"]
-    rows = q("SELECT t, text FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕' AND t IS NOT NULL ORDER BY t",
-             (jid, n))
-    if len(rows) < 20:
+    text, lines, end = llm.timed_transcript(jid, n)  # ~30-second blocks keep the input small
+    if lines < 20:
         return {"skipped": "too few subtitles"}
-    blocks, cur, start = [], [], None
-    for r in rows:  # ~30-second blocks keep the input small
-        if start is None:
-            start = r["t"]
-        cur.append(r["text"])
-        if r["t"] - start >= 30:
-            blocks.append(f"[{int(start // 3600)}:{int(start % 3600 // 60):02}:{int(start % 60):02}] {' '.join(cur)}")
-            cur, start = [], None
-    if cur:
-        blocks.append(f"[{int(start // 3600)}:{int(start % 3600 // 60):02}:{int(start % 60):02}] {' '.join(cur)}")
     a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
     points = (a.get("key_points") or []) if n == 0 else []
-    user = "SUBTITLES:\n" + "\n".join(blocks)[:80000] + "\n\nKEY POINTS:\n" + "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
-    out = llm.llm_json(CHAPTERS_SYSTEM, user, {"chapters": "array", "points": "array"}, 4000, {}, "chapters", jid, think=False)
-    end = rows[-1]["t"]
+    user = f"{text}\n\n{CHAPTERS_TASK}" + "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
+    out = llm.llm_json(llm.TRANSCRIPT_SYSTEM, user, {"chapters": "array", "points": "array"}, 4000, {}, "chapters", jid,
+                       think=False)
     chapters = sorted(({"t": float(c["t"]), "title": str(c.get("title") or "")[:24]} for c in out.get("chapters") or []
                        if isinstance(c, dict) and isinstance(c.get("t"), (int, float)) and 0 <= c["t"] <= end + 60),
                       key=lambda c: c["t"])

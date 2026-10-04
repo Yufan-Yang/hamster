@@ -134,6 +134,8 @@ def lease_runs_out():
 
 check("a lease that runs out goes back on the board", lease_runs_out)
 check("subtitle cue parsing", lambda: G.srt_cues(__file__) == [] or 1)
+check("transcripts compared", lambda: (G.text_alike("今天天气很好，我们去公园", "今天天气很好 我们去公园") == 1
+                                       and G.text_alike("今天天气很好", "明年再说吧") < 0.2) or 1 / 0)
 check("forgiving note match", lambda: G.note_marks({"text": "Yannan San 结婚", "media": "[]"}, "yanan") or 1 / 0)
 check("place names", lambda: G.place_name(31.23, 121.47) == "上海" or 1 / 0)
 

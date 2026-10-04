@@ -322,6 +322,56 @@ def merge_tags_if_new():
         traceback.print_exc()
 
 
+# Summary and chapters of a video both read all of its subtitles. They send them in exactly the same words and the
+# same place (this system prompt, then the subtitles, then the task), so the second call finds that opening in
+# DeepSeek's cache and pays 1/50 for it.
+TRANSCRIPT_SYSTEM = """You work on one video for its owner, who reads Simplified Chinese. The user message gives the
+video's subtitles first, in blocks that start with their time [h:mm:ss], then the task. Reply with one JSON object,
+as the task says."""
+TRANSCRIPT_LIMIT = 80_000  # characters: well inside DeepSeek's context window
+
+
+def timed_transcript(jid, part=0):
+    """(text, lines, last line's time) of a video's subtitles, as ~30-second blocks: what summary and chapters send."""
+    rows = q("SELECT t, text FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕' AND t IS NOT NULL ORDER BY t",
+             (jid, part))
+    blocks, cur, start = [], [], None
+
+    def stamp(t):
+        return f"[{int(t // 3600)}:{int(t % 3600 // 60):02}:{int(t % 60):02}]"
+    for r in rows:
+        if start is None:
+            start = r["t"]
+        cur.append(r["text"])
+        if r["t"] - start >= 30:
+            blocks.append(f"{stamp(start)} {' '.join(cur)}")
+            cur, start = [], None
+    if cur:
+        blocks.append(f"{stamp(start)} {' '.join(cur)}")
+    return "SUBTITLES:\n" + "\n".join(blocks)[:TRANSCRIPT_LIMIT], len(rows), (rows[-1]["t"] if rows else 0)
+
+
+SUMMARY_TASK = """TASK: summarise this video for its owner from the subtitles above.
+Its title: {title}
+What it was taken to be before the subtitles were read: {brief}
+Write in {lang}, even when the video is in another language. Reply with one JSON object with exactly these keys:
+{fields}"""
+
+
+def summarize_timed(job_id, a, transcript):
+    """The summary from timed_transcript() text: same result as summarize(), cache-friendly for chapters after it."""
+    update(job_id, stage="summarizing")
+    task = SUMMARY_TASK.format(title=a.get("title") or "", brief=a.get("summary") or "", lang=SUMMARY_LANG,
+                               fields=json.dumps(SUMMARY_FIELDS, ensure_ascii=False, indent=1))
+    try:
+        out = llm_json(TRANSCRIPT_SYSTEM, f"{transcript}\n\n{task}", SUMMARY_FIELDS, 8000, a.setdefault("usage", {}),
+                       "summarize", job_id)
+        apply_summary(a, out)
+    except Exception as e:
+        a["note"] = f"AI summary failed: {e}"
+    return a
+
+
 def summarize(job_id, a, transcript, transcript_note):
     update(job_id, stage="summarizing")
     if len(transcript) > 60_000:  # stay well inside DeepSeek's context window
@@ -331,18 +381,25 @@ def summarize(job_id, a, transcript, transcript_note):
             f"Transcript {transcript_note}:\n{transcript}")
     try:
         out = llm_json(SUMMARY_SYSTEM, user, SUMMARY_FIELDS, 8000, a.setdefault("usage", {}), "summarize", job_id)
-        a["summary"] = str(out["summary"] or a["summary"])
-        points = out["key_points"]
-        if isinstance(points, str):  # now and then a single string instead of a list
-            points = [x.strip(" -•·") for x in re.split(r"[\n；;]+", points)]
-        a["key_points"] = [str(x) for x in points if str(x).strip()] if isinstance(points, list) else []
-        # tags from what's said (the first ones came from the title and description only); the old ones stay
-        # first: the creator and the people in it
-        new = [str(t).strip() for t in out.get("tags") or [] if str(t).strip()] if isinstance(out.get("tags"), list) else []
-        a["tags"] = list(dict.fromkeys((a.get("tags") or []) + new))[:12]
+        apply_summary(a, out)
     except Exception as e:
         a["note"] = f"AI summary failed: {e}"
     return a
+
+
+def apply_summary(a, out):
+    """A summary reply into the analysis: summary, key points, and tags from what's actually said."""
+    a["summary"] = str(out["summary"] or a["summary"])
+    points = out["key_points"]
+    if isinstance(points, str):  # now and then a single string instead of a list
+        points = [x.strip(" -•·") for x in re.split(r"[\n；;]+", points)]
+    # without the "1. " some replies number them with (the page lists them already)
+    a["key_points"] = [re.sub(r"^\s*\d+\s*[.、)）]\s*", "", str(x)) for x in points if str(x).strip()] \
+        if isinstance(points, list) else []
+    # tags from what's said (the first ones came from the title and description only); the old ones stay
+    # first: the creator and the people in it
+    new = [str(t).strip() for t in out.get("tags") or [] if str(t).strip()] if isinstance(out.get("tags"), list) else []
+    a["tags"] = list(dict.fromkeys((a.get("tags") or []) + new))[:12]
 
 
 def offpeak_from(when=None):
