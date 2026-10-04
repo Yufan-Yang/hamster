@@ -35,10 +35,6 @@ def pi_save_subs(task, beat):
     index, the transcript; then the summary that waited for them."""
     res = board.parent_result(task)
     segs = [[float(a), float(b), str(t).strip()] for a, b, t in res.get("segments") or [] if str(t).strip()]
-    # A line stays up about as long as it takes to read, not through the music or speech that follows
-    # (Whisper often stretches a line to the next thing it hears: lines stuck on screen for 15 s)
-    segs = [[a, min(b, a + min(8.0, 1.5 + len(t) * (0.25 if re.search(r"[\u4e00-\u9fff]", t) else 0.07))), t]
-            for a, b, t in segs]
     lang = re.sub(r"[^a-z-]", "", str(res.get("language") or "und"))[:8] or "und"
     path, _ = board.task_media(task)
     jid, n = task["payload"]["job"], task["payload"]["part"]
