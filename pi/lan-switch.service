@@ -1,0 +1,12 @@
+[Unit]
+Description=Use the network cable when it's plugged in, Wi-Fi otherwise
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/bin/lan-switch watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,50 +1,440 @@
 # 拾光 (hamster)
 
-A home download box for a Raspberry Pi. Send it a link (web page, iOS share sheet, Android HTTP Shortcuts,
-bookmarklet) and it downloads the video (yt-dlp / headless Chromium sniffing / aria2 for files and torrents),
-makes it Plex-friendly, transcribes it when useful, asks an LLM (DeepSeek, OpenAI-compatible) for a summary
-and tags, and files it into the Plex library. The web UI (`index.html`) lists and plays everything.
+家里的下载盒子兼私人片库，跑在一台树莓派 4B 上，一台 Mac mini 帮它干重活。
 
-Pasting a B站 uploader space or a YouTube channel link follows it (追更): its latest videos are cached and new
-ones are picked up every week.
+把链接丢给它（网页、iPhone 分享菜单、书签），它会下载视频、整理成 Plex 能直接播放的格式，并自动完成以下几件事：
+- 自动配字幕；英文视频再翻成中文。
+- 用 AI 写简介、要点和章节，打标签，归档进 Plex。
 
-随记 is a private diary inside the page: text, photos, videos and voice. Videos and voice are transcribed
-(faster-whisper `small`) so what was said can be searched; files live in `MEDIA_ROOT/.notes`.
+网页「拾光」可以浏览、播放、搜索全部内容，也能写带照片、视频和语音的随记。
 
-Search covers titles, summaries, tags, subtitles (with the moment they're said: results open the video there),
-text on covers and photos (RapidOCR) and what pictures look like (Chinese-CLIP, ONNX int8, split into a text
-half for queries and an image half for indexing under `STATE_DIR/models/clip`). Notes also match typos and
-pinyin. The slow part is done ahead of time by the worker in idle time (no download being processed): covers,
-a video frame every `FRAME_EVERY` s, and full `.srt` subtitles for videos that have none (`IDLE_WHISPER_MODEL`,
-default `small`; resumable, pauses as soon as a download needs the CPU). `IDLE_WORK=0` turns it off.
-「资源使用」 on the page sums up traffic (Xray outbounds + Wi-Fi), downloads, processing and LLM tokens by purpose.
+---
 
-Slow work is a task on one board (`tasks` table, on the Pi): the Pi publishes when something happens (download
-finished, note added), a finished task publishes the next (transcribe → save_subs → summarize; cover/frames →
-save_*), the Mac publishes too. Workers claim what they can do with a lease kept by heartbeats: the Pi's light
-worker (library writes, AI calls), its heavy worker (CPU, idle time only) and the Mac. Only the Pi writes the
-library. `mac/`: the Mac mini worker (Whisper large-v3-turbo on its GPU, CLIP pictures, macOS text recognition,
-drop folder; it stops while a game is in front), over the LAN with `COMPUTE_TOKEN`. What it installs and how to
-undo it: `mac/README.md`.
-LLM costs: each DeepSeek call is priced from its token counts (cache hits, peak/off-peak) and the account balance is
-recorded, so 「资源使用」 shows both the list-price estimate and what was really charged.
+## 目录
 
-Also: 继续观看 across devices (position per account), Chinese subtitles for English videos (DeepSeek without
-thinking, off-peak; the player shows both), 追更周报 (Monday mornings, or on demand), 随记 那年今天 and places
-(photo/video GPS named offline from GeoNames cities15000 in `STATE_DIR/models/geo`), re-uploads and clips found by
-what's said (MinHash) or, for videos with little speech, by their frames. `pi/disk-health*`: a root timer that
-writes the disks' SMART data to /run/disk-health.json (needs smartmontools); 资源使用 shows it with the CPU temperature.
+1. [整体架构](#1-整体架构)
+2. [技术栈](#2-技术栈)
+3. [功能与原理](#3-功能与原理)
+4. [任务板：发布任务、招领任务](#4-任务板发布任务招领任务)
+5. [Mac 计算节点](#5-mac-计算节点)
+6. [数据存储](#6-数据存储)
+7. [AI 的用法与花费](#7-ai-的用法与花费)
+8. [用到的模型](#8-用到的模型)
+9. [代码结构](#9-代码结构)
+10. [部署、测试、配置](#10-部署测试配置)
 
-Python packages beyond the basics: `faster-whisper`, `onnxruntime`, `onnx`, `tokenizers`, `rapidocr_onnxruntime`,
-`pypinyin`, `opencc-python-reimplemented`.
+---
 
-- `grabber.py web` – page + API (waitress); `grabber.py worker` – runs queued jobs, follows channels.
-  The code is the `shiguang` package: `core` (config, database, wake-ups), `migrations` (numbered schema steps,
-  one-time data jobs), `download`, `library` (media files, Plex, playback), `llm`, `pipeline` (a job from link to
-  library), `channels` (追更), `search` (subtitles, text on pictures, CLIP), `board` (the task board), `tasks`
-  (what each kind of task does, declared with `@task`), `notes`, `usage`, `web` (routes), `main` (processes).
-- `./deploy.sh` – lint, smoke test on the Pi against a copy of the database (`tests/smoke.py`), swap in, restart,
-  and put the previous code back if the page or the workers don't come up
-- `grabber.service`, `grabber-worker.service` – systemd units; config in `/etc/grabber.env`
-  (template: `grabber.env.example`)
-- `refresh_metadata.py` – re-run the classifier on finished jobs
+## 1. 整体架构
+
+```
+ 手机 / 电脑浏览器 ──┐
+ iPhone 分享菜单 ────┼──>  树莓派（一直在线，负责“值班”）
+ Mac 投递文件夹 ─────┘     ├─ web     网页和 API（waitress）
+                           ├─ worker  下载队列、追更、Pi 自己的几个任务工人
+                           ├─ SQLite  所有数据（放在硬盘上）
+                           ├─ 片库    /mnt/media（两块硬盘 mergerfs 合成一个）→ Plex
+                           └─ 任务板  需要算力的活都挂在这里
+                                  ▲   │  局域网，带令牌
+                         招领/交回 │   ▼
+                           Mac mini（M2 Pro，负责“重活”）
+                           ├─ Whisper 转字幕（GPU）
+                           ├─ 识别画面、封面（CLIP）
+                           └─ 读图中文字（苹果文字识别）
+
+ 云端只有一个：DeepSeek（分类、总结、章节、翻译、搜索理解、问答），按次付费
+```
+
+**分工**
+
+| | 树莓派 | Mac mini |
+|---|---|---|
+| 角色 | 一直在线：收链接、下载、存数据、出网页、调 AI、**唯一写片库的机器** | 只做算力活，干完交回 |
+| 不在时 | — | Mac 关机、休眠、打游戏时，任务退回任务板，Pi 用 CPU 慢慢做（只在空闲时做） |
+
+---
+
+## 2. 技术栈
+
+| 层 | 用的东西 |
+|---|---|
+| 后端 | Python 3.13、Flask + waitress、SQLite（WAL 模式） |
+| 进程 | systemd：`grabber.service`（网页）、`grabber-worker.service`（后台）；每个下载一个子进程 `grabber.py run-job N` |
+| 下载 | yt-dlp（加 deno 跑 YouTube 的 JS）、headless Chromium 抓视频地址、aria2（文件和种子） |
+| 媒体 | ffmpeg / ffprobe：转封装、抽关键帧、抽音轨；Plex 负责电视端 |
+| 语音转文字 | Mac：mlx-whisper large-v3-turbo；Pi：faster-whisper small |
+| 图像 | Chinese-CLIP ViT-B/16（ONNX int8，onnxruntime） |
+| 读图中文字 | Mac：苹果 Vision 框架；Pi：RapidOCR |
+| 大模型 | DeepSeek（OpenAI 兼容接口，`deepseek-flash`） |
+| 其他 | OpenCC（繁转简）、pypinyin（拼音搜索）、GeoNames 离线地名库、MinHash（查重） |
+| 前端 | 单个 `index.html`，原生 JS，没有构建步骤；像素字体米色风格 |
+| Mac 端 | `mac/mac_worker.py`，launchd 常驻，用 uv 建的 venv |
+
+---
+
+## 3. 功能与原理
+
+### 3.1 下载
+
+**入口**
+
+- 网页「＋ 添加」或直接粘贴链接。
+- iPhone 分享菜单的快捷指令：每台手机带自己的设备密钥，只看到自己的任务。
+- Mac 上的 `~/拾光投递` 文件夹：放进去的文件会变成随记。
+
+**一个下载的流程**（`pipeline.process`）
+
+1. **下载**
+   - 能用 yt-dlp 的网站用 yt-dlp：优先 H.264/AAC 1080p，手机和 Plex 不用转码。
+   - 其他网页用 headless Chromium 打开，抓出视频地址再下载。
+   - 文件和种子交给 aria2。
+   - 中断后可以接着下：断点保留在 `.incomplete`。
+2. **整理**：用 ffmpeg 转成 mp4/mkv；只转封装、不重新编码，Pi 做不动重新编码。
+3. **分类**：DeepSeek 看标题、简介和元数据，决定以下几件事：
+   - 放哪一类（电影 / 剧集 / 音乐 / 各类视频）
+   - 叫什么名字
+   - 打哪些标签
+   - 值不值得转字幕、写总结
+
+   B站 联合投稿会把所有 UP 主都记成标签（B站 的 staff 接口）。
+4. **采样转字幕**：没有字幕的，Pi 先听开头、中间、结尾共 6 分钟，帮助判断内容。
+5. **归档**：按 Plex 的命名规则放进片库，通知 Plex 刷新，再把简介、要点、标签写进 Plex。
+6. **后续的慢活挂到任务板**（第 4 节）：完整字幕、封面识别、画面识别等。
+
+**失败处理**
+- 网络问题按 1、5、15 分钟自动重试。
+- 被网站当成机器人时，等更久再试（30 分钟到 12 小时），并换另一条代理出口。
+- 彻底失败的，AI 用一句大白话说明原因和该怎么办（任务 `explain_failure`）。
+
+**同一个链接只下一次**
+- 去掉 `spm`、`si` 这类追踪参数后再比较链接。
+- 别的账号已经下过的，直接共享同一份文件。
+
+### 3.2 追更和追更周报
+
+- **追更**：粘贴 B站 空间或 YouTube 频道链接，就会追这个 UP 主。
+  - 第一次取最新 50 个视频，之后每周查一次新的。
+  - B站 用自己实现的 WBI 签名接口（yt-dlp 的会被 412 拦）。
+  - 追更视频最多占 2 个下载位，排在你手动发的链接之后。
+- **追更周报**：每周一早上 8 点，把上周每个 UP 主发的视频（标题、简介、要点）交给 DeepSeek，写成一段概览，每个视频一句话。也可以随时手动生成。
+
+### 3.3 字幕
+
+**字幕来源**，按优先级：
+1. 视频自带的字幕。
+2. B站 的 AI 字幕：需要登录用的 cookies.txt。
+3. 自己转写：任务 `transcribe`。
+   - Mac 在：用 Whisper large-v3-turbo 跑在 GPU 上，约为实时速度的 25 倍。
+   - Mac 不在：Pi 用 Whisper small，约 1.3 倍实时，只在空闲时跑。
+
+**转写的处理**
+- 语言用分类时判断出的语言。
+- 中文统一转成简体（OpenCC）。
+- 去掉 Whisper 的幻觉句（"请订阅""字幕由…提供"之类）。
+
+**翻译**（任务 `translate`）
+- 英文字幕交给 DeepSeek 翻成中文，每批 60 行。
+- 关闭思考，否则输出 token 多 10 倍。
+- 放到 DeepSeek 的半价时段再做。
+- 每批翻完都存进度，中断后接着翻。
+- 播放器默认显示中英双语。
+
+**字幕的用途**：存成视频旁边的 `.srt`（播放器和 Plex 都能用），每一行带时间写进搜索索引。
+
+### 3.4 总结、要点、章节、标签
+
+- **总结**（任务 `summarize`）
+  - 有完整字幕后，DeepSeek 读字幕（最多 6 万字），写 2～4 句简介、3～6 条要点，再按字幕里实际讲的补几个标签。
+  - 新标签如果和片库已有标签意思相同，就并进去（`merge_tags_if_new`，只比较新标签，关闭思考）。
+- **章节**（任务 `chapters`）
+  - DeepSeek 读带时间的字幕，切成章节，并给每条要点找到讲它的时刻。
+  - 点要点或章节就跳到那里。
+  - AI 没给出时间的要点，用本地办法找：哪 45 秒的字幕和这条要点重合的字最多（`point_times`），不花钱。
+
+### 3.5 播放
+
+- `/play`：mp4/webm 支持拖动进度（HTTP Range）；mkv/avi 和音频现场转成 fMP4 流，不转码。
+- **继续观看**：播放位置每 10 秒存一次，按账号保存，换设备接着看。
+- 字幕随时可以切换：原文、中文、双语。
+
+### 3.6 搜索
+
+一个搜索框可以搜到以下几类内容（`/api/jobs?q=`）：
+
+| 搜什么 | 怎么搜 |
+|---|---|
+| 标题、简介、要点、标签、文件名 | 文字匹配 |
+| 字幕里说过的话 | `seg` 表，每行带时间；结果显示"字幕 12:34：……"，点开从那一秒播放 |
+| 封面和照片上的字 | OCR 读出来的文字，也在 `seg` 表 |
+| 画面里有什么 | Chinese-CLIP，原理见下 |
+| 随记 | 文字、语音转写、图中文字、地点、AI 标签；允许错一个字，支持拼音和首字母（搜 `yanan` 能找到 `Yannan`） |
+
+**画面搜索的原理**
+
+1. **提前做**（下载后，在后台）
+   - Pi 用 ffmpeg 只解码关键帧（`-skip_frame nokey`），约 44 倍实时速度，得到每个镜头的代表画面。
+   - 和上一张保留的画面很像（相似度 > 0.85）的跳过。
+   - Mac 用 CLIP 的"看图"部分把每张画面变成 512 个数字，存进 `vec` 表。
+2. **搜的时候**：CLIP 的"读字"部分把搜索词（比如"地图"）也变成 512 个数字，跟每张画面算相似度。整个片库是一次矩阵乘法，毫秒级。
+3. **及格线**
+   - 有的画面跟什么词都有点像，所以每张画面先算出它对 50 个常见词（人、房间、文字……）的平均相似度，作为它的"底分"。
+   - 比底分高出一定幅度才算"像"：画面 0.055、封面 0.065、照片 0.07。
+   - 这几个线是在 2545 张画面上实测定下的：画面里真有的东西能高出 0.055～0.13，没有的都在 0.05 以下。
+4. **只用于中文搜索词**：英文词和单个字基本只能匹配到噪声。
+
+**大白话搜索**（比如"上个月小王讲伊朗、画面里有地图的片段"）
+
+1. 页面判断这是一句话：6 个字以上、含中文、停顿约 1 秒，就带上 `nl=1` 请求。
+2. **AI 把这句话翻译成条件**（`llm.parse_query`，关闭思考，约 300 token、¥0.0004，同一句话当天有缓存）：
+
+   ```json
+   {"keywords": ["伊朗"], "visual": "地图", "uploader": "小王Albert",
+    "since": "2026-09-01", "until": "2026-09-30"}
+   ```
+
+   AI 收到的只有今天的日期、你追更的 UP 主名单和这句话。
+3. **拾光自己按条件筛**（`search.smart_search`，不用 AI）：
+   1. 只留这个 UP 主、这段时间的视频。
+   2. 字幕和简介里找关键词。
+   3. 用 CLIP 比对画面描述。
+4. **排序**：满足的条件越多越靠前，其次看标题里有没有关键词，再看字幕里提到的次数。
+   - 必须满足全部条件才算结果。
+   - 一个都没有时，页面写明"没有同时符合的"，再列出部分符合的，卡片上标「符合 1/2」。
+5. 页面显示 AI 是怎么理解这句话的，旁边有「按原文搜索」，可以退回按字面搜。
+
+**分类按钮**直接向 Pi 取这一类的全部视频，按钮上的数字按整个片库统计，不用一直点「加载更多」。
+
+### 3.7 问拾光
+
+右上角「问」：用片库和随记回答问题，每句话标出出处，点出处就跳到视频的那一秒或那条随记。
+
+1. 先用大白话搜索的办法找出最相关的 6 个视频。
+2. 每个视频取几处命中的字幕，每处取前 20 秒到后 50 秒的原话，同一段只取一次；再加上相关随记。
+3. 把这些片段编号交给 DeepSeek，要求只根据片段回答、每句标出编号；片段里没有答案就直说。
+4. 页面把【3】这样的编号换成按钮，比如"3 · 12:34"。
+
+每个问题约 1 万 token，¥0.01～0.02，9～13 秒。
+
+### 3.8 随记
+
+私人日记，只有自己能看，管理员也看不到。
+
+- **能记什么**：文字、照片、视频、语音，日期可以改。
+- **附件识别**（任务 `note_media`，优先给 Mac，90 秒内没人接就由 Pi 立刻做）
+  - 视频和语音转成文字。
+  - 读出照片里的字。
+  - 照片算 CLIP 特征，可以按画面搜。
+- **地点**：从照片和视频的 GPS 信息离线换算成地名（GeoNames cities15000 + 繁转简），取 30 公里内、同一国家的最大城镇。
+- **AI 整理**（任务 `note_ai`，关闭思考，约 ¥0.0003）
+  - 打 1～4 个标签。
+  - 给语音转写加标点和分段，只在明显听错时改字，不增减内容。
+- **一周回顾**（任务 `notes_recap`）：每周一早上，或手动生成。DeepSeek 用几句话回顾这一周，再挑几条亮点，点了跳到那条随记。
+- **那年今天、地点**：列表顶部显示往年同一天的随记，以及按地点汇总。
+- **照片查看**：支持双指缩放、双击放大、滑动切换。
+
+### 3.9 找重复和切片
+
+任务 `similar`：判断两个视频是不是重新上传，或者一个是另一个的切片。
+
+- 按说的话比较：把字幕切成 6 个字一段（shingle），用 MinHash 估算重合度。两个视频都有 300 段以上的话，以这个结果为准。
+- 说话很少的视频（比如 MV）改用画面特征比较，阈值 0.8。
+
+### 3.10 资源使用
+
+页面上的「资源使用」统计以下几类：
+- **流量**：代理出站流量（Xray 统计），以及 Wi-Fi 收发量。
+- **下载**：下载了多少、处理了多少。
+- **任务板**：每类任务排队、在跑、失败的数量，以及每个工人在做什么。
+- **AI**：按用途分的 token 和花费。
+  - 每次调用按 DeepSeek 的价格表计算：区分缓存命中、峰谷时段。
+  - 账户余额定时查询（`/user/balance`），所以能和实际扣费对照。
+- **设备状态**：CPU 温度，以及硬盘的 SMART 健康数据。硬盘数据由 root 定时器 `pi/disk-health` 写到 `/run/disk-health.json`，读取时不唤醒休眠中的硬盘。
+
+---
+
+## 4. 任务板：发布任务、招领任务
+
+需要算力或要等的活都不直接做，而是挂到任务板（`tasks` 表）上，谁有能力谁来领。
+
+**任务的基本规则**
+- **发布**
+  - 任务由"类型 + 对象"唯一确定（比如 `transcribe` + `job:146:0`），同一件事不会重复排队。
+  - Pi 在事情发生时发布（下载完成、写了随记）。
+  - 一个任务做完，会接着发布下一个，比如 转字幕 → 保存字幕 → 总结 → 章节。
+  - Mac 也能发布任务。
+- **招领**
+  - 工人告诉任务板"我会做哪些类型"，领走优先级最高的一个。
+  - 领到的任务有 5 分钟租期，工人要不断发心跳续租。
+  - 工人掉线、租期过了，任务自动回到板上。
+- **失败**：按 1、4、9、16 分钟递增（60 × 次数²）重试，最多 5 次。
+- **偏好 GPU**
+  - 转字幕、画面、封面这类任务标了"最好给有 GPU 的"。
+  - 只要 Mac 在线（打游戏暂停的 4 小时内也算在线），Pi 就不抢。
+  - Mac 3 天都没做完的，Pi 才自己做。
+  - 随记附件例外：只等 Mac 90 秒，因为你在等着看结果。
+- **只有 Pi 写片库**：Mac 交回的只是结果，由 Pi 的 `save_*` 任务写进数据库和文件。
+- **唤醒**：进程之间用 UNIX 数据报套接字"按门铃"，有新任务时立刻叫醒工人，不用每隔几秒查一次数据库，SD 卡和 CPU 都省。
+
+**Pi 自己的工人**
+
+| 工人 | 做什么 |
+|---|---|
+| `pi` | 写结果：保存字幕、封面、画面、查重 |
+| `pi-ai`、`pi-ai-2` | 调 DeepSeek：翻译这类长活走一个，总结、章节、随记这类快活走另一个 |
+| `pi-cpu` | CPU 重活。只在 Pi 空闲时做（没有下载在处理、内存够），一有人要用 CPU 就暂停 |
+| `pi-now` | 随记附件，立刻做 |
+
+**新增一种任务**：在 `shiguang/tasks.py` 里写一个函数，用 `@board.task(类型, 名字, 工人池, prefer=, remote=, then=)` 登记。页面上的统计、Mac 能否领取、做完接什么，都从这一处读取。
+
+---
+
+## 5. Mac 计算节点
+
+`mac/mac_worker.py` 由 launchd 常驻，Nice 10。安装和撤销步骤见 `mac/README.md`，里面列了对 Mac 做过的每一处改动。
+
+**工作方式**
+- 通过局域网向 Pi 领任务（`/api/tasks/*`，带 `COMPUTE_TOKEN`），用长轮询等新任务。
+- Pi 只发音轨给 Mac 转字幕：直接拷贝音轨、不重新编码，否则 Pi 自己就成了瓶颈。
+
+**会做的任务**
+
+| 任务 | 用什么 | 速度 |
+|---|---|---|
+| 转字幕 | mlx-whisper large-v3-turbo（GPU） | 约 25 倍实时 |
+| 画面、封面、照片特征 | CLIP 看图部分（CPU；CoreML 跑不了 int8 模型） | 约 30 毫秒一张（Pi 要约 3 秒） |
+| 读图中文字 | 苹果 Vision 框架（pyobjc） | — |
+
+**游戏模式**：每次领任务前用 `lsappinfo` 看前台程序，下面几种情况会暂停领任务，并告诉 Pi"我暂停了"：
+- Steam 目录下的程序
+- App Store 分类为游戏的程序
+- PlayCover
+- `game-apps.txt` 里列出的程序
+
+**其他**
+- Pi 连不上时，要发布的任务先存进 `outbox.jsonl`，连上后补发。
+- **投递文件夹**：放进 `~/拾光投递` 的文件会上传成随记，然后移到 `已投递`。
+
+---
+
+## 6. 数据存储
+
+**数据库**：SQLite，WAL 模式，`synchronous=NORMAL`，放在硬盘 `DB_PATH` 上，不放 SD 卡。放 SD 卡时实测每秒写入 282 KB，换到硬盘后 SD 卡只剩约 6 KB/s。
+
+**主要的表**
+
+| 表 | 内容 |
+|---|---|
+| `jobs` | 每个下载：链接、文件、分析结果（JSON：标题、分类、简介、要点、标签、章节、发布日期）、完整字幕文本 |
+| `seg` | 带时间的文字行：字幕、译文、封面文字。用于搜索和跳转 |
+| `vec` | CLIP 特征：画面、封面、照片。带 `model` 字段，换模型时自动重算旧的 |
+| `tasks`、`workers` | 任务板和工人 |
+| `notes` | 随记（附件信息、转写、地点、标签都在 `media` JSON 里） |
+| `subs`、`digests` | 追更的 UP 主，追更周报 |
+| `fingerprints`、`similar` | 查重 |
+| `watch` | 播放位置 |
+| `usage`、`traffic`、`balance` | 资源统计：AI 调用、流量、余额 |
+| `users`、`devices` | 账号和设备 |
+| `kv` | 零碎状态（比如随记的一周回顾） |
+
+**升级**
+- 结构变化写在 `shiguang/migrations.py` 的 `STEPS` 里，按 `PRAGMA user_version` 的编号逐条执行。
+- 只需要跑一次的补数据工作用 `@once(名字)` 登记。
+
+**文件**
+- 片库：`MEDIA_ROOT` 下按 Plex 规则分 Movies、TV、Music、Videos、Downloads。
+- 随记附件：`MEDIA_ROOT/.notes`（权限 700）。
+- 模型：`STATE_DIR/models`（CLIP、地名库）。
+
+---
+
+## 7. AI 的用法与花费
+
+只调用 DeepSeek（`llm.llm_json`）：每次调用要求返回 JSON，并记录 token、缓存命中、耗时和按价目表算出的费用。
+
+**省钱的做法**
+- **该关思考的关掉**：翻译、标签匹配、章节、搜索理解、随记整理、失败说明都是机械活，开着思考只会多花钱。比如翻译 60 行，开思考约 5800 个输出 token，关掉约 550。
+- **不急的放到半价时段**：翻译。
+- **同一个请求的不变部分放前面**：DeepSeek 对见过的开头按 1/50 计价。分类请求把片库的标签列表放在最前面。
+- **只在需要时调用**：分类时先看值不值得总结，音乐不转字幕；问拾光只在点「问」时调用。
+
+**实测每次的花费**
+
+| 用途 | 每次约 |
+|---|---|
+| 分类 | ¥0.0065 |
+| 新标签匹配 | ¥0.002 |
+| 总结 | ¥0.009 |
+| 章节 | ¥0.003～0.03（看字幕长短） |
+| 翻译 | ¥0.003 / 60 行 |
+| 大白话搜索 | ¥0.0004 |
+| 问拾光 | ¥0.01～0.02 |
+| 随记整理 | ¥0.0003 |
+
+价格（`deepseek-flash`，元 / 百万 token）：缓存命中 0.04，未命中 2，输出 8。工作日北京时间 9–12 点、14–18 点是高峰，其余时间半价。
+
+---
+
+## 8. 用到的模型
+
+| 用途 | 模型 | 在哪跑 | 联网吗 |
+|---|---|---|---|
+| 转字幕 | Whisper large-v3-turbo（MLX） | Mac GPU | 否 |
+| 转字幕（Mac 不在时）、随记语音 | Whisper small（faster-whisper） | Pi | 否 |
+| 分类前的采样转写 | Whisper base | Pi | 否 |
+| 画面、封面、照片、画面搜索 | Chinese-CLIP ViT-B/16，ONNX int8（`Xenova/chinese-clip-vit-base-patch16`），看图和读字两部分分开 | Mac / Pi | 否 |
+| 读图中文字 | 苹果 Vision / RapidOCR | Mac / Pi | 否 |
+| 分类、总结、章节、翻译、搜索理解、问答、随记整理 | DeepSeek `deepseek-flash` | DeepSeek 服务器 | 是：只发文字（标题、字幕、随记文字、搜索句），不发画面和照片 |
+
+---
+
+## 9. 代码结构
+
+```
+grabber.py            入口：web | worker | run-job N | task N WORKER
+shiguang/
+  core.py             配置、数据库连接、写入、门铃唤醒、用量记录
+  migrations.py       数据库升级步骤、一次性任务
+  download.py         yt-dlp / Chromium / aria2
+  library.py          媒体文件、Plex、播放、关键帧
+  pipeline.py         一个下载从链接到入库
+  channels.py         追更
+  llm.py              DeepSeek 调用、价格、分类、总结、标签、搜索理解
+  search.py           字幕索引、OCR、CLIP、随记搜索、大白话搜索、查重
+  ask.py              问拾光
+  board.py            任务板：发布、招领、心跳、重试、Pi 的工人
+  tasks.py            每种任务做什么（@board.task 登记）
+  notes.py            随记
+  usage.py            资源统计、设备状态
+  web.py              网页路由和 API
+  main.py             进程入口
+  telegram.py         Telegram 机器人（未启用）
+index.html            整个前端
+mac/                  Mac 计算节点（含改动记录和撤销步骤）
+pi/                   Pi 上的系统小工具
+  disk-health*        硬盘 SMART 定时器（已安装）
+  lan-switch*         插网线自动切到有线、失败退回 Wi-Fi（写好了，未安装）
+tests/smoke.py        冒烟测试
+deploy.sh             部署脚本
+```
+
+---
+
+## 10. 部署、测试、配置
+
+**部署**：`PYFLAKES=<pyflakes 路径> ./deploy.sh`
+
+1. 本地语法检查（pyflakes），在 Pi 上检查页面 JS 的语法。
+2. 代码打包传到 Pi 的 `/opt/grabber.next`。
+3. 在 Pi 上用**数据库副本**跑 `tests/smoke.py`，覆盖网页、搜索、随记、任务板往返、租期过期等 20 项。不动真实数据。
+4. 换上新代码，旧代码留在 `/opt/grabber.prev`，然后重启服务。
+5. 检查页面能否打开、后台是否在跑、任务板是否有工人。不行就自动换回旧代码。
+6. 如果 `mac/mac_worker.py` 改了，顺便更新 Mac 端。
+
+**配置**：Pi 上的 `/etc/grabber.env`，模板见 `grabber.env.example`（密钥不进仓库）。
+
+**依赖**（基础之外）：`faster-whisper`、`onnxruntime`、`onnx`、`tokenizers`、`rapidocr_onnxruntime`、`pypinyin`、`opencc-python-reimplemented`。系统里要有 `ffmpeg`、`aria2`、`chromium`、`deno`、`smartmontools`。
+
+**其他文件**
+- `grabber.service`、`grabber-worker.service`：systemd 单元。
+- `sudoers-grabber`：让服务以 `bt` 用户身份运行 aria2，种子流量不走代理。
+- `refresh_metadata.py`：对已完成的下载重新跑一遍分类。

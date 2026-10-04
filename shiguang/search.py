@@ -58,7 +58,7 @@ def snippet(text, term, before=16, after=60):
 #
 # Everything slow happens ahead of time, in idle time, so a search is only a lookup:
 #   seg  – timed lines: subtitle cues (downloaded, or made here with speech-to-text), text read off covers
-#   vec  – CLIP vectors (Chinese-CLIP): covers, note photos, a video frame every FRAME_EVERY seconds
+#   vec  – CLIP vectors (Chinese-CLIP): covers, note photos, video keyframes (one per shot)
 # A search runs LIKE over seg and one matrix product over vec (the query's text vector against every picture).
 # No LLM is involved: it can't see pictures, and the local models are free and keep diaries private.
 

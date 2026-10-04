@@ -18,7 +18,6 @@ from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_M
 
 
 IDLE_WHISPER_MODEL = os.environ.get("IDLE_WHISPER_MODEL", "small")
-FRAME_EVERY = int(os.environ.get("FRAME_EVERY", "20"))
 
 
 # ---- what happens when a task is done (on the Pi, whoever did it)

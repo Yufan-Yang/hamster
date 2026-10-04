@@ -1,0 +1,59 @@
+#!/bin/bash
+# Wired when a cable is in, Wi-Fi otherwise. The Pi keeps 192.168.3.200 on whichever is in use, so devices that
+# have it as their gateway don't notice. With the cable in, Wi-Fi stays connected at .201 as a second way in.
+# A switch to the cable that doesn't work within ~30 s (router or internet unreachable over it) is undone, and not
+# tried again until the cable is plugged in again. Wi-Fi changes are runtime only (`nmcli device modify`): after a
+# reboot the Pi always starts on Wi-Fi at .200, and this decides again.
+set -u
+ADDR=192.168.3.200 SPARE=192.168.3.201 GW=192.168.3.1
+WIRED=lan-wired WIFI=wlan0
+BAD=/var/lib/lan-switch/wired-failed
+mkdir -p /var/lib/lan-switch
+
+log() { echo "$*"; logger -t lan-switch "$*"; }
+carrier() { cat /sys/class/net/eth0/carrier 2>/dev/null || echo 0; }
+on_wired() { nmcli -t -f GENERAL.STATE con show "$WIRED" 2>/dev/null | grep -q activated; }
+
+works() {  # ICMP isn't proxied, so this tests the cable and the router, not Xray
+  for _ in 1 2 3 4 5 6; do
+    ping -c1 -W2 -I eth0 "$GW" >/dev/null 2>&1 && ping -c1 -W3 -I eth0 223.5.5.5 >/dev/null 2>&1 && return 0
+    sleep 5
+  done
+  return 1
+}
+
+to_wifi() {
+  nmcli con down "$WIRED" >/dev/null 2>&1
+  nmcli dev modify "$WIFI" ipv4.addresses "$ADDR/24" >/dev/null
+  arping -c2 -U -I "$WIFI" "$ADDR" >/dev/null 2>&1
+  log "on Wi-Fi at $ADDR"
+}
+
+to_wired() {
+  log "cable in: moving $ADDR to the cable"
+  nmcli dev modify "$WIFI" ipv4.addresses "$SPARE/24" >/dev/null
+  if nmcli con up "$WIRED" >/dev/null 2>&1 && arping -c2 -U -I eth0 "$ADDR" >/dev/null 2>&1; works; then
+    rm -f "$BAD"
+    log "on the cable at $ADDR (Wi-Fi at $SPARE)"
+  else
+    touch "$BAD"
+    log "the cable doesn't reach the router or the internet: back to Wi-Fi (plug it in again to retry)"
+    to_wifi
+  fi
+}
+
+case "${1:-watch}" in
+wifi) to_wifi; exit ;;
+wired) rm -f "$BAD"; to_wired; exit ;;
+status) on_wired && echo "cable" || echo "Wi-Fi"; [ -e "$BAD" ] && echo "(the cable failed its check; plug it in again to retry)"; exit 0 ;;
+esac
+
+prev=$(carrier)
+[ "$prev" = 1 ] && [ ! -e "$BAD" ] && to_wired
+while sleep 5; do
+  now=$(carrier)
+  if [ "$now" != "$prev" ]; then
+    if [ "$now" = 1 ]; then rm -f "$BAD"; to_wired; elif on_wired || ! ip -4 addr show "$WIFI" | grep -q "$ADDR/"; then to_wifi; fi
+    prev=$now
+  fi
+done
