@@ -1531,6 +1531,7 @@ SUB_INTERVAL = int(os.environ.get("SUB_INTERVAL", str(7 * 86400)))  # once a wee
 SUB_BACKFILL = int(os.environ.get("SUB_BACKFILL", "50"))
 SUB_WORKERS = int(os.environ.get("SUB_WORKERS", "2"))  # download slots followed channels may use; the rest stay free for links you send
 SUB_SEEN_MAX = 5000
+SUB_RETRY = 3600  # a failed check (e.g. B站 risk control) is tried again an hour later, not next week
 
 
 def channel_of(url):
@@ -1599,12 +1600,12 @@ def list_bilibili(mid, limit):
                   "dm_img_list": "[]", "dm_img_str": "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ",
                   "dm_cover_img_str": "QU5HTEUgKEludGVsLCBJbnRlbChSKSBIRCBHcmFwaGljcyBEaXJlY3QzRDExIHZzXzVfMCBwc181XzApR29vZ2xlIEluYy4gKEludGVsKQ",
                   "dm_img_inter": '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}'}
-        for attempt in range(3):
+        for attempt in range(6):  # B站 answers about half of these with HTTP 412 (risk control); retrying gets through
             r = s.get("https://api.bilibili.com/x/space/wbi/arc/search", params=bili_signed(s, params), timeout=15)
             body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"code": r.status_code}
             if body.get("code") == 0:
                 break
-            time.sleep(3 + attempt * 5)
+            time.sleep(3 + attempt * 4)
         else:
             raise RuntimeError(f"B站列表获取失败（{body.get('code')} {body.get('message') or ''}）")
         data = body["data"]
@@ -1647,7 +1648,8 @@ AVATARS = STATE / "avatars"
 
 def check_sub(sub_id, everything=False):
     """Queue the uploader's videos not seen yet. First check: the newest `backfill` (0 = all);
-    later checks only look at the newest 30; everything=True goes through the whole list."""
+    later checks only look at the newest 30; everything=True goes through the whole list.
+    Returns how many were queued, or None if the list couldn't be fetched."""
     sub = q("SELECT * FROM subs WHERE id=?", (sub_id,), one=True)
     if not sub:
         return 0
@@ -1658,7 +1660,7 @@ def check_sub(sub_id, everything=False):
     except Exception as e:
         traceback.print_exc()
         q("UPDATE subs SET checked=?, error=? WHERE id=?", (time.time(), str(e)[:300], sub_id))
-        return 0
+        return None
     seen = json.loads(sub["seen"] or "[]")
     seen_set = set(seen)
     new = [e for e in res["entries"] if link_key(e["url"]) not in seen_set]
@@ -1692,10 +1694,10 @@ def sub_loop():
     """Worker: check followed channels that are due (new ones, refresh requests, and every SUB_INTERVAL)."""
     while True:
         try:
-            for r in q("SELECT id, everything FROM subs WHERE checked IS NULL OR checked < ? ORDER BY checked IS NOT NULL, checked",
-                       (time.time() - SUB_INTERVAL,)):
-                check_sub(r["id"], everything=bool(r["everything"]))
-                q("UPDATE subs SET everything=0 WHERE id=?", (r["id"],))
+            for r in q("SELECT id, everything FROM subs WHERE checked IS NULL OR checked < ? OR (error != '' AND checked < ?) "
+                       "ORDER BY checked IS NOT NULL, checked", (time.time() - SUB_INTERVAL, time.time() - SUB_RETRY)):
+                if check_sub(r["id"], everything=bool(r["everything"])) is not None:
+                    q("UPDATE subs SET everything=0 WHERE id=?", (r["id"],))
         except Exception:
             traceback.print_exc()
         time.sleep(30)
@@ -2180,7 +2182,7 @@ def subs_list():
                     "avatar": bool(r["avatar"]), "total": r["total"], "backfill": r["backfill"],
                     "checked": r["checked"], "error": r["error"], "pending": r["checked"] is None or bool(r["everything"]),
                     "done": c.get("done", 0), "active": sum(c.get(k, 0) for k in ("queued", "downloading", "processing", "linked")),
-                    "failed": c.get("failed", 0), "next": (r["checked"] or time.time()) + SUB_INTERVAL,
+                    "failed": c.get("failed", 0), "next": (r["checked"] or time.time()) + (SUB_RETRY if r["error"] else SUB_INTERVAL),
                     **({"owner_label": owner_label(r["owner"])} if g.admin else {})})
     return out
 
