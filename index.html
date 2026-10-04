@@ -172,7 +172,10 @@
   .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
   .stage { position: relative; background: #000; aspect-ratio: 16 / 9; display: grid; place-items: center;
            border: 2px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); }
-  .stage video { width: 100%; height: 100%; background: #000; }
+  /* the frame stays 16:9 (and fits the window); portrait videos are letterboxed inside it instead of making it
+     taller than the screen */
+  .stage { max-height: calc(100vh - 120px); max-height: calc(100dvh - 120px); }
+  .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
   .stage .msg { color: #eee; text-align: center; padding: 20px; }
   .stage.audio img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .55; }
   .stage.audio .note-big { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; color: #555; }
@@ -227,6 +230,102 @@
   .subrow .plat.youtube { background: var(--accent); color: #fff; }
   .subrow .acts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
   .err { white-space: pre-line; color: var(--accent); margin-top: 12px; overflow-wrap: anywhere; }
+  /* 随记: everyday notes */
+  .notes { max-width: 720px; }
+  .compose { padding: 12px; margin-bottom: 24px; }
+  .compose textarea, .note textarea { display: block; width: 100%; min-height: 84px; resize: vertical; border: 2px solid var(--ink);
+         background: var(--bg); color: var(--ink); padding: 8px 10px; outline: none; box-shadow: inset 3px 3px 0 var(--soft);
+         font: inherit; }
+  .compose textarea:focus, .note textarea:focus { box-shadow: inset 3px 3px 0 var(--soft), 0 0 0 2px var(--yellow); }
+  .crow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .crow .grow { flex: 1; color: var(--muted); min-width: 0; }
+  .crow .btn { height: 34px; padding: 0 10px; }
+  .btn.rec { background: var(--accent); color: var(--on-accent); animation: blink 1s steps(2) infinite; }
+  .att { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .att:empty { display: none; }
+  .att .it { position: relative; width: 72px; height: 72px; border: 2px solid var(--ink); background: var(--soft); display: grid;
+             place-items: center; color: var(--muted); overflow: hidden; text-align: center; font-size: 12px; line-height: 1.3; }
+  .att .it img, .att .it video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .att .it button { position: absolute; top: 0; right: 0; width: 22px; height: 22px; border: 0; border-left: 2px solid var(--ink);
+                    border-bottom: 2px solid var(--ink); background: var(--panel); padding: 0; line-height: 1; }
+  .nday { margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
+  .nday b { font-weight: normal; background: var(--ink); color: var(--bg); padding: 0 8px; }
+  .nday::after { content: ""; flex: 1; border-top: 2px dashed var(--faint); }
+  .note { padding: 10px 14px 8px; margin-bottom: 14px; }
+  .note .ntime { color: var(--muted); display: flex; gap: 12px; }
+  .note .ntime span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note .ntext { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
+  .note .ntext a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+  .nimgs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-width: 420px; margin: 8px 0; }
+  .nimgs.one { grid-template-columns: 1fr; max-width: 360px; }
+  .nimgs .ph { position: relative; aspect-ratio: 1; border: 2px solid var(--ink); background: var(--soft); overflow: hidden; cursor: zoom-in; }
+  .nimgs.one .ph { aspect-ratio: auto; }
+  .nimgs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .nimgs.one img { height: auto; max-height: 420px; object-fit: contain; }
+  .nvid { margin: 8px 0; max-width: 480px; border: 2px solid var(--ink); background: #000; position: relative; }
+  .nvid video { width: 100%; max-height: 480px; display: block; }
+  .naud { margin: 8px 0; max-width: 480px; }
+  .naud audio { width: 100%; height: 40px; display: block; }
+  .nsay { color: var(--muted); border-left: 4px solid var(--soft); padding-left: 8px; margin: 4px 0 8px; white-space: pre-wrap;
+          overflow-wrap: anywhere; }
+  .rm { position: absolute; top: 0; right: 0; z-index: 1; border: 0; border-left: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+        background: var(--accent); color: #fff; height: 26px; padding: 0 8px; }
+  .nacts { display: flex; gap: 16px; }
+  input.when { height: 30px; border: 2px solid var(--ink); background: var(--bg); color: var(--ink); padding: 0 6px; font: inherit;
+               outline: none; }
+  input.when:focus { box-shadow: 0 0 0 2px var(--yellow); }
+  .note input.when { margin: 6px 0; }
+  .whenrow { margin-top: 6px; min-height: 30px; display: flex; align-items: center; }
+  .whenrow input.when { max-width: 100%; }
+  .cover .paper { position: absolute; inset: 0; background: var(--panel); padding: 28px 10px 8px; overflow: hidden; white-space: pre-wrap;
+                  overflow-wrap: anywhere; color: var(--ink); background-image: repeating-linear-gradient(transparent 0 20px, var(--soft) 20px 21px); }
+  .badge.note-badge { background: var(--yellow); color: #1d1b26; }
+  .note.flash { animation: blink .4s steps(2) 3; box-shadow: 4px 4px 0 var(--accent); }
+  .hit .at, .hits .at { font-weight: normal; background: var(--ink); color: var(--bg); padding: 0 4px; margin-right: 4px;
+                        font-variant-numeric: tabular-nums; }
+  .hits { border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); padding: 10px 14px; margin-top: 20px;
+          max-height: 320px; overflow-y: auto; }
+  .hits button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 2px dashed var(--soft); background: none;
+                 padding: 6px 0; overflow-wrap: anywhere; }
+  .hits button:hover { background: var(--bg); }
+  .hits .hitrow { padding: 6px 0; border-bottom: 2px dashed var(--soft); overflow-wrap: anywhere; }
+  .nimgs .ph.seen { border-color: var(--accent); box-shadow: 0 0 0 2px var(--yellow); }
+  .wide-sheet { width: min(720px, 100%); max-height: 90vh; overflow-y: auto; }
+  .usec { margin: 16px 0 6px; border-bottom: 2px solid var(--ink); display: flex; justify-content: space-between; align-items: end; }
+  .usec b { font-weight: normal; font-size: 24px; line-height: 1.3; }
+  .utab { display: flex; gap: 8px; flex-wrap: wrap; }
+  .utab button { border: 2px solid var(--ink); background: var(--panel); padding: 0 8px; height: 28px; }
+  .utab button.on { background: var(--ink); color: var(--bg); }
+  .ugrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 8px 0; }
+  .ustat { border: 2px solid var(--ink); background: var(--bg); padding: 6px 10px; }
+  .ustat .v { font-size: 24px; line-height: 1.3; font-variant-numeric: tabular-nums; }
+  .ustat .k { color: var(--muted); }
+  table.ut { width: 100%; border-collapse: collapse; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  table.ut th, table.ut td { text-align: right; padding: 4px 6px; border-bottom: 2px dashed var(--soft); white-space: nowrap; }
+  table.ut th:first-child, table.ut td:first-child { text-align: left; white-space: normal; }
+  table.ut th { color: var(--muted); font-weight: normal; }
+  .ubars { display: flex; align-items: flex-end; gap: 3px; height: 70px; margin: 8px 0 2px; }
+  .ubars div { flex: 1; background: var(--blue); min-height: 2px; position: relative; }
+  .ubars div.direct { background: var(--green); }
+  .ubar-l { display: flex; justify-content: space-between; color: var(--faint); }
+  .uscroll { overflow-x: auto; }
+  .notehits { margin: 0 0 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 4px 10px; cursor: pointer; }
+  /* photo viewer: pinch / wheel / double-tap to zoom, drag to pan, swipe for the next photo, swipe down to close */
+  #lightbox { position: fixed; inset: 0; z-index: 35; background: rgba(29,27,38,.96); overflow: hidden; touch-action: none;
+              -webkit-user-select: none; user-select: none; }
+  #lightbox img { position: absolute; left: 50%; top: 50%; max-width: 100vw; max-height: 100vh; max-height: 100dvh;
+                  transform: translate(-50%, -50%); transform-origin: center; will-change: transform; -webkit-user-drag: none; }
+  #lightbox img.anim { transition: transform .18s ease-out; }
+  #lightbox .lbtn { position: absolute; z-index: 1; height: 36px; min-width: 36px; padding: 0 10px; border: 2px solid var(--ink);
+                    background: var(--panel); color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+  #lightbox .lbtn:active { transform: translate(3px, 3px); box-shadow: none; }
+  #lbClose { top: max(12px, env(safe-area-inset-top)); right: 12px; }
+  #lbPrev, #lbNext { top: 50%; margin-top: -18px; }
+  #lbPrev { left: 12px; } #lbNext { right: 12px; }
+  #lbCount { position: absolute; z-index: 1; left: 12px; top: max(12px, env(safe-area-inset-top)); background: var(--ink);
+             color: var(--bg); padding: 0 8px; }
+  @media (hover: none) { #lbPrev, #lbNext { display: none; } }
+  #lightbox:not([hidden]) { animation: fadeIn .15s steps(3); }
 
   @media (max-width: 640px) {
     header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
@@ -245,7 +344,7 @@
     .sheet { width: 100%; border-width: 2px 0 0; box-shadow: none; padding: 18px 14px max(18px, env(safe-area-inset-bottom));
              max-height: 92vh; overflow-y: auto; }
     /* 16px+ stops iOS Safari zooming into fields; 24px keeps the pixel font on its grid */
-    .sheet input[type=text], .sheet input[type=password], .search input { font-size: 16px; }
+    .sheet input[type=text], .sheet input[type=password], .search input, .compose textarea, .note textarea, input.when { font-size: 16px; }
     .sheet input[type=text], .sheet input[type=password] { height: 46px; }
     .btn.wide { height: 46px; }
     .eye { top: 8px; }
@@ -296,10 +395,28 @@
 
 <div class="chips" id="chips"></div>
 <main>
-  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div class="grid" id="grid"></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
   <div class="subs" id="subs" hidden></div>
+  <div class="notes" id="notes" hidden>
+    <div class="px compose">
+      <textarea id="noteText" placeholder="随手记点什么… 文字、照片、视频、语音都行" rows="3"></textarea>
+      <div class="att" id="noteAtt"></div>
+      <div class="whenrow"><button class="link" id="whenBtn" onclick="pickWhen()">时间：现在（点这里改）</button>
+        <input type="datetime-local" class="when" id="noteWhen" hidden onchange="whenChanged()"></div>
+      <div class="crow">
+        <button class="btn plain" onclick="pickNoteFiles('image/*,video/*')">照片/视频</button>
+        <button class="btn plain" id="recBtn" onclick="toggleRec()">语音</button>
+        <span class="grow" id="upState"></span>
+        <button class="btn" id="noteGo" onclick="saveNote()">记下</button>
+      </div>
+      <input type="file" id="noteFile" multiple hidden>
+    </div>
+    <div id="noteList"></div>
+    <button class="btn plain" id="noteMore" hidden onclick="loadNotes(true)">更早的</button>
+  </div>
   <div class="empty" id="empty">正在加载…</div>
 </main>
 
@@ -368,6 +485,10 @@
 </div>
 
 <!-- account -->
+<div class="sheet-bg" id="usageSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet wide-sheet" id="usageBody"></div>
+</div>
+
 <div class="sheet-bg" id="accountSheet" hidden onclick="if (event.target === this) hide(this)">
   <div class="sheet" id="accountBody"></div>
 </div>
@@ -379,6 +500,13 @@
 </div>
 
 <div id="toast" hidden></div>
+<div id="lightbox" hidden>
+  <img alt="" draggable="false">
+  <span id="lbCount"></span>
+  <button class="lbtn" id="lbClose" onclick="closeViewer()">✕</button>
+  <button class="lbtn" id="lbPrev" onclick="viewerGo(-1)">‹</button>
+  <button class="lbtn" id="lbNext" onclick="viewerGo(1)">›</button>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -410,11 +538,12 @@ function hide(el, after) {
 }
 function toast(t) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 3000); }
 // Escape, then highlight the search term
-function hl(s) {
+function hl(s, marks) {
   const e = esc(s);
-  if (!query) return e;
-  const q = esc(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return e.replace(new RegExp(q, "gi"), m => `<mark>${m}</mark>`);
+  const terms = (marks && marks.length ? marks : query ? [query] : []).filter(Boolean);
+  if (!terms.length) return e;
+  const re = terms.map(t => esc(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length).join("|");
+  return e.replace(new RegExp(re, "gi"), m => `<mark>${m}</mark>`);
 }
 function dur(sec) {
   if (!sec) return "";
@@ -449,7 +578,7 @@ function renderChips() {
   state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
   const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
   const failed = state.jobs.filter(j => j.status === "failed").length;
-  const list = [["all", "全部"]];
+  const list = [["all", "全部"], ["notes", `随记${state.notes ? " " + state.notes : ""}`]];
   if (deviceFilter) list.push(["device", `设备：${deviceFilter} ✕`]);
   list.push(["subs", `追更${(state.subs || []).length ? " " + state.subs.length : ""}`]);
   const sf = chip.startsWith("sub:") && (state.subs || []).find(s => "sub:" + s.id === chip);
@@ -467,8 +596,9 @@ function setChip(k) {
   if (k === "device" && chip === "device") { deviceFilter = null; k = "all"; }  // click the device chip again to clear it
   if (k === "all") deviceFilter = null;
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
-  const refetch = k.startsWith("sub:") || chip.startsWith("sub:");
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes";
   chip = k; render();
+  $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : "搜索标题、简介、标签、字幕…";
   if (refetch) { lastBody = ""; refresh(); }
 }
 
@@ -480,27 +610,62 @@ function card(j) {
   else if (j.status === "failed") over = j.retry_at ? `<span class="badge left">等待自动重试</span>` : `<span class="badge left bad">失败</span>`;
   else if (j.status === "cancelled") over = `<span class="badge left bad">已取消</span>`;
   else if (j.missing) over = `<span class="badge left bad">文件已删除</span>`;
-  const cover = j.thumb ? `<img src="/thumb/${j.id}" alt="" loading="lazy">` : `<div class="ph">${m && m.audio ? "♪" : "▶"}</div>`;
+  // a search that found it by how a moment looks shows that moment as the cover
+  const cover = j.frame ? `<img src="/frame/${j.id}/${j.frame.part}?t=${j.frame.t}" alt="" loading="lazy">`
+    : j.thumb ? `<img src="/thumb/${j.id}" alt="" loading="lazy">` : `<div class="ph">${m && m.audio ? "♪" : "▶"}</div>`;
   const badge = m && m.duration ? `<span class="badge">${dur(m.duration)}</span>` : "";
   const parts = (j.media || []).length > 1 ? `<span class="badge left">${j.media.length} 个视频</span>` : "";
   const meta = [category(j) ? catName(category(j)) : null, ago(j.created), subOf(j) ? "追更 · " + subOf(j).name : phone(j),
                 j.owner_label ? "@" + j.owner_label : null].filter(Boolean).map(esc).join(" · ");
-  const hit = j.match ? `<div class="hit">字幕：${hl(j.match)}</div>`
-    : (query && (a.summary || "").toLowerCase().includes(query.toLowerCase()) ? `<div class="hit">${hl(a.summary)}</div>` : "");
+  // where the search found it: in the subtitles at 12:34, written on the cover, a moment that looks like it...
+  const h0 = (j.hits || []).find(h => h.src === j.match_where && h.text === j.match);
+  const hit = h0 ? `<div class="hit">${hitLabel(h0)}${j.hits.length > 1 ? ` 等 ${j.hits.length} 处` : ""}：${hl(h0.text)}</div>`
+    : j.match ? `<div class="hit">${esc(j.match_where || "字幕")}：${hl(j.match)}</div>` : "";
   const picking = selecting ? `<span class="pick">${selected.has(j.id) ? "✓" : ""}</span>` : "";
   if (j.hidden) over += `<span class="badge left hid">已隐藏</span>`;
-  return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id})`}">
+  return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
     ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
     <div class="info"><div class="title">${hl(titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
   </div>`;
 }
 
+// a 随记 among the videos (search results in 全部): its photo / video frame, or the text on paper
+// where a search found a note when it isn't in the text: what's said, text on a photo, or how a photo looks
+function noteWhere(n) {
+  return n.match_where === "照片" ? `照片看起来像「${esc(query)}」` : `${esc(n.match_where || "语音")}：${hl(n.match, n.marks)}`;
+}
+function noteGridCard(n) {
+  const first = (n.seen || [])[0];
+  const i = first != null ? first : n.media.findIndex(m => m.kind === "image" || (m.kind === "video" && m.poster));
+  const cover = i < 0 ? `<div class="paper">${noteHtml(n.text || n.match || "", n.marks)}</div>`
+    : `<img src="/notefile/${n.id}/${i}${n.media[i].kind === "video" ? "/poster" : ""}" alt="" loading="lazy">`;
+  const more = n.media.length > 1 ? `<span class="badge">${n.media.length} 个附件</span>` : "";
+  const title = (n.text || n.match || (n.media.some(m => m.kind === "audio") ? "语音" : "照片")).split("\n")[0];
+  return `<div class="card" onclick="openNote(${n.id})">
+    <div class="cover">${cover}<span class="badge left note-badge">随记</span>${more}</div>
+    <div class="info"><div class="title">${hl(title, n.marks)}</div>
+      <div class="meta">随记 · ${esc(dayLabel(n.created).split(" · ")[0])} ${hhmm(n.created)}</div>
+      ${n.match && n.text ? `<div class="hit">${noteWhere(n)}</div>` : ""}</div>
+  </div>`;
+}
+// open a 随记 from the search results: the 随记 list with the same search, scrolled to it
+let focusNote = null;
+function openNote(id) { focusNote = id; setChip("notes"); window.scrollTo(0, 0); }
+
 function render() {
   renderChips();
+  const notes = chip === "notes", list = chip === "subs" || notes;
   $("#subs").hidden = chip !== "subs";
-  $("#grid").hidden = chip === "subs";
+  $("#notes").hidden = !notes;
+  $("#grid").hidden = list;
+  $("#manageBtn").hidden = notes;
   if (chip === "subs") renderSubs();
-  const jobs = chip === "subs" ? [] : state.jobs.filter(j =>
+  if (notes) renderNotes();
+  // searching from 全部 mixes matching 随记 in with the videos, newest first; other chips just point to them
+  const hits = state.note_hits || [], mixNotes = chip === "all" && !!query;
+  $("#noteHits").hidden = notes || mixNotes || !query || !hits.length;
+  $("#noteHits").textContent = `随记里也有 ${hits.length} 条匹配 →`;
+  const jobs = list ? [] : state.jobs.filter(j =>
     // 首页 skips 追更 videos still waiting in line (hundreds after a backfill); they're under 下载中 and the UP chip
     chip === "all" ? !(j.status === "queued" && (j.source || "").startsWith("sub:")) :
     chip.startsWith("sub:") ? j.source === chip :
@@ -509,7 +674,10 @@ function render() {
     chip === "device" ? phone(j) === deviceFilter : category(j) === chip);
   shown = jobs;
   // Patch only the cards that changed, so covers don't reload and the page doesn't flash
-  const grid = $("#grid"), htmls = jobs.map(card), ids = jobs.map(j => j.id).join(",");
+  const items = mixNotes ? [...jobs.map(j => ({j, t: j.created})), ...hits.map(n => ({n, t: n.created}))].sort((a, b) => b.t - a.t)
+                         : jobs.map(j => ({j}));
+  const grid = $("#grid"), htmls = items.map(x => x.j ? card(x.j) : noteGridCard(x.n)),
+        ids = items.map(x => x.j ? x.j.id : "n" + x.n.id).join(",");
   if (grid.dataset.ids !== ids) {
     grid.innerHTML = htmls.join("");
     [...grid.children].forEach((el, i) => { el.classList.add("enter"); el.style.setProperty("--i", Math.min(i, 12)); });
@@ -519,11 +687,12 @@ function render() {
   }
   cardHtml = htmls;
   updateSelbar();
-  $("#more").hidden = !state.more || chip === "subs" || !!query;
-  $("#empty").hidden = jobs.length > 0 || chip === "subs";
+  $("#more").hidden = !state.more || list || !!query;
+  $("#empty").hidden = items.length > 0 || list;
   $("#empty").textContent = query ? "没有找到匹配的内容" : chip.startsWith("sub:") ? "还没有这个 UP 主的视频，列表获取后会自动开始下载"
     : "还没有内容，点右上角「＋ 添加」，或者直接把链接拖进来";
-  $("#scope").textContent = state.admin ? "所有人的内容（管理员）"
+  $("#scope").textContent = notes ? (state.user ? `${state.user} 的随记 · 只有你自己看得到` : "这台设备的随记 · 只有你自己看得到，登录后各设备合并")
+    : state.admin ? "所有人的内容（管理员）"
     : state.user ? `${state.user} 的内容（登录过这个账号的所有设备）`
     : "只显示这台设备添加的内容 · 登录后，同一账号在不同设备上的内容会合并";
   $("#privState").innerHTML = privacyToken && (state.privacy || {}).revealed
@@ -540,6 +709,7 @@ async function refresh() {
     if (query) params.set("q", query);
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
     if (pageLimit > 100) params.set("limit", pageLimit);
+    if (chip === "notes") loadNotes();
     const body = await (await fetch("/api/jobs" + (params.size ? "?" + params : ""))).text();
     if (body !== lastBody) {  // nothing changed: leave the page alone
       lastBody = body;
@@ -560,7 +730,8 @@ let pollTimer;
 function schedule() {
   clearTimeout(pollTimer);
   if (document.hidden) return;
-  const busy = state.jobs.some(j => ACTIVE.includes(j.status)) || (state.subs || []).some(s => s.pending);
+  const busy = state.jobs.some(j => ACTIVE.includes(j.status)) || (state.subs || []).some(s => s.pending)
+    || (chip === "notes" && notesState.notes.some(n => n.pending));
   pollTimer = setTimeout(refresh, busy ? 5000 : 60000);
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
@@ -628,8 +799,346 @@ async function subAct(id, action) {
   lastBody = ""; refresh();
 }
 
+/* ---------- 随记: everyday notes ---------- */
+let notesState = {notes: [], more: false, q: null}, notesBody = "", editingNote = null, noteFiles = [];
+const WEEK = "日一二三四五六";
+function dayLabel(t) {
+  const d = new Date(t * 1000), today = new Date(); today.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - new Date(d).setHours(0, 0, 0, 0)) / 86400000);
+  const base = `${d.getFullYear() !== today.getFullYear() ? d.getFullYear() + "年" : ""}${d.getMonth() + 1}月${d.getDate()}日 周${WEEK[d.getDay()]}`;
+  return diff === 0 ? "今天 · " + base : diff === 1 ? "昨天 · " + base : base;
+}
+function hhmm(t) { const d = new Date(t * 1000); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+// escape + highlight, then make links clickable
+function noteHtml(s, marks) { return hl(s, marks).replace(/https?:\/\/[^\s<>"']+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`); }
+
+async function loadNotes(older) {
+  const p = new URLSearchParams();
+  if (query) p.set("q", query);
+  const last = notesState.notes[notesState.notes.length - 1];
+  if (older && last) { p.set("before", last.created); p.set("before_id", last.id); }
+  try {
+    const body = await (await fetch("/api/notes" + (p.size ? "?" + p : ""))).text();
+    if (older) {
+      const r = JSON.parse(body);
+      notesState = {...notesState, notes: [...notesState.notes, ...r.notes], more: r.more};
+    } else {
+      // polling only refreshes the newest page; keep what 更早的 loaded below it
+      if (body === notesBody && notesState.q === query) return;
+      notesBody = body;
+      const r = JSON.parse(body), ids = new Set(r.notes.map(n => n.id));
+      const keepOlder = notesState.q === query && notesState.notes.length > r.notes.length && r.more;
+      const edge = r.notes[r.notes.length - 1];
+      const older = keepOlder ? notesState.notes.filter(n => !ids.has(n.id) && (n.created < edge.created || (n.created === edge.created && n.id < edge.id))) : [];
+      notesState = {notes: [...r.notes, ...older], more: keepOlder ? notesState.more : r.more, q: query};
+    }
+    if (chip === "notes") { renderNotes(); schedule(); }
+  } catch (e) { toast("连不上 Pi"); }
+}
+
+function noteMedia(n) {
+  const imgs = n.media.map((m, i) => [m, i]).filter(([m]) => m.kind === "image");
+  const editing = editingNote === n.id;
+  const rm = i => editing ? `<button class="rm" onclick="event.stopPropagation(); dropNoteMedia(${n.id}, ${i})">删</button>` : "";
+  let h = imgs.length ? `<div class="nimgs${imgs.length === 1 ? " one" : ""}">${imgs.map(([m, i]) =>
+    `<div class="ph${(n.seen || []).includes(i) ? " seen" : ""}" onclick="viewImage(${n.id}, ${i})">${rm(i)}<img src="/notefile/${n.id}/${i}" alt="" loading="lazy"></div>`).join("")}</div>` : "";
+  n.media.forEach((m, i) => {
+    const say = m.transcript ? `<div class="nsay">${hl(m.transcript, n.marks)}</div>`
+      : n.pending ? `<div class="nsay">正在转文字…</div>` : "";
+    if (m.kind === "video")
+      h += `<div class="nvid">${rm(i)}<video controls playsinline preload="metadata" src="/notefile/${n.id}/${i}"${m.poster ? ` poster="/notefile/${n.id}/${i}/poster"` : ""}></video></div>${say}`;
+    else if (m.kind === "audio")
+      h += `<div class="naud" style="position:relative">${rm(i)}<audio controls preload="metadata" src="/notefile/${n.id}/${i}"></audio></div>${say}`;
+  });
+  return h;
+}
+function noteCard(n) {
+  const editing = editingNote === n.id;
+  const text = editing ? `<input type="datetime-local" class="when" id="when${n.id}" value="${localInput(n.created)}"><textarea id="edit${n.id}">${esc(n.text)}</textarea>`
+    : n.text ? `<div class="ntext">${noteHtml(n.text, n.marks)}</div>` : "";
+  const acts = editing
+    ? `<button class="link" onclick="saveEdit(${n.id})">保存</button><button class="link" onclick="editNote(null)">取消</button>
+       <button class="link" onclick="pickNoteFiles('image/*,video/*,audio/*', ${n.id})">＋ 加照片/视频/语音</button>`
+    : `<button class="link" onclick="editNote(${n.id})">编辑</button>
+       <button class="link" style="color:var(--accent)" onclick="deleteNote(${n.id})">删除</button>`;
+  return `<div class="px note" id="note${n.id}">
+    <div class="ntime"><span>${hhmm(n.created)}${n.device ? " · " + esc(n.device.replace(/^📱\s*/, "")) : ""}</span></div>
+    ${text}${n.match ? `<div class="nsay">${noteWhere(n)}</div>` : ""}${noteMedia(n)}
+    <div class="nacts">${acts}</div>
+  </div>`;
+}
+function renderNotes() {
+  if (editingNote) return;  // don't wipe what you're typing
+  let html = "", day = "";
+  for (const n of notesState.notes) {
+    const d = dayLabel(n.created);
+    if (d !== day) { html += `<div class="nday"><b>${esc(d)}</b></div>`; day = d; }
+    html += noteCard(n);
+  }
+  if (!notesState.notes.length) html = `<div class="empty" style="padding:40px 0">${query ? "随记里没有找到匹配的内容" : notesState.q === null ? "正在加载…" : "还没有随记。写点什么，或者拍张照片"}</div>`;
+  const el = $("#noteList");
+  // leave the list alone while it's the same, or a playing video would restart
+  if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+  const f = focusNote && document.getElementById("note" + focusNote);
+  if (f) { focusNote = null; f.scrollIntoView({block: "center"}); f.classList.add("flash"); }
+  $("#noteMore").hidden = !notesState.more;
+}
+// note dates: <input type="datetime-local"> works in local time, "YYYY-MM-DDTHH:MM"
+function localInput(t) {
+  const d = new Date(t * 1000), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function pickWhen() {
+  const w = $("#noteWhen");
+  if (!w.value) w.value = localInput(Date.now() / 1000);
+  w.hidden = false; $("#whenBtn").hidden = true; w.focus(); try { w.showPicker(); } catch (e) {}
+}
+function whenChanged() {
+  const w = $("#noteWhen");
+  if (!w.value) { w.hidden = true; $("#whenBtn").hidden = false; }  // cleared: back to "now"
+}
+/* photo viewer */
+const lb = {list: [], at: 0, s: 1, x: 0, y: 0, pts: new Map(), start: null, lastTap: 0, moved: false};
+function viewImage(nid, i) {
+  const n = notesState.notes.find(x => x.id === nid);
+  lb.list = n.media.map((m, k) => m.kind === "image" ? `/notefile/${nid}/${k}` : null).filter(Boolean);
+  lb.at = Math.max(0, lb.list.indexOf(`/notefile/${nid}/${i}`));
+  $("#lightbox").hidden = false; document.body.style.overflow = "hidden";
+  showViewer();
+}
+function showViewer() {
+  const img = $("#lightbox img");
+  img.src = lb.list[lb.at]; lb.s = 1; lb.x = lb.y = 0; applyViewer(false);
+  $("#lbCount").textContent = lb.list.length > 1 ? `${lb.at + 1} / ${lb.list.length}` : "";
+  $("#lbCount").hidden = lb.list.length < 2;
+  $("#lbPrev").hidden = lb.at === 0; $("#lbNext").hidden = lb.at >= lb.list.length - 1;
+}
+function closeViewer() { hide($("#lightbox"), () => { $("#lightbox img").src = ""; }); document.body.style.overflow = ""; }
+function viewerGo(d) { if (lb.list[lb.at + d]) { lb.at += d; showViewer(); } }
+// keep the zoomed photo covering the screen: it can't be dragged past its edges
+function clampViewer() {
+  const img = $("#lightbox img"), w = img.offsetWidth * lb.s, h = img.offsetHeight * lb.s;
+  const mx = Math.max(0, (w - innerWidth) / 2), my = Math.max(0, (h - innerHeight) / 2);
+  lb.x = Math.min(mx, Math.max(-mx, lb.x)); lb.y = Math.min(my, Math.max(-my, lb.y));
+}
+function applyViewer(anim, dy = 0) {
+  const img = $("#lightbox img");
+  img.classList.toggle("anim", !!anim);
+  img.style.transform = `translate(-50%, -50%) translate(${lb.x}px, ${lb.y + dy}px) scale(${lb.s})`;
+  $("#lightbox").style.background = dy ? `rgba(29,27,38,${Math.max(.3, .96 - Math.abs(dy) / 400)})` : "";
+}
+// zoom to scale s keeping the screen point (px, py) still
+function zoomAt(s, px, py, anim) {
+  s = Math.min(6, Math.max(1, s));
+  const cx = px - innerWidth / 2, cy = py - innerHeight / 2;
+  lb.x = cx - (cx - lb.x) * s / lb.s; lb.y = cy - (cy - lb.y) * s / lb.s; lb.s = s;
+  if (s === 1) lb.x = lb.y = 0;
+  clampViewer(); applyViewer(anim);
+}
+(() => {
+  const box = $("#lightbox");
+  const pair = () => { const [a, b] = [...lb.pts.values()]; return {d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2}; };
+  box.addEventListener("pointerdown", e => {
+    if (e.target.closest(".lbtn")) return;
+    box.setPointerCapture(e.pointerId);
+    lb.pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    lb.moved = false;
+    lb.start = lb.pts.size === 2 ? {...pair(), s: lb.s} : {x: e.clientX, y: e.clientY, ox: lb.x, oy: lb.y};
+  });
+  box.addEventListener("pointermove", e => {
+    if (!lb.pts.has(e.pointerId) || !lb.start) return;
+    lb.pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (lb.pts.size === 2) {  // pinch: scale around the fingers' midpoint, and follow it as it moves
+      const p = pair();
+      zoomAt(lb.start.s * p.d / lb.start.d, p.x, p.y);
+      lb.moved = true; return;
+    }
+    const dx = e.clientX - lb.start.x, dy = e.clientY - lb.start.y;
+    if (Math.hypot(dx, dy) > 6) lb.moved = true;
+    if (lb.s > 1) { lb.x = lb.start.ox + dx; lb.y = lb.start.oy + dy; clampViewer(); applyViewer(false); }
+    else if (Math.abs(dy) > Math.abs(dx)) applyViewer(false, dy);  // swipe down to close
+    else { lb.x = dx; applyViewer(false); }  // swipe sideways for the next photo
+  });
+  const up = e => {
+    if (!lb.pts.has(e.pointerId)) return;
+    lb.pts.delete(e.pointerId);
+    if (lb.pts.size === 1) {  // one finger left after a pinch: carry on panning from here
+      const [p] = lb.pts.values(); lb.start = {x: p.x, y: p.y, ox: lb.x, oy: lb.y}; return;
+    }
+    if (lb.pts.size) return;
+    const dx = e.clientX - lb.start.x, dy = e.clientY - lb.start.y;
+    lb.start = null;
+    if (!lb.moved) {  // a tap: double tap zooms in / out, a single tap on the dark area closes
+      const now = Date.now();
+      if (now - lb.lastTap < 300) { lb.lastTap = 0; clearTimeout(lb.tapTimer); zoomAt(lb.s > 1 ? 1 : 2.5, e.clientX, e.clientY, true); return; }
+      lb.lastTap = now;
+      if (e.target === box && lb.s === 1) lb.tapTimer = setTimeout(closeViewer, 300);
+      return;
+    }
+    if (lb.s > 1) return;
+    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 100) { closeViewer(); return; }
+    if (Math.abs(dx) > 60 && lb.list[lb.at + (dx < 0 ? 1 : -1)]) { viewerGo(dx < 0 ? 1 : -1); return; }
+    lb.x = lb.y = 0; applyViewer(true);
+  };
+  box.addEventListener("pointerup", up);
+  box.addEventListener("pointercancel", up);
+  box.addEventListener("wheel", e => { e.preventDefault(); zoomAt(lb.s * Math.exp(-e.deltaY / 300), e.clientX, e.clientY); }, {passive: false});
+  // Safari's own pinch gesture events would zoom the whole page instead
+  ["gesturestart", "gesturechange"].forEach(t => box.addEventListener(t, e => e.preventDefault()));
+  document.addEventListener("keydown", e => {
+    if (box.hidden) return;
+    if (e.key === "Escape") closeViewer();
+    else if (e.key === "ArrowLeft") viewerGo(-1);
+    else if (e.key === "ArrowRight") viewerGo(1);
+  });
+})();
+
+// composing
+try { $("#noteText").value = localStorage.getItem("noteDraft") || ""; } catch (e) {}
+$("#noteText").oninput = () => { try { localStorage.setItem("noteDraft", $("#noteText").value); } catch (e) {} };
+$("#noteText").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(); };
+// picked files go into the note being written, or straight onto an existing note being edited
+let pickFor = null;
+function pickNoteFiles(accept, noteId = null) { pickFor = noteId; const f = $("#noteFile"); f.accept = accept; f.click(); }
+$("#noteFile").onchange = () => {
+  const files = [...$("#noteFile").files]; $("#noteFile").value = "";
+  if (pickFor) uploadToNote(pickFor, files); else addNoteFiles(files);
+};
+async function uploadToNote(id, files) {
+  const f = new FormData();
+  for (const file of files) if (kindOf(file)) f.append("media", kindOf(file) === "image" ? await shrink(file) : file, file.name);
+  if (!f.has("media")) { toast("只能加照片、视频或音频"); return; }
+  const text = $("#edit" + id) ? $("#edit" + id).value : null;
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/api/notes/${id}/media`);
+  xhr.upload.onprogress = e => { if (e.lengthComputable) toast(`上传中 ${Math.floor(e.loaded / e.total * 100)}%`); };
+  xhr.onload = xhr.onerror = async () => {
+    if (xhr.status !== 200) { toast(xhr.status === 413 ? "文件太大了" : "没加上，再试一次"); return; }
+    toast("加上了");
+    if (text !== null && text !== (notesState.notes.find(n => n.id === id) || {}).text) await noteApi(id, {text});  // keep what was typed
+    editingNote = null; notesBody = ""; lastBody = ""; refresh();
+  };
+  xhr.send(f);
+}
+function kindOf(f) {
+  return /^image\//.test(f.type) || /\.(jpe?g|png|gif|webp|heic)$/i.test(f.name) ? "image"
+    : /^video\//.test(f.type) || /\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name) ? "video"
+    : /^audio\//.test(f.type) || /\.(m4a|mp3|aac|wav|ogg|opus|webm|flac)$/i.test(f.name) ? "audio" : null;
+}
+function addNoteFiles(files) {
+  let skipped = 0;
+  for (const f of files) {
+    const kind = kindOf(f);
+    if (!kind) { skipped++; continue; }
+    noteFiles.push({file: f, kind, url: URL.createObjectURL(f)});
+  }
+  if (skipped) toast(`${skipped} 个文件不是照片、视频或音频，没加`);
+  renderAtt();
+}
+function renderAtt() {
+  $("#noteAtt").innerHTML = noteFiles.map((a, i) => `<div class="it">${
+    a.kind === "image" ? `<img src="${a.url}" alt="">` : a.kind === "video" ? `<video src="${a.url}#t=0.5" muted playsinline preload="metadata"></video>`
+    : `语音<br>${a.secs ? dur(a.secs) : ""}`}<button onclick="unattach(${i})">✕</button></div>`).join("");
+}
+function unattach(i) { URL.revokeObjectURL(noteFiles[i].url); noteFiles.splice(i, 1); renderAtt(); }
+
+// Photos are made smaller before upload (and HEIC becomes JPEG); videos and audio go up as they are
+async function shrink(file) {
+  if (/gif/.test(file.type) || (file.size < 3e6 && /jpeg|png|webp/.test(file.type))) return file;
+  try {
+    const bmp = await createImageBitmap(file), k = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.88));
+    return blob ? new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", {type: "image/jpeg"}) : file;
+  } catch (e) { return file; }
+}
+let saving = false;
+async function saveNote() {
+  if (saving) return;
+  if (recorder) { toast("先停止录音"); return; }
+  const text = $("#noteText").value.trim();
+  if (!text && !noteFiles.length) { $("#noteText").focus(); return; }
+  saving = true; $("#noteGo").disabled = true;
+  const f = new FormData(); f.append("text", text);
+  if ($("#noteWhen").value) f.append("created", new Date($("#noteWhen").value).getTime() / 1000);
+  for (const a of noteFiles) f.append("media", a.kind === "image" ? await shrink(a.file) : a.file, a.file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/notes");
+  if (privacyToken) xhr.setRequestHeader("X-Privacy-Token", privacyToken);
+  xhr.upload.onprogress = e => { if (e.lengthComputable && noteFiles.length) $("#upState").textContent = `上传中 ${Math.floor(e.loaded / e.total * 100)}%`; };
+  xhr.onload = xhr.onerror = () => {
+    saving = false; $("#noteGo").disabled = false; $("#upState").textContent = "";
+    if (xhr.status !== 200) { toast(xhr.status === 413 ? "文件太大了" : "没记上，再试一次"); return; }
+    $("#noteText").value = ""; try { localStorage.removeItem("noteDraft"); } catch (e) {}
+    $("#noteWhen").value = ""; whenChanged();
+    noteFiles.forEach(a => URL.revokeObjectURL(a.url)); noteFiles = []; renderAtt();
+    toast("记下了"); notesBody = ""; lastBody = ""; refresh();
+  };
+  xhr.send(f);
+}
+
+// voice: browsers only allow the microphone on https (or localhost); otherwise pick a recorded audio file
+let recorder = null, recStart = 0, recTimer = null;
+async function toggleRec() {
+  if (recorder) { recorder.stop(); return; }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    toast("这个地址不是 https，浏览器不让网页录音；可以选一个录好的音频，或者用键盘上的语音输入");
+    pickNoteFiles("audio/*"); return;
+  }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); } catch (e) { toast("没有麦克风权限"); return; }
+  const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  const chunks = [];
+  recorder = new MediaRecorder(stream, type ? {mimeType: type} : {});
+  recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop()); clearInterval(recTimer);
+    const secs = (Date.now() - recStart) / 1000, mime = recorder.mimeType || type || "audio/webm";
+    recorder = null; $("#recBtn").classList.remove("rec"); $("#recBtn").textContent = "语音";
+    const blob = new Blob(chunks, {type: mime.split(";")[0]});
+    const file = new File([blob], `语音.${/mp4/.test(mime) ? "m4a" : "webm"}`, {type: blob.type});
+    noteFiles.push({file, kind: "audio", url: URL.createObjectURL(file), secs}); renderAtt();
+  };
+  recorder.start(); recStart = Date.now();
+  $("#recBtn").classList.add("rec");
+  const tick = () => $("#recBtn").textContent = "■ 停止 " + dur(Math.max(1, (Date.now() - recStart) / 1000));
+  tick(); recTimer = setInterval(tick, 500);
+}
+
+// editing / deleting
+function editNote(id) {
+  editingNote = null; $("#noteList").dataset.html = ""; renderNotes();
+  if (id) {
+    editingNote = id;
+    const n = notesState.notes.find(x => x.id === id);
+    const el = [...$("#noteList").querySelectorAll(".note")][notesState.notes.indexOf(n)];
+    el.outerHTML = noteCard(n);
+    const ta = $("#edit" + id); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+}
+async function noteApi(id, body) {
+  const r = await fetch(`/api/notes/${id}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) toast("没改成，再试一次");
+  return r.ok;
+}
+async function saveEdit(id) {
+  const when = $("#when" + id).value;
+  if (await noteApi(id, {text: $("#edit" + id).value, ...(when ? {created: new Date(when).getTime() / 1000} : {})})) { editingNote = null; notesBody = ""; lastBody = ""; refresh(); }
+}
+async function dropNoteMedia(id, i) {
+  if (!confirm("删掉这个附件？删了就找不回来了。")) return;
+  const text = $("#edit" + id) ? $("#edit" + id).value : undefined;
+  if (await noteApi(id, {drop: [i], ...(text !== undefined ? {text} : {})})) { editingNote = null; notesBody = ""; lastBody = ""; refresh(); }
+}
+async function deleteNote(id) {
+  if (!confirm("删掉这条随记？照片、视频、语音会一起删掉，找不回来。")) return;
+  const r = await fetch(`/api/notes/${id}/delete`, {method: "POST"});
+  toast(r.ok ? "删掉了" : "没删成"); notesBody = ""; lastBody = ""; refresh();
+}
+
 /* ---------- watch page ---------- */
-function openWatch(id, part = 0) {
+function openWatch(id, part = 0, t = 0) {
   const j = state.jobs.find(x => x.id === id); if (!j) return;
   stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
   watching = {id, part};
@@ -639,8 +1148,8 @@ function openWatch(id, part = 0) {
     // Audio: cover (or a note) fills the frame, controls sit along its bottom edge like a video player
     stage = m.audio
       ? `<div class="stage audio">${j.thumb ? `<img src="/thumb/${id}" alt="">` : `<div class="note-big">♪</div>`}
-           <audio controls autoplay src="${m.src}"></audio></div>`
-      : `<div class="stage" id="stage">${videoTag(j, m)}</div>`;
+           <audio controls autoplay src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio></div>`
+      : `<div class="stage" id="stage">${videoTag(j, m, t)}</div>`;
     if (!m.audio && ["vp9", "av1"].includes(m.vcodec) && /iPhone|iPad/.test(navigator.userAgent))
       stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用电脑或 Plex 看。</div>`;
   } else {
@@ -678,11 +1187,32 @@ function openWatch(id, part = 0) {
       ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
     </div>
     ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
+    ${hitList(j)}
     ${desc}`;
   $("#watch").hidden = false;
   document.body.style.overflow = "hidden";
   updateWatchStatus();
   if (m) setupMediaSession(j);
+}
+
+// a search found the words in the subtitles: every place they're said, click to jump there
+function hitLabel(h, multi) {
+  const at = h.t == null ? "" : ` <b class="at">${multi ? `P${h.part + 1} ` : ""}${dur(h.t) || "0:00"}</b>`;
+  return `${esc(h.src || "字幕")}${at}`;
+}
+function hitList(j) {
+  const hits = j.hits || [];
+  if (!hits.length || !query) return "";
+  const multi = (j.media || []).length > 1, timed = hits.filter(h => h.t != null).length;
+  return `<div class="hits"><div class="psec">「${esc(query)}」出现在 ${hits.length}${hits.length >= 30 ? "+" : ""} 处${timed ? "，点一下跳到那里" : ""}</div>
+    ${hits.map(h => h.t == null ? `<div class="hitrow">${hitLabel(h)}：${hl(h.text)}</div>`
+      : `<button onclick="seekTo(${j.id}, ${h.part}, ${h.t})">${hitLabel(h, multi)}：${hl(h.text)}</button>`).join("")}</div>`;
+}
+function seekTo(id, part, t) {
+  const v = $("#watchBody video, #watchBody audio");
+  if (!v || !watching || watching.part !== part) { openWatch(id, part, t); return; }
+  v.currentTime = t; v.play().catch(() => {});
+  $("#watch").scrollTo({top: 0, behavior: "smooth"});
 }
 
 /* ---------- player ----------
@@ -916,20 +1446,91 @@ $("#addForm").onsubmit = e => { e.preventDefault(); const t = $("#addText").valu
 $("#file").onchange = () => { for (const f of $("#file").files) sendFile(f); $("#file").value = ""; };
 
 let dragDepth = 0;
-document.addEventListener("dragenter", e => { e.preventDefault(); dragDepth++; $("#dropAll").hidden = false; });
+document.addEventListener("dragenter", e => {
+  e.preventDefault(); dragDepth++;
+  $("#dropAll").textContent = chip === "notes" ? "松开就加到这条随记里" : "松开就开始下载"; $("#dropAll").hidden = false;
+});
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#dropAll").hidden = true; } });
 document.addEventListener("drop", e => {
   e.preventDefault(); dragDepth = 0; $("#dropAll").hidden = true;
+  if (chip === "notes") {  // on 随记, dropped photos / videos / audio go into the note being written
+    if (e.dataTransfer.files.length) addNoteFiles(e.dataTransfer.files);
+    else { const t = e.dataTransfer.getData("text/plain"); if (t) $("#noteText").value += t; }
+    return;
+  }
   const files = [...e.dataTransfer.files].filter(f => f.name.endsWith(".torrent"));
   if (files.length) { files.forEach(sendFile); return; }
   const t = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/html");
   if (t) sendText(t); else toast("没找到链接");
 });
 document.addEventListener("paste", e => {
-  if (document.activeElement.tagName === "INPUT") return;
+  if (chip === "notes" && e.clipboardData.files.length) { e.preventDefault(); addNoteFiles(e.clipboardData.files); return; }
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
   const t = e.clipboardData.getData("text"); if (/https?:\/\/|magnet:/.test(t)) sendText(t);
 });
+
+/* ---------- 资源使用 ---------- */
+let usageDays = 7;
+function bytes(n) {
+  n = n || 0;
+  for (const u of ["B", "KB", "MB", "GB", "TB"]) { if (n < 1024 || u === "TB") return (u === "B" ? n : n.toFixed(n < 10 ? 2 : 1)) + " " + u; n /= 1024; }
+}
+function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
+function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
+async function openUsage(days) {
+  if (days) usageDays = days;
+  $("#usageSheet").hidden = false;
+  if (!$("#usageBody").innerHTML) $("#usageBody").innerHTML = "<h2>资源使用</h2><p class='hint'>正在统计…</p>";
+  let u;
+  try { u = await (await fetch(`/api/usage?days=${usageDays}`)).json(); } catch (e) { toast("连不上 Pi"); return; }
+  const tt = u.traffic_total || {}, get = k => tt[k] || 0;
+  const daysList = Object.keys(u.traffic || {}).sort().slice(-30);
+  const peak = Math.max(1, ...daysList.map(d => (u.traffic[d].proxy_down || 0) + (u.traffic[d].direct_down || 0)));
+  const bars = daysList.length ? `<div class="ubars">${daysList.map(d => {
+      const t = u.traffic[d], p = t.proxy_down || 0, x = t.direct_down || 0;
+      return `<div title="${d} 代理 ${bytes(p)} · 直连 ${bytes(x)}" style="height:${(p + x) / peak * 100}%;background:linear-gradient(to top, var(--green) ${x / Math.max(1, p + x) * 100}%, var(--blue) 0)"></div>`;
+    }).join("")}</div><div class="ubar-l"><span>${daysList[0]}</span><span>蓝 = 走代理 · 绿 = 直连</span><span>${daysList[daysList.length - 1]}</span></div>` : "";
+  const work = u.work || [];
+  const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => w.kind === "llm");
+  const proc = work.filter(w => !["download", "llm"].includes(w.kind));
+  const dlBytes = dl.reduce((a, w) => a + w.amount, 0), dlCount = dl.reduce((a, w) => a + w.count, 0);
+  const tokIn = llm.reduce((a, w) => a + w.tokens_in, 0), tokOut = llm.reduce((a, w) => a + w.tokens_out, 0);
+  const j = u.jobs || {}, idle = u.idle || {}, now = idle.now;
+  const left = Object.values(idle.left || {});
+  const stat = (v, k) => `<div class="ustat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+  const tab = [[1, "今天"], [7, "7 天"], [30, "30 天"], [3650, "全部"]].map(([d, n]) =>
+    `<button class="${d === usageDays ? "on" : ""}" onclick="openUsage(${d})">${n}</button>`).join("");
+  $("#usageBody").innerHTML = `
+    <h2>资源使用</h2>
+    <div class="utab">${tab}</div>
+    <div class="usec"><b>流量</b><span class="sub">所有经过 Pi 的设备</span></div>
+    <div class="ugrid">${stat(bytes(get("proxy_down")), `走代理下载 · 上传 ${bytes(get("proxy_up"))}`)}
+      ${stat(bytes(get("direct_down")), `直连下载 · 上传 ${bytes(get("direct_up"))}`)}
+      ${stat(bytes(get("pi_down")), `Pi 网卡收 · 发 ${bytes(get("pi_up"))}`)}</div>
+    ${bars || '<p class="hint">流量从现在开始统计，过几分钟就有数了。</p>'}
+    <div class="usec"><b>下载任务</b><span class="sub">拾光自己</span></div>
+    <div class="ugrid">${stat(num(dlCount), `完成 · 共 ${bytes(dlBytes)}`)}
+      ${stat(num((j.queued || 0) + (j.downloading || 0) + (j.processing || 0)), "排队 / 进行中")}
+      ${stat(num(j.failed || 0), "失败（全部时间）")}${stat(num(j.done || 0), "已完成（全部时间）")}</div>
+    <div class="usec"><b>处理</b><span class="sub">在 Pi 上跑的，不花钱</span></div>
+    ${proc.length ? `<div class="uscroll"><table class="ut"><tr><th>做了什么</th><th>次数</th><th>处理了多少</th><th>用时</th></tr>
+      ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
+        w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
+    </table></div>` : '<p class="hint">这段时间还没有。</p>'}
+    <div class="usec"><b>AI tokens</b><span class="sub">${esc("DeepSeek")}，按用量计费</span></div>
+    ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入</th><th>输出</th><th>合计</th></tr>
+      ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td><td>${num(w.tokens_in)}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td><td>${num(w.tokens_in + w.tokens_out)}</td></tr>`).join("")}
+      <tr><td>合计</td><td></td><td>${num(tokIn)}</td><td>${num(tokOut)}</td><td>${num(tokIn + tokOut)}</td></tr>
+    </table></div>` : '<p class="hint">这段时间没有调用。</p>'}
+    <div class="usec"><b>闲时任务</b><span class="sub">没有下载要处理时，在后台慢慢做</span></div>
+    <p style="margin:6px 0">${!idle.enabled ? "已关闭" : now ? `正在${esc(now.label)}：${esc(now.title || "")}${now.until ? `（做到 ${dur(now.until)}）` : ""}`
+      : idle.busy ? "有下载在处理，先让它" : left.length ? "马上开始" : "都做完了"}</p>
+    ${left.length ? `<div class="uscroll"><table class="ut"><tr><th>还剩</th><th>个</th><th>时长</th></tr>
+      ${left.map(c => `<tr><td>${esc(c.label)}</td><td>${num(c.items)}</td><td>${c.hours ? c.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
+    <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。硬盘剩余 ${bytes(u.disk.free)}。</p>
+    <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
+}
 
 /* ---------- account ---------- */
 async function openAccount() {
@@ -942,10 +1543,9 @@ async function openAccount() {
     return `<div class="dev">
       <div class="dev-main" onclick="filterDevice(${esc(JSON.stringify(names[d.phones.length ? 1 : 0]))})">
         <b>${esc(d.label)}</b>${d.current ? ' <span class="cur">当前设备</span>' : ""}
-        ${d.phones.length ? `<div class="sub">快捷指令：${d.phones.map(esc).join("、")}</div>` : ""}
         <div class="sub">${n} 个内容 · 最近使用 ${esc(ago(d.seen))}</div>
       </div>
-      ${d.current ? "" : `<button class="btn plain" onclick="removeDevice('${d.id}', false)">移除</button>`}
+      ${d.current ? "" : `<button class="btn plain" onclick="removeDevice('${d.ids.join(",")}', false)">移除</button>`}
     </div>`;
   }).join("");
   $("#accountBody").innerHTML = `

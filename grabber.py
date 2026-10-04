@@ -6,6 +6,7 @@ direct file URLs (aria2) and magnets/.torrent files (aria2 as user `bt`, which b
 After download: make it Plex-friendly, get a transcript (subtitles or Whisper),
 ask an LLM (DeepSeek) for a summary + category, and move it into the media library.
 """
+import functools
 import glob
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -28,6 +30,9 @@ from flask import Flask, Response, g, jsonify, request, send_file, send_from_dir
 
 MEDIA = Path(os.environ.get("MEDIA_ROOT", "/mnt/media"))
 INCOMPLETE = MEDIA / ".incomplete"
+# 随记 files live on the disks, not the SD card; the folder is private to the grabber user (the Samba share is public)
+NOTES_DIR = MEDIA / ".notes"
+NOTE_MAX_UPLOAD = 4 << 30  # one note's files at most (phone videos are big)
 STATE = Path(os.environ.get("STATE_DIR", "/var/lib/grabber"))
 DB_PATH = STATE / "grabber.db"
 COOKIES = STATE / "cookies.txt"  # optional Netscape cookies file for sites that need a login
@@ -42,6 +47,10 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com").rstrip
 LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-flash")
 LLM_EFFORT = os.environ.get("LLM_EFFORT", "low")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+# One pass per piece of audio: no retries at higher temperatures and no carrying text over (with music or
+# noise those made Whisper decode the same audio again and again: 6 minutes took 40 on the Pi)
+WHISPER_FAST = {"temperature": 0.0, "condition_on_previous_text": False}
+NOTE_WHISPER_MODEL = os.environ.get("NOTE_WHISPER_MODEL", "small")  # 随记 voice clips are short: a better model is affordable
 TRANSCRIBE_MAX_MIN = int(os.environ.get("TRANSCRIBE_MAX_MIN", "6"))
 FORMAT_SORT = os.environ.get("YTDLP_FORMAT_SORT", "vcodec:h264,res:1080,acodec:aac,ext:mp4:m4a")
 # Jobs running at once. Most of a job is waiting on the network, so several fit; the CPU/memory-heavy
@@ -124,6 +133,14 @@ def heavy_slot(kind, job_id=None):
 
 # ---------------------------------------------------------------- database
 
+def log_usage(kind, purpose="", job_id=None, amount=0, tokens_in=0, tokens_out=0, seconds=0):
+    try:
+        q("INSERT INTO usage (ts, kind, purpose, job_id, amount, tokens_in, tokens_out, seconds) VALUES (?,?,?,?,?,?,?,?)",
+          (time.time(), kind, purpose, job_id, amount, tokens_in, tokens_out, round(seconds, 1)))
+    except Exception:
+        traceback.print_exc()  # bookkeeping must never break a job
+
+
 def db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -161,6 +178,29 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS subs (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, platform TEXT, key TEXT, url TEXT,
         name TEXT, avatar TEXT DEFAULT '', total INTEGER DEFAULT 0, backfill INTEGER, seen TEXT DEFAULT '[]',
         everything INTEGER DEFAULT 0, checked REAL, error TEXT DEFAULT '', device TEXT, created REAL);
+    -- 随记: everyday notes (text + photos / videos / voice); `media` = JSON list of attached files, `pending` = the
+    -- worker still has to make video posters and transcribe speech (so voice notes can be searched)
+    CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, text TEXT DEFAULT '',
+        media TEXT DEFAULT '[]', pending INTEGER DEFAULT 0, device TEXT, created REAL, updated REAL);
+    CREATE INDEX IF NOT EXISTS notes_owner ON notes (owner, id);
+    CREATE INDEX IF NOT EXISTS notes_when ON notes (owner, created);
+    -- what the box did, for 资源使用: LLM calls (tokens), speech-to-text, encodes, reading pictures, downloads
+    CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, purpose TEXT, job_id INTEGER,
+        amount REAL DEFAULT 0, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, seconds REAL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts);
+    -- network traffic per day: Xray outbounds (every device going through the Pi) and the Pi's own Wi-Fi
+    CREATE TABLE IF NOT EXISTS traffic (day TEXT, name TEXT, bytes INTEGER DEFAULT 0, PRIMARY KEY (day, name));
+    -- search index, filled in idle time: timed lines (subtitle cues, text read off covers and photos) ...
+    CREATE TABLE IF NOT EXISTS seg (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, ref INTEGER, part INTEGER DEFAULT 0,
+        t REAL, src TEXT, text TEXT);
+    CREATE INDEX IF NOT EXISTS seg_ref ON seg (kind, ref);
+    -- ... and what pictures look like (CLIP vectors of covers, note photos, video frames every few seconds);
+    -- `base` = the picture's average likeness to everyday words, so "looks like X" means clearly above that
+    CREATE TABLE IF NOT EXISTS vec (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, ref INTEGER, part INTEGER DEFAULT 0,
+        t REAL, src TEXT, base REAL, v BLOB);
+    CREATE INDEX IF NOT EXISTS vec_ref ON vec (kind, ref);
+    -- idle work per item ("subs:12:0" ...): done / failed / partial, with what's needed to resume
+    CREATE TABLE IF NOT EXISTS idle (key TEXT PRIMARY KEY, state TEXT, data TEXT, updated REAL);
     """)
     cols = [r[1] for r in DB.execute("PRAGMA table_info(jobs)")]
     if "transcript" not in cols:
@@ -182,6 +222,12 @@ def init_db(reset=False):
         DB.execute("ALTER TABLE jobs ADD COLUMN device TEXT")  # which device sent it, e.g. "Mac · Chrome"
     if "label" not in [r[1] for r in DB.execute("PRAGMA table_info(devices)")]:
         DB.execute("ALTER TABLE devices ADD COLUMN label TEXT")
+    if "segments" not in cols:
+        DB.execute("ALTER TABLE jobs ADD COLUMN segments TEXT")  # speech-to-text lines with their times
+    if "backfill" not in cols:
+        # an older video queued when following an uploader: speech-to-text waits for idle time
+        DB.execute("ALTER TABLE jobs ADD COLUMN backfill INTEGER DEFAULT 0")
+        DB.execute("UPDATE jobs SET backfill=1 WHERE status IN ('queued','downloading','processing','failed') AND source LIKE 'sub:%'")
     if "cancel" not in cols:
         DB.execute("ALTER TABLE jobs ADD COLUMN cancel INTEGER DEFAULT 0")  # set by the page, read by the job
     if reset:
@@ -310,6 +356,7 @@ def job_dict(row):
     d["files"] = json.loads(d["files"] or "[]")
     d["analysis"] = json.loads(d["analysis"] or "{}")
     d.pop("transcript", None)  # only used for search; can be long
+    d.pop("segments", None)
     return d
 
 
@@ -380,7 +427,9 @@ def ytdlp_opts(job_id, workdir, extra=None):
         "merge_output_format": "mp4/mkv",
         "writesubtitles": True, "writeautomaticsub": True,
         # Only original-language tracks; "en.*" would also pull every auto-translation and trip YouTube's rate limit
-        "subtitleslangs": ["en", "en-orig", "en-US", "en-GB", "zh-Hans", "zh-Hant", "zh-CN", "zh-TW", "zh", "ja", ".*-orig"],
+        # ai-zh / ai-en: B站's own AI subtitles (only offered with a logged-in cookies.txt); saves speech-to-text
+        "subtitleslangs": ["en", "en-orig", "en-US", "en-GB", "zh-Hans", "zh-Hant", "zh-CN", "zh-TW", "zh", "ja", ".*-orig",
+                           "ai-zh", "ai-en"],
         "subtitlesformat": "srt/best",
         "writethumbnail": True,
         "noplaylist": True,
@@ -766,7 +815,7 @@ _whisper = None
 _whisper_lock = threading.Lock()
 
 
-def transcribe(job_id, media: Path, srt_out: Path | None):
+def transcribe(job_id, media: Path, srt_out: Path | None, prompt=None, model=None, purpose="job"):
     """Speech-to-text of at most TRANSCRIBE_MAX_MIN minutes of audio. Longer videos are sampled: equal pieces from
     the start, middle and end, which is enough to summarise and keeps it to a few minutes on the Pi.
     Writes a sidecar .srt only when it covered the whole video."""
@@ -780,19 +829,27 @@ def transcribe(job_id, media: Path, srt_out: Path | None):
     def decode(start, length):
         return subprocess.run(["ffmpeg", "-v", "error", "-ss", str(start), "-i", str(media), "-t", str(length), "-vn",
                                "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], capture_output=True).stdout
+    # (offset in the decoded audio, time in the media) of each piece, to give segments their real times
+    spans = []
     if dur and dur > limit:
         piece = limit / 3
-        pcm = b"".join(decode(st, piece) for st in (0, dur / 2 - piece / 2, dur - piece))
+        chunks = [(st, decode(st, piece)) for st in (0, dur / 2 - piece / 2, dur - piece)]
     else:
-        pcm = decode(0, limit)
+        chunks = [(0, decode(0, limit))]
+    at = 0
+    for st, chunk in chunks:
+        spans.append((at, st))
+        at += len(chunk) / 32000  # 16 kHz, 16-bit mono
+    pcm = b"".join(c for _, c in chunks)
     if not pcm:
         return None, None
     audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+    started = time.time()
     with _whisper_lock, heavy_slot("whisper", job_id):
         if _whisper is None:
-            _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=4,
+            _whisper = WhisperModel(model or WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=4,
                                     download_root=str(STATE / "models"))
-        segments, info = _whisper.transcribe(audio, vad_filter=True, beam_size=1)
+        segments, info = _whisper.transcribe(audio, vad_filter=True, beam_size=1, initial_prompt=prompt, **WHISPER_FAST)
         segs = []
         for s in segments:
             check_cancel(job_id)
@@ -800,6 +857,12 @@ def transcribe(job_id, media: Path, srt_out: Path | None):
             if dur:
                 update(job_id, progress=round(min(s.end / min(dur, limit), 1) * 100, 1))
     text = "\n".join(s.text.strip() for s in segs)
+    log_usage("whisper", purpose, job_id, amount=len(audio) / 16000, seconds=time.time() - started)
+    def real(t):
+        off, st = max((sp for sp in spans if sp[0] <= t), default=(0, 0))
+        return round(st + t - off, 1)
+    if job_id is not None:  # lets a search jump to the moment something is said
+        update(job_id, segments=json.dumps([[real(s.start), s.text.strip()] for s in segs], ensure_ascii=False))
     if srt_out and segs and dur and dur <= limit:
         def ts(t):
             h, rem = divmod(t, 3600)
@@ -864,7 +927,7 @@ Reply with one JSON object with exactly these keys:
 {fields}"""
 
 
-def llm_json(system, user, fields, max_tokens, usage):
+def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None):
     """max_tokens includes the model's reasoning tokens; only tokens actually used are billed."""
     r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
                       headers={"Authorization": f"Bearer {LLM_API_KEY}"},
@@ -881,6 +944,8 @@ def llm_json(system, user, fields, max_tokens, usage):
     u = body.get("usage") or {}
     usage["calls"] = usage.get("calls", 0) + 1
     usage["tokens"] = usage.get("tokens", 0) + (u.get("total_tokens") or 0)
+    log_usage("llm", purpose, job_id, amount=1, tokens_in=u.get("prompt_tokens") or 0,
+              tokens_out=u.get("completion_tokens") or 0)
     content = body["choices"][0]["message"].get("content") or ""
     if not content.strip():
         # Happens when reasoning uses up max_tokens or the JSON mode returns nothing
@@ -933,7 +998,7 @@ def classify(job_id, name, meta, guess):
     usage = {}
     for attempt in range(2):
         try:
-            a = llm_json(CLASSIFY_SYSTEM, "\n\n".join(parts), CLASSIFY_FIELDS, 4000, usage)
+            a = llm_json(CLASSIFY_SYSTEM, "\n\n".join(parts), CLASSIFY_FIELDS, 4000, usage, "classify", job_id)
             break
         except Exception as e:
             if attempt:
@@ -976,14 +1041,14 @@ tag_lock = threading.Lock()
 
 
 def merge_tags():
-    """Fold synonym tags together across the whole library (one cheap LLM call). Returns the mapping applied."""
+    """Fold synonym tags together across the whole library (the 合并标签 button; ~20k tokens, so not automatic)."""
     if not LLM_API_KEY:
         return {}
     with tag_lock:
         tags = library_tags()
         if len(tags) < 2:
             return {}
-        out = llm_json(MERGE_SYSTEM, "Tags (most used first):\n" + "\n".join(tags), {"merge": "object"}, 32000, {})  # room for the model's reasoning over the whole tag list
+        out = llm_json(MERGE_SYSTEM, "Tags (most used first):\n" + "\n".join(tags), {"merge": "object"}, 32000, {}, "tags")  # room for the model's reasoning over the whole tag list
         mapping = {k: v for k, v in (out.get("merge") or {}).items()
                    if isinstance(k, str) and isinstance(v, str) and k != v and k in tags and v.strip()}
         # follow chains (a -> b -> c) so everything lands on the final canonical tag
@@ -995,30 +1060,81 @@ def merge_tags():
         if not mapping:
             kv_set("tags_merged", tags)
             return {}
-        changed = []
-        for r in q("SELECT id, analysis, files FROM jobs WHERE status='done'"):
-            a = json.loads(r["analysis"] or "{}")
-            old = a.get("tags") or []
-            new = list(dict.fromkeys(mapping.get(t, t) for t in old))
-            if new != old:
-                a["tags"] = new
-                update(r["id"], analysis=a)
-                vids = [f for f in json.loads(r["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
-                changed += [(vids[0], a)] if vids else []
-        aliases = kv_get("tag_aliases", {})
-        aliases.update(mapping)
-        kv_set("tag_aliases", aliases)
+        apply_tag_mapping(mapping)
         kv_set("tags_merged", library_tags())
-    if changed:
-        finishing_touch(plex_set_metadata, changed)
     return mapping
 
 
-def merge_tags_if_new():
-    """After a download: tidy tags again only if it brought tags the last tidy-up hasn't seen."""
+def apply_tag_mapping(mapping):
+    """Rename tags across the library (and in Plex); a search for an old name finds the new one."""
+    if not mapping:
+        return
+    changed = []
+    for r in q("SELECT id, analysis, files FROM jobs WHERE status='done'"):
+        a = json.loads(r["analysis"] or "{}")
+        old = a.get("tags") or []
+        new = list(dict.fromkeys(mapping.get(t, t) for t in old))
+        if new != old:
+            a["tags"] = new
+            update(r["id"], analysis=a)
+            vids = [f for f in json.loads(r["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
+            changed += [(vids[0], a)] if vids else []
+    aliases = kv_get("tag_aliases", {})
+    aliases.update(mapping)
+    kv_set("tag_aliases", aliases)
+    if changed:
+        finishing_touch(plex_set_metadata, changed)
+
+
+MATCH_SYSTEM = """You keep a media library's tags tidy. For each NEW tag, say which EXISTING tag means exactly the same
+thing (a synonym, translation, abbreviation, other spelling, case or plural variant, e.g. "LLM" = "大语言模型",
+"TED Talks" = "TED演讲", "川普" = "特朗普"), or null if none does. Merely related tags are not the same ("伊朗" is not
+"中东", "深度学习" is not "机器学习"); names of different people are never the same.
+Reply with one JSON object: {{"same": {{"<new tag>": "<existing tag or null>", ...}}}}"""
+
+
+def tag_key(t):
+    """What's left of a tag once case, width, traditional characters, spaces, punctuation and a plural -s are gone."""
+    import unicodedata
     try:
-        if set(library_tags()) - set(kv_get("tags_merged", [])):
-            merge_tags()
+        from opencc import OpenCC
+        t = OpenCC("t2s").convert(t)
+    except Exception:
+        pass
+    k = re.sub(r"[\s\W_]+", "", unicodedata.normalize("NFKC", t).casefold())
+    return k[:-1] if re.fullmatch(r"[a-z]{4,}s", k) else k
+
+
+def merge_tags_if_new():
+    """After a download: fold its new tags into ones already in the library that mean the same.
+    Only the new tags are looked at: same spelling once normalised is merged right here; the rest goes to the
+    LLM as one narrow question ("which existing tag is this one?"), a few hundred tokens instead of
+    re-reading the whole list pair by pair (which cost ~20k reasoning tokens per download)."""
+    try:
+        (STATE / "locks").mkdir(parents=True, exist_ok=True)
+        with open(STATE / "locks" / "tags.lock", "w") as lock:  # one at a time across job processes
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            tags = library_tags()
+            known = [t for t in tags if t in set(kv_get("tags_merged", []))]
+            new = [t for t in tags if t not in set(known)]
+            if not new:
+                return
+            if not known:  # first run: nothing to compare with yet
+                kv_set("tags_merged", tags)
+                return
+            by_key = {}
+            for t in known:  # most used first, so the common spelling wins
+                by_key.setdefault(tag_key(t), t)
+            mapping = {t: by_key[tag_key(t)] for t in new if tag_key(t) in by_key and by_key[tag_key(t)] != t}
+            ask = [t for t in new if t not in mapping]
+            if ask and LLM_API_KEY:
+                out = llm_json(MATCH_SYSTEM, "EXISTING tags (most used first):\n" + "\n".join(known) +
+                               "\n\nNEW tags:\n" + "\n".join(ask), {"same": "object"}, 4000, {}, "tags")
+                for t, same in (out.get("same") or {}).items():
+                    if t in ask and isinstance(same, str) and same in known and same != t:
+                        mapping[t] = same
+            apply_tag_mapping(mapping)
+            kv_set("tags_merged", list(dict.fromkeys(known + [t for t in new if t not in mapping])))
     except Exception:
         traceback.print_exc()
 
@@ -1031,7 +1147,7 @@ def summarize(job_id, a, transcript, transcript_note):
     user = (f"Title: {a['title']}\nWhat it is: {a['summary']}\n\n"
             f"Transcript {transcript_note}:\n{transcript}")
     try:
-        out = llm_json(SUMMARY_SYSTEM, user, SUMMARY_FIELDS, 8000, a.setdefault("usage", {}))
+        out = llm_json(SUMMARY_SYSTEM, user, SUMMARY_FIELDS, 8000, a.setdefault("usage", {}), "summarize", job_id)
         a["summary"] = str(out["summary"] or a["summary"])
         a["key_points"] = [str(x) for x in out["key_points"]] if isinstance(out["key_points"], list) else []
     except Exception as e:
@@ -1134,6 +1250,31 @@ def plex_set_metadata(items):
             return
 
 
+# ---------------------------------------------------------------- B站 joint videos
+
+def bili_staff(url):
+    """Names of everyone credited on a B站 joint video (创作团队: UP主, 参演 ...), [] otherwise."""
+    m = re.search(r"(BV[0-9A-Za-z]{10})", url or "")
+    if not m:
+        return []
+    try:
+        r = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": m.group(1)}, timeout=15,
+                         headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+        return [s["name"] for s in (r.json().get("data") or {}).get("staff") or [] if s.get("name")]
+    except Exception:
+        return []
+
+
+def add_people_tags(a, names):
+    """Everyone in it is a tag right after the creator, like the creator is."""
+    tags = a.setdefault("tags", [])
+    at = 1 if tags and tags[0] == a.get("creator") else 0
+    for name in names:
+        if name not in tags:
+            tags.insert(at, name)
+            at += 1
+
+
 # ---------------------------------------------------------------- the pipeline
 
 def process(job_id):
@@ -1206,7 +1347,11 @@ def process(job_id):
     for idx, m in enumerate(media):
         check_cancel(job_id)
         if m.suffix.lower() in VIDEO_EXT:
+            started, before = time.time(), m
             m = make_plex_friendly(job_id, m, keep_mkv=kind == "torrent")
+            if m != before:
+                log_usage("encode", "plex", job_id, amount=float(ffprobe(m).get("format", {}).get("duration") or 0),
+                          seconds=time.time() - started)
         guess = dict(guessit(m.name)) if kind in ("torrent", "file") else {}
         if m.suffix.lower() in VIDEO_EXT and not any(m.parent.glob(glob.escape(m.stem) + ".jpg")):
             grab_frame(m, m.with_suffix(".jpg"))
@@ -1219,13 +1364,19 @@ def process(job_id):
             a = {**results[0], "season": guess.get("season") or results[0].get("season"),
                  "episode": ep if isinstance(ep, int) else (ep or [None])[0], "usage": {}}
         else:
+            staff = bili_staff(meta.get("webpage_url") or url)  # B站 joint videos list everyone who's in them
             a = classify(job_id, m.name, {**meta, "file": m.name, "size": human(m.stat().st_size),
-                                          "duration_s": float(ffprobe(m).get("format", {}).get("duration") or 0)},
+                                          "duration_s": float(ffprobe(m).get("format", {}).get("duration") or 0),
+                                          **({"people_in_it": staff} if staff else {})},
                          guess)
+            add_people_tags(a, staff)
             subs = sorted(m.parent.glob(glob.escape(m.stem) + "*.srt"))
             transcript, note = (srt_to_text(subs[0]), f"(from subtitles {subs[0].name[len(m.stem):]})") if subs else (None, "")
             # Only transcribe and summarise when the classifier says the content is worth it
-            if a.get("needs_transcript") and LLM_API_KEY:
+            deferred = not transcript and job.get("backfill")
+            if deferred:
+                a["note"] = "speech-to-text left for idle time; summarised once full subtitles exist"
+            if a.get("needs_transcript") and LLM_API_KEY and not deferred:
                 if not transcript:
                     try:
                         transcript, (lang, cut) = transcribe(job_id, m, m)
@@ -1271,6 +1422,7 @@ def process(job_id):
         analysis = {**results[0], "episodes": len(results)}
     update(job_id, status="done", stage="", progress=100, files=final_files, analysis=analysis,
            title=analysis.get("title") or job["title"], thumb=thumb_url)
+    log_usage("download", kind, job_id, amount=sum(Path(f).stat().st_size for f in final_files if Path(f).exists()))
     for f in final_files:  # so the list doesn't have to ffprobe it later
         if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT:
             probe_of(f)
@@ -1669,6 +1821,8 @@ def check_sub(sub_id, everything=False):
         jid, how = add_job_ex(e["url"], source=f"sub:{sub_id}", owner=sub["owner"], device=sub["device"])
         if how == "new" and e["title"]:
             update(jid, title=e["title"])  # the list already has the title: show it while the video waits
+        if how == "new" and (first or everything):
+            update(jid, backfill=1)  # older videos: their subtitles are made in idle time
     seen = (seen + [link_key(e["url"]) for e in reversed(new)])[-SUB_SEEN_MAX:]
     avatar = sub["avatar"] or ""
     if res["avatar"] and not (AVATARS / f"{sub_id}.jpg").exists():
@@ -1813,6 +1967,8 @@ def identify():
         g.new_device = False
         return
     g.device_label = device_label(request.headers.get("User-Agent"))
+    if request.path.startswith("/api/notes") and request.method == "POST":
+        request.max_content_length = NOTE_MAX_UPLOAD
     # Remember where each browser was last seen (throttled; the page polls every 2 s)
     key = (g.device, client_ip())
     if time.time() - _seen_cache.get(key, 0) > 600:
@@ -1848,6 +2004,7 @@ def sign_in(name):
     # followed uploaders too; one the account already follows stays once
     q("DELETE FROM subs WHERE owner=? AND key IN (SELECT key FROM subs WHERE owner=?)", (g.device, f"user:{name}"))
     q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    q("UPDATE notes SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     # bring this device's privacy settings into the account
     dev, acc = privacy_get(g.device), privacy_get(f"user:{name}")
     privacy_set(f"user:{name}", list(dict.fromkeys(acc["tags"] + dev["tags"])), list(dict.fromkeys(acc["ids"] + dev["ids"])))
@@ -1990,10 +2147,21 @@ def account():
     """Devices tied to the logged-in account: browsers that logged in, and iPhones using the shortcut."""
     if not g.user:
         return jsonify(user=None, devices=[])
-    devices = []
+    # The same browser gets a new cookie for every address it opens the page by (192.168.3.200 and
+    # pi-gateway.local are two sites to it), so it shows up as several devices: one row per kind of browser
+    # on one IP, removed together
+    devices, rows = [], {}
     for d in q("SELECT * FROM devices WHERE user=? ORDER BY seen DESC", (g.user,)):
-        devices.append({"id": d["id"], "label": d["label"] or "设备", "seen": d["seen"], "current": d["id"] == g.device,
-                        "phones": [p["name"] for p in q("SELECT name FROM phones WHERE device=?", (d["id"],))]})
+        phones = [p["name"] for p in q("SELECT name FROM phones WHERE device=?", (d["id"],))]
+        row = rows.get((d["label"], d["ip"]))
+        if row:
+            row["ids"].append(d["id"])
+            row["current"] = row["current"] or d["id"] == g.device
+            row["phones"] += [p for p in phones if p not in row["phones"]]
+            continue
+        row = rows[(d["label"], d["ip"])] = {"id": d["id"], "ids": [d["id"]], "label": d["label"] or "设备", "seen": d["seen"],
+                                             "current": d["id"] == g.device, "phones": phones}
+        devices.append(row)
     # Jobs from before devices were recorded have no device; JSON keys must be strings
     counts = {r["device"] or "未知设备": r["n"] for r in q("SELECT device, COUNT(*) n FROM jobs WHERE owner=? GROUP BY device",
                                                        (f"user:{g.user}",))}
@@ -2005,8 +2173,10 @@ def remove_device(device_id):
     """Untie a browser (and the iPhone shortcut that goes with it) from the account; its jobs stay."""
     if not g.user:
         return jsonify(error="not logged in"), 403
-    q("UPDATE devices SET user=NULL WHERE id=? AND user=?", (device_id, g.user))
-    if device_id == g.device:
+    ids = device_id.split(",")  # one row in the list can be several cookies of the same browser
+    for i in ids:
+        q("UPDATE devices SET user=NULL WHERE id=? AND user=?", (i, g.user))
+    if g.device in ids:
         session.clear()
     return jsonify(ok=True)
 
@@ -2085,6 +2255,12 @@ def add_post():
         if not request.cookies:
             return Response(f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载", mimetype="text/plain")
         return jsonify(ids=[], duplicates=[], linked=[], subs=subs)
+    if not ids and not request.cookies and text.strip():
+        # the iOS / Android shortcut shared plain text (no link): keep it as a 随记
+        now = time.time()
+        q("INSERT INTO notes (owner, text, device, created, updated) VALUES (?,?,?,?,?)",
+          (g.owner, text.strip()[:20000], g.device_label, now, now))
+        return Response("没有链接，已经记到「随记」里", mimetype="text/plain")
     if not ids:
         if not request.cookies:
             return Response("没找到链接", mimetype="text/plain", status=400)
@@ -2106,12 +2282,59 @@ def owner_label(o):
     return o[5:] if o.startswith("user:") else "快捷指令（未识别）" if o == "shortcut" else "匿名设备" if o else "旧任务"
 
 
-def snippet(text, term, width=60):
+@functools.lru_cache(maxsize=256)
+def _cues(path, mtime):
+    """(start seconds, text) of each cue of an .srt / .vtt file."""
+    out = []
+    text = Path(path).read_text(errors="ignore").replace("\r", "")
+    for block in re.split(r"\n\s*\n", text):
+        m = re.search(r"(?:(\d+):)?(\d\d):(\d\d)[.,](\d+)\s*-->", block)
+        if m:
+            t = int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + float("0." + m.group(4))
+            line = re.sub(r"<[^>]+>", "", block[m.end():].split("\n", 1)[-1]).replace("\n", " ").strip()
+            if line and (not out or out[-1][1] != line):
+                out.append((round(t, 1), line))
+    return out
+
+
+def subtitle_hits(d, row, term, limit=30):
+    """Where `term` is said: [{part, t, text}] from the subtitle files, else from speech-to-text segments."""
+    term, hits = term.lower(), []
+    for n, m in enumerate(playable(d)):
+        for sub in m["subs"][:1]:  # the first track: others are usually the same lines in another language
+            try:
+                cues = _cues(sub, Path(sub).stat().st_mtime)
+            except OSError:
+                continue
+            hits += [{"part": n, "t": t, "text": x} for t, x in cues if term in x.lower()]
+    if not hits and row["segments"]:
+        hits = [{"part": 0, "t": t, "text": x} for t, x in json.loads(row["segments"]) if term in x.lower()]
+    return hits[:limit]
+
+
+def titleish(d):
+    a = d.get("analysis") or {}
+    return " ".join(str(x or "") for x in (d.get("title"), a.get("title"), a.get("show"), a.get("creator")))
+
+
+def match_fields(d, r):
+    a = d.get("analysis") or {}
+    return [("简介", " ".join(str(a.get(k) or "") for k in ("summary", "brief"))),
+            ("要点", " · ".join(map(str, a.get("key_points") or []))),
+            ("标签", " · ".join(map(str, a.get("tags") or []))),
+            ("字幕", r["transcript"] or ""),
+            ("链接", d.get("url") or ""),
+            ("文件", " ".join(map(str, d.get("files") or [])))]
+
+
+def snippet(text, term, before=16, after=60):
+    """A bit of `text` around `term`, starting just before it: cards show only two lines, so the hit has to be
+    near the start or it's cut off (and the result looks unrelated)."""
     i = text.lower().find(term.lower())
     if i < 0:
         return ""
-    start = max(0, i - width)
-    return ("…" if start else "") + text[start:i + len(term) + width].replace("\n", " ") + "…"
+    start = max(0, i - before)
+    return ("…" if start else "") + text[start:i + len(term) + after].replace("\n", " ") + "…"
 
 
 @app.get("/api/jobs")
@@ -2131,12 +2354,46 @@ def jobs():
         like = f"%{term}%"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ? OR url LIKE ? OR analysis LIKE ? OR files LIKE ? "
                  "OR transcript LIKE ?) ORDER BY id DESC LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
-        out = []
+        # The idle-time index belongs to the job that downloaded the files; entries linked to it share it
+        by_source = {}
+        for r in q(f"SELECT id, ref FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args):
+            by_source.setdefault(r["ref"] or r["id"], []).append(r["id"])
+        said = {}  # lines said in the video (subtitles) or written on its cover
+        for r in q("SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND text LIKE ? ORDER BY ref, part, t", (like,)):
+            for jid in by_source.get(r["ref"], []):
+                said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"],
+                                                 "text": snippet(r["text"], term, 10, 40).strip("…") if len(r["text"]) > 50 else r["text"]})
+        looks = {}  # covers and frames that look like it
+        for source, found in visual_hits(term, "job", set(by_source)).items():
+            for jid in by_source[source]:
+                looks[jid] = found
+        known = {r["id"] for r in rows}
+        extra = [i for i in dict.fromkeys([*said, *looks]) if i not in known]
+        if extra:
+            rows += q(f"SELECT * FROM jobs WHERE id IN ({','.join('?' * len(extra))})", extra)
+        out, only_looks = [], []
         for r in rows:
             d = job_dict(r)
-            if term.lower() not in json.dumps(d, ensure_ascii=False).lower():
-                d["match"] = snippet(r["transcript"] or "", term)
-            out.append(d)
+            hits = said.get(r["id"], [])[:30]
+            if not hits and d["status"] == "done" and term.lower() in (r["transcript"] or "").lower():
+                hits = [{**h, "src": "字幕"} for h in subtitle_hits(d, r, term)]  # not indexed yet
+            seen = [{"part": p, "t": t, "src": "画面" if t is not None else "封面", "text": f"看起来像「{term}」"}
+                    for _, p, t, _ in looks.get(r["id"], [])[:5]]
+            if term.lower() not in titleish(d).lower():
+                # say where it was found when it isn't in the title, so the result doesn't look random
+                if hits:
+                    d["match_where"], d["match"] = hits[0]["src"], hits[0]["text"]
+                else:
+                    d["match_where"], d["match"] = next(((k, snippet(t, term)) for k, t in match_fields(d, r)
+                                                         if term.lower() in t.lower()), ("", ""))
+                if not d["match"] and seen:
+                    d["match_where"], d["match"] = seen[0]["src"], seen[0]["text"]
+                    if seen[0]["t"] is not None:
+                        d["frame"] = {"part": seen[0]["part"], "t": seen[0]["t"]}  # show that moment as the cover
+            d["hits"] = hits + seen
+            # matched only by how it looks: after the text matches, most alike first
+            (only_looks if d.get("match_where") in ("画面", "封面") and not hits else out).append(d)
+        out += sorted(only_looks, key=lambda d: -looks[d["id"]][0][0])
     else:
         unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
@@ -2171,7 +2428,10 @@ def jobs():
     return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
                    features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
-                   subs=subs_list(), sub_interval=SUB_INTERVAL, more=more)
+                   subs=subs_list(), sub_interval=SUB_INTERVAL, more=more,
+                   notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
+                   # a search also shows matching 随记 among the videos
+                   note_hits=[note_dict(r, m, seen) for r, m, seen in notes_search(term)[:50]] if term else [])
 
 
 def subs_list():
@@ -2224,6 +2484,805 @@ def sub_avatar(sid):
     if not row or not row["avatar"] or not Path(row["avatar"]).exists():
         return "", 404
     return send_file(row["avatar"], max_age=86400)
+
+
+# ---------------------------------------------------------------- search index: pictures, subtitles, idle work
+#
+# Everything slow happens ahead of time, in idle time, so a search is only a lookup:
+#   seg  – timed lines: subtitle cues (downloaded, or made here with speech-to-text), text read off covers
+#   vec  – CLIP vectors (Chinese-CLIP): covers, note photos, a video frame every FRAME_EVERY seconds
+# A search runs LIKE over seg and one matrix product over vec (the query's text vector against every picture).
+# No LLM is involved: it can't see pictures, and the local models are free and keep diaries private.
+
+CLIP_DIR = STATE / "models" / "clip"
+CLIP_REPO = "https://huggingface.co/Xenova/chinese-clip-vit-base-patch16/resolve/main/"
+CLIP_MARGIN = float(os.environ.get("CLIP_MARGIN", "0.08"))  # how clearly above its baseline a picture must match
+CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
+# everyday words: a picture's average likeness to these is its baseline (some pictures resemble everything a bit)
+CLIP_ANCHORS = ["人", "男人", "女人", "孩子", "一群人", "人脸", "文字", "屏幕", "电脑", "手机", "房间", "桌子", "街道", "城市",
+                "建筑", "天空", "大海", "山", "树", "花", "草地", "食物", "饮料", "汽车", "动物", "狗", "猫", "鸟", "衣服",
+                "书", "地图", "图表", "舞台", "室内", "室外", "夜晚", "运动", "乐器", "会议", "照片", "画", "卡通", "风景",
+                "海报", "演讲", "厨房", "办公室", "商店", "交通工具", "游戏"]
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
+IDLE_WHISPER_MODEL = os.environ.get("IDLE_WHISPER_MODEL", "small")
+FRAME_EVERY = int(os.environ.get("FRAME_EVERY", "20"))
+IDLE_WORK = os.environ.get("IDLE_WORK", "1") != "0"
+_models = {}
+_model_lock = threading.Lock()
+
+
+def clip_files():
+    """Download Chinese-CLIP (ONNX, int8) once and split it into its text half (for queries, kept in the web
+    process) and its image half (for indexing), so neither has to load the other."""
+    if (CLIP_DIR / "text.onnx").exists() and (CLIP_DIR / "vision.onnx").exists():
+        return
+    CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    for name, src in (("tokenizer.json", "tokenizer.json"), ("model.onnx", "onnx/model_quantized.onnx")):
+        if not (CLIP_DIR / name).exists():
+            part = CLIP_DIR / (name + ".part")
+            with requests.get(CLIP_REPO + src, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(part, "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+            part.rename(CLIP_DIR / name)
+    import onnx.utils
+    whole = str(CLIP_DIR / "model.onnx")
+    onnx.utils.extract_model(whole, str(CLIP_DIR / "text.onnx"), ["input_ids", "attention_mask"], ["text_embeds"])
+    onnx.utils.extract_model(whole, str(CLIP_DIR / "vision.onnx"), ["pixel_values"], ["image_embeds"])
+    (CLIP_DIR / "model.onnx").unlink()
+
+
+def _onnx(name):
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = 4
+    return ort.InferenceSession(str(CLIP_DIR / name), so)
+
+
+@functools.lru_cache(maxsize=512)
+def clip_text(text):
+    import numpy as np
+    with _model_lock:
+        if "text" not in _models:
+            clip_files()
+            from tokenizers import Tokenizer
+            _models["tok"] = Tokenizer.from_file(str(CLIP_DIR / "tokenizer.json"))
+            _models["text"] = _onnx("text.onnx")
+        ids = np.array([_models["tok"].encode(text).ids[:52]], np.int64)
+        v = _models["text"].run(None, {"input_ids": ids, "attention_mask": np.ones_like(ids)})[0][0]
+    return v / np.linalg.norm(v)
+
+
+def clip_anchors():
+    if "anchors" not in _models:
+        import numpy as np
+        path = CLIP_DIR / "anchors.npy"
+        if not path.exists():
+            np.save(path, np.stack([clip_text(w) for w in CLIP_ANCHORS]))
+        _models["anchors"] = np.load(path)
+    return _models["anchors"]
+
+
+def clip_image(path, t=None):
+    """CLIP vector of a picture, or of the frame `t` seconds into a video; None if it can't be read."""
+    import numpy as np
+    pixels = None
+    if t is None and Path(path).suffix.lower() in IMAGE_EXT:
+        try:  # Pillow follows the photo's EXIF rotation
+            from PIL import Image, ImageOps
+            with Image.open(path) as im:
+                pixels = np.asarray(ImageOps.exif_transpose(im).convert("RGB").resize((224, 224), Image.BICUBIC))
+        except Exception:
+            pixels = None
+    if pixels is None:
+        raw = subprocess.run(["ffmpeg", "-v", "error", *(["-ss", str(t)] if t is not None else []), "-i", str(path),
+                              "-frames:v", "1", "-vf", "scale=224:224:flags=bicubic", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                              "-"], capture_output=True, timeout=120).stdout
+        if len(raw) != 224 * 224 * 3:
+            return None
+        pixels = np.frombuffer(raw, np.uint8).reshape(224, 224, 3)
+    a = (pixels.astype(np.float32) / 255 - np.array(CLIP_MEAN, np.float32)) / np.array(CLIP_STD, np.float32)
+    with _model_lock:
+        if "vision" not in _models:
+            clip_files()
+            _models["vision"] = _onnx("vision.onnx")
+        v = _models["vision"].run(None, {"pixel_values": a.transpose(2, 0, 1)[None]})[0][0]
+    return v / np.linalg.norm(v)
+
+
+def store_vec(kind, ref, part, t, src, v):
+    import numpy as np
+    q("INSERT INTO vec (kind, ref, part, t, src, base, v) VALUES (?,?,?,?,?,?,?)",
+      (kind, ref, part, t, src, float((clip_anchors() @ v).mean()), v.astype(np.float32).tobytes()))
+
+
+def ocr_text(path):
+    """Lines of text read off a picture (RapidOCR: PaddleOCR's models on onnxruntime)."""
+    if "ocr" not in _models:
+        from rapidocr_onnxruntime import RapidOCR
+        _models["ocr"] = RapidOCR()
+    started = time.time()
+    found, _ = _models["ocr"](str(path))
+    lines = [str(text).strip() for _, text, score in (found or []) if float(score) >= 0.6 and len(str(text).strip()) >= 2]
+    log_usage("ocr", "picture", amount=1, seconds=time.time() - started)
+    return lines
+
+
+_vecs = {"key": None, "rows": 0}
+
+
+def vec_matrix():
+    """All picture vectors, cached in this process; new rows are appended, a removal reloads everything."""
+    import numpy as np
+    top = q("SELECT COALESCE(MAX(id), 0) m, COUNT(*) n FROM vec", one=True)
+    if _vecs["key"] == (top["m"], top["n"]):
+        return _vecs
+    after = _vecs["last"] if _vecs["key"] and top["n"] - _vecs["rows"] == top["m"] - _vecs["last"] else 0
+    rows = q("SELECT id, kind, ref, part, t, src, base, v FROM vec WHERE id > ? ORDER BY id", (after,))
+    meta = [(r["kind"], r["ref"], r["part"], r["t"], r["src"]) for r in rows]
+    base = np.array([r["base"] for r in rows], np.float32)
+    m = np.frombuffer(b"".join(r["v"] for r in rows), np.float32).reshape(len(rows), -1) if rows else np.zeros((0, 512), np.float32)
+    if after:
+        meta, base, m = _vecs["meta"] + meta, np.concatenate([_vecs["base"], base]), np.concatenate([_vecs["m"], m])
+    _vecs.update(key=(top["m"], top["n"]), rows=top["n"], last=top["m"], meta=meta, base=base, m=m)
+    return _vecs
+
+
+def visual_hits(term, kind, allowed):
+    """{ref: [(margin, part, t, src) best first]} for pictures that clearly look like `term`."""
+    # Chinese-CLIP understands Chinese; English words and single characters mostly match noise
+    if len(term) < 2 or not re.search(r"[\u4e00-\u9fff]", term):
+        return {}
+    try:
+        V = vec_matrix()
+        if not len(V["meta"]):
+            return {}
+        import numpy as np
+        sims = V["m"] @ clip_text(term)
+        margin = sims - V["base"]
+        # clearly above the picture's own baseline, and above how much everything looks like this word
+        idx = np.where((margin >= CLIP_MARGIN) & (sims >= float(np.median(sims)) + 0.04))[0]
+    except Exception:
+        traceback.print_exc()
+        return {}
+    out = {}
+    for i in idx[np.argsort(-margin[idx])]:
+        k, ref, part, t, src = V["meta"][i]
+        if k == kind and ref in allowed:
+            out.setdefault(ref, []).append((float(margin[i]), part, t, src))
+    return out
+
+
+def forget_index(jid):
+    q("DELETE FROM seg WHERE kind='job' AND ref=?", (jid,))
+    q("DELETE FROM vec WHERE kind='job' AND ref=?", (jid,))
+    for prefix in ("cover", "cues", "subs", "frames"):
+        q("DELETE FROM idle WHERE key=? OR key LIKE ?", (f"{prefix}:{jid}", f"{prefix}:{jid}:%"))
+
+
+# ---- idle work
+
+def idle_get(key):
+    row = q("SELECT state, data FROM idle WHERE key=?", (key,), one=True)
+    return (row["state"], json.loads(row["data"] or "{}")) if row else (None, {})
+
+
+def idle_set(key, state, data=None):
+    q("INSERT INTO idle (key, state, data, updated) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+      "state=excluded.state, data=excluded.data, updated=excluded.updated",
+      (key, state, json.dumps(data or {}, ensure_ascii=False), time.time()))
+
+
+def mem_available_mb():
+    try:
+        return next(int(l.split()[1]) // 1024 for l in open("/proc/meminfo") if l.startswith("MemAvailable"))
+    except Exception:
+        return 0
+
+
+def box_busy():
+    """Something someone is waiting for needs the CPU: a download being processed, a note being transcribed.
+    (Plain downloading doesn't count: it's network-bound.)"""
+    return bool(q("SELECT 1 FROM jobs WHERE status='processing' LIMIT 1", one=True)
+                or q("SELECT 1 FROM notes WHERE pending=1 LIMIT 1", one=True))
+
+
+IDLE_LABELS = {"cues": "整理已有字幕", "cover": "识别封面", "frames": "识别画面", "subs": "生成字幕"}
+
+
+def idle_plan():
+    """Idle work still to do, in order: index subtitle files that exist (no model, quick) and covers, then per
+    video, newest first, what's on screen every FRAME_EVERY s and full subtitles where there are none."""
+    states = {r["key"]: r["state"] for r in q("SELECT key, state FROM idle")}
+    todo, later = [], []
+    for r in q("SELECT * FROM jobs WHERE status='done' AND ref IS NULL ORDER BY id DESC"):
+        d = job_dict(r)
+        if r["thumb"] and Path(r["thumb"]).exists() and f"cover:{r['id']}" not in states:
+            todo.append(f"cover:{r['id']}")
+        for n, m in enumerate(playable(d)):
+            dur = duration_of(m["path"]) or 0
+            if m["subs"] and states.get(f"subs:{r['id']}:{n}") != "done" and f"cues:{r['id']}:{n}" not in states:
+                todo.insert(0, f"cues:{r['id']}:{n}")
+            if Path(m["path"]).suffix.lower() in VIDEO_EXT and states.get(f"frames:{r['id']}:{n}") in (None, "partial"):
+                later.append((f"frames:{r['id']}:{n}", dur))
+            a = json.loads(r["analysis"] or "{}")
+            music = a.get("library") == "Music" or a.get("folder") == "Music Videos"  # speech-to-text can't do songs
+            if not m["subs"] and not music and states.get(f"subs:{r['id']}:{n}") in (None, "partial"):
+                later.append((f"subs:{r['id']}:{n}", dur))
+    return todo + [k for k, _ in later]
+
+
+def idle_backlog():
+    """What idle work is left, for 资源使用."""
+    left = {}
+    for key in idle_plan():
+        kind, jid, *rest = key.split(":")
+        c = left.setdefault(kind, {"label": IDLE_LABELS[kind], "items": 0, "hours": 0})
+        c["items"] += 1
+        if kind in ("subs", "frames"):
+            row = q("SELECT * FROM jobs WHERE id=?", (int(jid),), one=True)
+            media = playable(job_dict(row)) if row else []
+            n = int(rest[0])
+            if n < len(media):
+                state, data = idle_get(key)
+                c["hours"] += max(0, (duration_of(media[n]["path"]) or 0) - data.get("until", 0)) / 3600
+    for c in left.values():
+        c["hours"] = round(c["hours"], 1)
+    return left
+
+
+def idle_loop():
+    """Worker thread: when nothing else needs the CPU, run the next piece of idle work in its own lowest-priority
+    process. That process checks between chunks and stops (keeping its progress) as soon as something comes in."""
+    time.sleep(30)
+    while True:
+        try:
+            if IDLE_WORK and not box_busy() and mem_available_mb() > 1000:
+                plan = idle_plan()
+                if plan:
+                    key = plan[0]
+                    kv_set("idle_now", {"key": key, "since": time.time()})
+                    proc = subprocess.run(["nice", "-n", "19", sys.executable, __file__, "idle", key])
+                    kv_set("idle_now", None)
+                    if proc.returncode not in (0, 3):  # 3 = paused for other work
+                        idle_set(key, "failed", {"code": proc.returncode})
+                    if proc.returncode != 3:
+                        continue
+        except Exception:
+            traceback.print_exc()
+        time.sleep(20)
+
+
+def idle_ok():
+    return not box_busy() and mem_available_mb() > 500
+
+
+class Paused(Exception):
+    pass
+
+
+def run_idle(key):
+    kind, jid, *rest = key.split(":")
+    jid, n = int(jid), int(rest[0]) if rest else 0
+    row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+    if not row:
+        return
+    media = playable(job_dict(row))
+    try:
+        if kind == "cover":
+            idle_cover(key, jid, row["thumb"])
+        elif n < len(media):
+            {"cues": idle_cues, "frames": idle_frames, "subs": idle_subs}[kind](key, jid, n, Path(media[n]["path"]),
+                                                                               media[n]["subs"])
+        else:
+            idle_set(key, "done")
+    except Paused:
+        sys.exit(3)
+
+
+def idle_cover(key, jid, thumb):
+    started = time.time()
+    v = clip_image(thumb)
+    if v is not None:
+        store_vec("job", jid, 0, None, "封面", v)
+    for line in ocr_text(thumb):
+        q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,0,NULL,'封面文字',?)", (jid, line))
+    log_usage("clip", "cover", jid, amount=1, seconds=time.time() - started)
+    idle_set(key, "done")
+
+
+def idle_cues(key, jid, n, path, subs):
+    q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
+    sub = subs[0]  # the first track; others are usually the same lines in another language
+    for t, text in _cues(sub, Path(sub).stat().st_mtime):
+        q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, t, text))
+    idle_set(key, "done", {"file": Path(sub).name})
+
+
+def idle_frames(key, jid, n, path, subs):
+    """What's on screen, every FRAME_EVERY seconds (a frame much like the one before is skipped)."""
+    state, data = idle_get(key)
+    t, dur, prev, count, started = data.get("until", 3), duration_of(str(path)) or 0, None, 0, time.time()
+    try:
+        while t < dur:
+            if not idle_ok():
+                raise Paused()
+            v = clip_image(path, t)
+            if v is not None and (prev is None or float(v @ prev) < 0.95):
+                store_vec("job", jid, n, t, "画面", v)
+                prev = v
+            t += FRAME_EVERY
+            count += 1
+            if count % 10 == 0:
+                idle_set(key, "partial", {"until": t})
+        idle_set(key, "done", {"until": t})
+    except Paused:
+        idle_set(key, "partial", {"until": t})
+        raise
+    finally:
+        if count:
+            log_usage("clip", "frames", jid, amount=count, seconds=time.time() - started)
+
+
+def idle_subs(key, jid, n, path, subs):
+    """Full subtitles with speech-to-text, 90 seconds at a time (resumable), saved as a .srt next to the video:
+    the player and Plex show them, and search can jump to the moment something is said."""
+    from faster_whisper import WhisperModel
+    import numpy as np
+    state, data = idle_get(key)
+    until, segs, lang = data.get("until", 0), data.get("segs", []), data.get("lang")
+    dur, chunk, started, heard = duration_of(str(path)) or 0, 90, time.time(), 0
+    model = None
+    try:
+        while until < dur:
+            if not idle_ok():
+                raise Paused()
+            pcm = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(until), "-i", str(path), "-t", str(chunk), "-vn",
+                                  "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], capture_output=True).stdout
+            if not pcm:
+                break
+            audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+            if model is None:
+                model = WhisperModel(IDLE_WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=4,
+                                     download_root=str(STATE / "models"))
+            with heavy_slot("whisper"):
+                if lang is None:
+                    _, info = model.transcribe(audio[:30 * 16000], beam_size=1)
+                    lang = info.language
+                # the prompt keeps Chinese in simplified characters (search is by simplified text)
+                found, _ = model.transcribe(audio, language=lang, vad_filter=True, beam_size=1,
+                                            initial_prompt="以下是普通话的句子，用简体中文。" if lang == "zh" else None,
+                                            **WHISPER_FAST)
+                segs += [[round(until + s.start, 2), round(until + s.end, 2), s.text.strip()] for s in found if s.text.strip()]
+            until += chunk
+            heard += len(audio) / 16000
+            idle_set(key, "partial", {"until": until, "segs": segs, "lang": lang})
+    except Paused:
+        log_usage("whisper", "idle", jid, amount=heard, seconds=time.time() - started)
+        raise
+    log_usage("whisper", "idle", jid, amount=heard, seconds=time.time() - started)
+
+    def ts(t):
+        h, rem = divmod(t, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{int(h):02}:{int(m):02}:{int(sec):02},{int((sec % 1) * 1000):03}"
+    if segs:
+        srt = path.with_name(f"{path.stem}.{lang or 'und'}.srt")
+        srt.write_text("\n".join(f"{i}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(segs, 1)))
+        q("DELETE FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕'", (jid, n))
+        for a, _, t in segs:
+            q("INSERT INTO seg (kind, ref, part, t, src, text) VALUES ('job',?,?,?,'字幕',?)", (jid, n, a, t))
+        if n == 0:
+            transcript = "\n".join(t for _, _, t in segs)[:200_000]
+            update(jid, transcript=transcript)
+            row = q("SELECT analysis, files FROM jobs WHERE id=?", (jid,), one=True)
+            a = json.loads(row["analysis"] or "{}")
+            if a.get("needs_transcript") and not a.get("key_points") and LLM_API_KEY:
+                a.pop("note", None)
+                a = summarize(jid, a, transcript, f"(speech-to-text of the whole video, language {lang})")
+                update(jid, analysis=a, stage="")
+                plex_set_metadata([(path, a)])
+        plex_refresh()  # Plex picks up the new subtitle file
+    idle_set(key, "done", {"lang": lang, "lines": len(segs)})
+
+
+# ---------------------------------------------------------------- 资源使用: what the box has been doing
+
+XRAY = shutil.which("xray") or "/usr/local/bin/xray"
+
+
+def record_traffic():
+    """Add the traffic since the last look to today's totals. Counters restart from zero when Xray or the Pi
+    restarts; a counter lower than last time is taken as such a restart."""
+    now = {}
+    try:
+        out = subprocess.run([XRAY, "api", "statsquery", "--server=127.0.0.1:10085"], capture_output=True, text=True,
+                             timeout=20).stdout
+        for st in json.loads(out or "{}").get("stat", []):
+            kind, name, _, way = (st["name"].split(">>>") + ["", "", "", ""])[:4]
+            if kind == "outbound" and name not in ("block", "dns-out", "api"):
+                route = "direct" if name == "direct" else "proxy"
+                now[f"{st['name']}"] = (f"{route}_{'up' if way == 'uplink' else 'down'}", int(st.get("value") or 0))
+    except Exception:
+        pass
+    try:
+        for line in open("/proc/net/dev"):
+            if line.strip().startswith(("wlan0:", "eth0:")):
+                dev, rest = line.split(":", 1)
+                f = rest.split()
+                now[dev.strip() + ":rx"] = ("pi_down", int(f[0]))
+                now[dev.strip() + ":tx"] = ("pi_up", int(f[8]))
+    except OSError:
+        pass
+    last = kv_get("traffic_last", {})
+    day = time.strftime("%Y-%m-%d")
+    for counter, (bucket, value) in now.items():
+        before = last.get(counter)
+        delta = value if before is None or value < before else value - before
+        if before is not None and delta:
+            q("INSERT INTO traffic (day, name, bytes) VALUES (?,?,?) ON CONFLICT(day, name) DO UPDATE SET "
+              "bytes = bytes + excluded.bytes", (day, bucket, delta))
+        last[counter] = value
+    kv_set("traffic_last", last)
+
+
+def traffic_loop():
+    while True:
+        try:
+            record_traffic()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(300)
+
+
+def backfill_usage():
+    """Once: what was done before usage was recorded, from the jobs themselves."""
+    if kv_get("usage_backfilled"):
+        return
+    for r in q("SELECT id, kind, files, analysis, updated FROM jobs WHERE status='done' AND ref IS NULL"):
+        size = sum(Path(f).stat().st_size for f in json.loads(r["files"] or "[]") if Path(f).exists())
+        a = json.loads(r["analysis"] or "{}")
+        u = a.get("usage") or {}
+        q("INSERT INTO usage (ts, kind, purpose, job_id, amount) VALUES (?,?,?,?,?)", (r["updated"], "download", r["kind"], r["id"], size))
+        if u.get("calls"):
+            q("INSERT INTO usage (ts, kind, purpose, job_id, amount, tokens_in) VALUES (?,?,?,?,?,?)",
+              (r["updated"], "llm", "earlier", r["id"], u["calls"], u.get("tokens") or 0))
+    kv_set("usage_backfilled", True)
+
+
+USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm", "summarize"): "AI 总结（看字幕）",
+               ("llm", "earlier"): "AI 分类+总结（统计开始前，未细分）", ("llm", "tags"): "AI 合并同义标签",
+               ("whisper", "job"): "语音转文字 · 新下载（抽样 6 分钟）", ("whisper", "note"): "语音转文字 · 随记",
+               ("whisper", "idle"): "语音转文字 · 闲时生成字幕", ("encode", "plex"): "转码（Plex / 手机能播）",
+               ("ocr", "picture"): "识别图中文字", ("clip", "cover"): "识别封面", ("clip", "frames"): "识别视频画面"}
+
+
+@app.get("/api/usage")
+def usage_summary():
+    days = int(request.args.get("days", "30")) if request.args.get("days", "").isdigit() else 30
+    since = time.time() - days * 86400
+    day0 = time.strftime("%Y-%m-%d", time.localtime(since))
+    traffic = {}
+    for r in q("SELECT day, name, bytes FROM traffic WHERE day >= ? ORDER BY day", (day0,)):
+        traffic.setdefault(r["day"], {})[r["name"]] = r["bytes"]
+    total = {r["name"]: r["b"] for r in q("SELECT name, SUM(bytes) b FROM traffic WHERE day >= ? GROUP BY name", (day0,))}
+    jobs = {r["status"]: r["n"] for r in q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+    work = []
+    for r in q("SELECT kind, purpose, COUNT(*) n, SUM(amount) amount, SUM(tokens_in) tin, SUM(tokens_out) tout, "
+               "SUM(seconds) secs FROM usage WHERE ts >= ? GROUP BY kind, purpose ORDER BY kind, purpose", (since,)):
+        work.append({"kind": r["kind"], "purpose": r["purpose"], "name": USAGE_NAMES.get((r["kind"], r["purpose"]),
+                     f"{r['kind']} {r['purpose']}"), "count": r["n"], "amount": r["amount"] or 0,
+                     "tokens_in": r["tin"] or 0, "tokens_out": r["tout"] or 0, "seconds": r["secs"] or 0})
+    finished = q("SELECT COUNT(*) n FROM usage WHERE kind='download' AND ts >= ?", (since,), one=True)["n"]
+    now = kv_get("idle_now")
+    if now:
+        kind = now["key"].split(":")[0]
+        row = q("SELECT title, analysis FROM jobs WHERE id=?", (int(now["key"].split(":")[1]),), one=True)
+        now["label"] = IDLE_LABELS.get(kind, kind)
+        now["title"] = (json.loads(row["analysis"] or "{}").get("title") or row["title"]) if row else ""
+        state, data = idle_get(now["key"])
+        now["until"] = data.get("until")
+    return jsonify(days=days, traffic=traffic, traffic_total=total, jobs=jobs, finished=finished, work=work,
+                   idle={"now": now, "left": idle_backlog(), "enabled": IDLE_WORK, "busy": box_busy()},
+                   index={"lines": q("SELECT COUNT(*) n FROM seg", one=True)["n"],
+                          "pictures": q("SELECT COUNT(*) n FROM vec", one=True)["n"]},
+                   disk={"free": shutil.disk_usage(MEDIA).free, "total": shutil.disk_usage(MEDIA).total})
+
+
+# ---------------------------------------------------------------- 随记: everyday notes
+
+NOTE_KINDS = {"image": "image/", "video": "video/", "audio": "audio/"}
+
+
+def note_kind(f):
+    kind = next((k for k, p in NOTE_KINDS.items() if (f.mimetype or "").startswith(p)), None)
+    if kind:
+        return kind
+    ext = Path(f.filename or "").suffix.lower()
+    return "image" if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"} else \
+        "video" if ext in VIDEO_EXT else "audio" if ext in AUDIO_EXT else None
+
+
+def note_row(nid):
+    """The note if it's this browser's / account's own: notes are private, the admin doesn't see other people's."""
+    row = q("SELECT * FROM notes WHERE id=?", (nid,), one=True)
+    return row if row and row["owner"] == g.owner else None
+
+
+def _within(a, b, k):
+    """Whether the edit distance between a and b is at most k."""
+    if abs(len(a) - len(b)) > k:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        if min(cur) > k:
+            return False
+        prev = cur
+    return prev[-1] <= k
+
+
+@functools.lru_cache(maxsize=20000)
+def _pinyin(ch):
+    try:
+        from pypinyin import lazy_pinyin
+        return lazy_pinyin(ch)[0]
+    except Exception:  # pypinyin not installed: no pinyin search
+        return ""
+
+
+def _note_find(hay, low, tok):
+    """Where `tok` (one search word, casefolded) is in a note: as typed, with a typo or a letter more or less
+    (Yannan ~ yanan), or as the pinyin / pinyin initials of Chinese (yanan, ya → 延安). The matched text, or None."""
+    i = low.find(tok)
+    if i >= 0:
+        return hay[i:i + len(tok)]
+    if not re.fullmatch(r"[a-z0-9]+", tok):
+        return None
+    if len(tok) >= 4:
+        k = 1 if len(tok) < 8 else 2
+        for m in re.finditer(r"[a-z0-9]+", low):
+            if _within(tok, m.group(), k):
+                return hay[m.start():m.end()]
+    if not tok.isalpha() or len(tok) < 2:
+        return None
+    for run in re.finditer(r"[\u4e00-\u9fff]+", hay):
+        py = [_pinyin(c) for c in run.group()]
+        for a in range(len(py)):
+            full = initials = ""
+            for b in range(a, len(py)):
+                full += py[b]
+                initials += py[b][:1]
+                if full == tok or initials == tok or (len(tok) >= 4 and _within(tok, full, 1)) \
+                        or (b > a and full.startswith(tok) and len(tok) > len(full) - len(py[b])):
+                    return run.group()[a:b + 1]
+                if len(full) > len(tok) + 1 and len(initials) >= len(tok):
+                    break
+    return None
+
+
+def note_marks(r, term):
+    """The matched bits of text when every word of `term` is in the note (text or what's said in it), else None."""
+    hay = r["text"] + "\n" + "\n".join(m.get("transcript", "") + "\n" + m.get("ocr", "") for m in json.loads(r["media"]))
+    low, marks = hay.casefold(), []
+    for tok in term.casefold().split():
+        m = _note_find(hay, low, tok)
+        if m is None:
+            return None
+        marks.append(m)
+    return marks
+
+
+def notes_search(term):
+    """[(note, matched text bits, photos that look like it)]: by text, what's said or written in it, and by look."""
+    rows = q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC", (g.owner,))
+    looks = visual_hits(term, "note", {r["id"] for r in rows})
+    out = []
+    for r in rows:
+        marks = note_marks(r, term)
+        files = [m["file"] for m in json.loads(r["media"])]
+        seen = [files.index(src[3:]) for _, _, _, src in looks.get(r["id"], []) if src[3:] in files]
+        if marks is not None or seen:
+            out.append((r, marks or [], seen))
+    return out
+
+
+def note_dict(r, marks=None, seen=None):
+    media = json.loads(r["media"])
+    d = {"id": r["id"], "text": r["text"], "created": r["created"], "updated": r["updated"], "device": r["device"],
+         "pending": bool(r["pending"]),
+         "media": [{"kind": m["kind"], "duration": m.get("duration"), "poster": bool(m.get("poster")),
+                    "transcript": m.get("transcript", "")} for m in media]}
+    if marks:
+        d["marks"] = marks
+        missing = [k for k in marks if k not in r["text"]]
+        if missing:  # found in what's said in a voice note / video, or written on a photo: show where
+            d["match"], d["match_where"] = next(((snippet(m.get(k, ""), missing[0]), label) for m in media
+                                                 for k, label in (("transcript", "语音"), ("ocr", "图中文字"))
+                                                 if missing[0] in m.get(k, "")), ("", ""))
+    if seen:
+        d["seen"] = seen  # photos that look like the search
+        if not marks:
+            d["match"], d["match_where"] = "照片看起来像", "照片"
+    return d
+
+
+def save_note_files(nid, files):
+    NOTES_DIR.mkdir(mode=0o700, exist_ok=True)
+    out = []
+    for f in files:
+        kind = note_kind(f)
+        if not kind:
+            continue
+        ext = (Path(f.filename or "").suffix.lower() or {"image": ".jpg", "video": ".mp4", "audio": ".m4a"}[kind])[:8]
+        name = f"{nid}-{secrets.token_hex(4)}{ext}"
+        f.save(NOTES_DIR / name)
+        out.append({"kind": kind, "file": name, "todo": True})
+    return out
+
+
+def note_time(v):
+    """A note date from the page (unix seconds), or None when missing or absurd."""
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        return None
+    return t if 0 < t < time.time() + 366 * 86400 else None
+
+
+@app.get("/api/notes")
+def notes_list():
+    term = request.args.get("q", "").strip()
+    where, args = "owner = ?", [g.owner]
+    # newest first by the note's date (which can be changed); 更早的 continues after the last one shown
+    before, before_id = note_time(request.args.get("before")), request.args.get("before_id", "")
+    if before and before_id.isdigit():
+        where, args = where + " AND (created < ? OR (created = ? AND id < ?))", args + [before, before, int(before_id)]
+    if term:  # the text and what's said in voice notes and videos; forgiving (see _note_find)
+        found = notes_search(term)
+        return jsonify(notes=[note_dict(r, m, seen) for r, m, seen in found[:200]], more=False)
+    rows = q(f"SELECT * FROM notes WHERE {where} ORDER BY created DESC, id DESC LIMIT 51", args)
+    return jsonify(notes=[note_dict(r, term) for r in rows[:50]], more=len(rows) > 50)
+
+
+@app.post("/api/notes")
+def note_add():
+    text = (request.form.get("text") or "").strip()[:20000]
+    files = request.files.getlist("media")
+    if not text and not files:
+        return jsonify(error="空的"), 400
+    now = time.time()
+    with db_lock:
+        cur = DB.execute("INSERT INTO notes (owner, text, device, created, updated) VALUES (?,?,?,?,?)",
+                         (g.owner, text, g.device_label, note_time(request.form.get("created")) or now, now))
+        DB.commit()
+        nid = cur.lastrowid
+    media = save_note_files(nid, files)
+    q("UPDATE notes SET media=?, pending=? WHERE id=?",
+      (json.dumps(media, ensure_ascii=False), int(any(m["todo"] for m in media)), nid))
+    return jsonify(note=note_dict(note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>")
+def note_edit(nid):
+    """Change the text and/or drop attachments (`drop`: their positions)."""
+    row = note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    media = json.loads(row["media"])
+    drop = {int(i) for i in body.get("drop", []) if str(i).isdigit()}
+    for i in drop:
+        if i < len(media):
+            for k in ("file", "poster"):
+                if media[i].get(k):
+                    (NOTES_DIR / media[i][k]).unlink(missing_ok=True)
+            q("DELETE FROM vec WHERE kind='note' AND ref=? AND src=?", (nid, "照片:" + media[i]["file"]))
+    media = [m for i, m in enumerate(media) if i not in drop]
+    text = str(body.get("text", row["text"])).strip()[:20000]
+    if not text and not media:
+        return note_delete(nid)
+    created = note_time(body.get("created")) or row["created"]
+    q("UPDATE notes SET text=?, media=?, created=?, updated=? WHERE id=?",
+      (text, json.dumps(media, ensure_ascii=False), created, time.time(), nid))
+    return jsonify(note=note_dict(note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>/media")
+def note_add_media(nid):
+    """More photos / videos / voice for a note that's already there."""
+    row = note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    added = save_note_files(nid, request.files.getlist("media"))
+    if not added:
+        return jsonify(error="不是照片、视频或音频"), 400
+    row = note_row(nid)  # re-read: saving big files takes a while
+    q("UPDATE notes SET media=?, pending=1, updated=? WHERE id=?",
+      (json.dumps(json.loads(row["media"]) + added, ensure_ascii=False), time.time(), nid))
+    return jsonify(note=note_dict(note_row(nid)))
+
+
+@app.post("/api/notes/<int:nid>/delete")
+def note_delete(nid):
+    row = note_row(nid)
+    if not row:
+        return jsonify(error="not found"), 404
+    for m in json.loads(row["media"]):
+        for k in ("file", "poster"):
+            if m.get(k):
+                (NOTES_DIR / m[k]).unlink(missing_ok=True)
+    q("DELETE FROM notes WHERE id=?", (nid,))
+    q("DELETE FROM vec WHERE kind='note' AND ref=?", (nid,))
+    return jsonify(ok=True)
+
+
+@app.get("/notefile/<int:nid>/<int:n>")
+@app.get("/notefile/<int:nid>/<int:n>/<what>")
+def note_file(nid, n, what="file"):
+    row = note_row(nid)
+    media = json.loads(row["media"]) if row else []
+    if n >= len(media) or what not in ("file", "poster") or not media[n].get(what):
+        return "", 404
+    path = NOTES_DIR / media[n][what]
+    if not path.exists():
+        return "", 404
+    return send_file(path, conditional=True, max_age=86400)  # Range requests: videos seek, iPhones play them
+
+
+def note_media_loop():
+    """Worker: video posters, durations and speech-to-text for new notes, one note at a time in its own process."""
+    while True:
+        row = q("SELECT id FROM notes WHERE pending=1 ORDER BY id LIMIT 1", one=True)
+        if not row:
+            time.sleep(3)
+            continue
+        proc = subprocess.run(["nice", "-n", "15", sys.executable, __file__, "note-media", str(row["id"])])
+        if proc.returncode != 0:
+            q("UPDATE notes SET pending=0 WHERE id=?", (row["id"],))  # don't retry forever
+
+
+def process_note(nid):
+    """Photos: text on them (OCR) and what they look like (CLIP); videos: poster, what's said and how the poster
+    looks; voice: what's said. All of it makes the note searchable."""
+    row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)
+    if not row:
+        return
+    done = {}
+    for m in json.loads(row["media"]):
+        if not m.get("todo"):
+            continue
+        path, extra = NOTES_DIR / m["file"], {}
+        try:
+            if m["kind"] == "image":
+                extra["ocr"] = "\n".join(ocr_text(path))
+                picture = path
+            else:
+                extra["duration"] = float(ffprobe(path).get("format", {}).get("duration") or 0) or None
+                picture = None
+                if m["kind"] == "video" and grab_frame(path, path.with_suffix(".poster.jpg")):
+                    picture = path.with_suffix(".poster.jpg")
+                    extra["poster"] = picture.name
+                # the prompt steers Chinese towards simplified characters (search is by simplified text)
+                text, _ = transcribe(None, path, None, prompt="以下是普通话的日常随记，用简体中文。", model=NOTE_WHISPER_MODEL,
+                                     purpose="note")
+                extra["transcript"] = (text or "").strip()
+            if picture:
+                v = clip_image(picture)
+                if v is not None:
+                    q("DELETE FROM vec WHERE kind='note' AND ref=? AND src=?", (nid, "照片:" + m["file"]))
+                    store_vec("note", nid, 0, None, "照片:" + m["file"], v)
+        except Exception:
+            traceback.print_exc()
+        done[m["file"]] = extra
+    # re-read: the note may have been edited meanwhile
+    row = q("SELECT media FROM notes WHERE id=?", (nid,), one=True)
+    if row:
+        media = [{**m, **done[m["file"]], "todo": False} if m["file"] in done else m for m in json.loads(row["media"])]
+        q("UPDATE notes SET media=?, pending=0 WHERE id=?", (json.dumps(media, ensure_ascii=False), nid))
 
 
 def delete_job_files(row):
@@ -2297,6 +3356,7 @@ def remove_job(jid, with_files):
     shutil.rmtree(INCOMPLETE / str(jid), ignore_errors=True)  # any partial download
     q("DELETE FROM jobs WHERE id=?", (jid,))
     q("UPDATE jobs SET ref=NULL WHERE ref=?", (jid,))
+    forget_index(jid)
     if with_files and shared:
         return "kept_shared", 0
     return "removed", files
@@ -2503,6 +3563,24 @@ def subs(jid, n, k):
     return Response(text, mimetype="text/vtt")
 
 
+@app.get("/frame/<int:jid>/<int:n>")
+def frame(jid, n):
+    """The frame `t` seconds into a video (a search found something there), cached."""
+    m = job_media(jid, n)
+    try:
+        t = max(0.0, float(request.args.get("t", "0")))
+    except ValueError:
+        return "", 400
+    if not m:
+        return "", 404
+    out = MEDIA / ".cache" / "frames" / f"{jid}-{n}-{int(t)}.jpg"
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t), "-i", m["path"], "-frames:v", "1", "-vf", "scale=640:-2",
+                        str(out)], capture_output=True, timeout=60)
+    return send_file(out, max_age=86400) if out.exists() else ("", 404)
+
+
 @app.get("/thumb/<int:jid>")
 def thumb(jid):
     row = q("SELECT thumb, files FROM jobs WHERE id=?", (jid,), one=True)
@@ -2523,6 +3601,10 @@ def setup_app():
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                       MAX_CONTENT_LENGTH=10 << 20)  # uploads are only .torrent files
     app.permanent_session_lifetime = 365 * 86400
+    # big uploads (随记 videos) are spooled to temp files: keep those on the disks, not the SD card / RAM
+    tmp = INCOMPLETE / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(tmp)
 
 
 def main_web():
@@ -2530,9 +3612,11 @@ def main_web():
     setup_app()
     ensure_admin()
     threading.Thread(target=warm_probes, daemon=True).start()
+    if (CLIP_DIR / "text.onnx").exists():
+        threading.Thread(target=clip_text, args=("拾光",), daemon=True).start()  # first search needn't wait for it
     from waitress import serve
     serve(app, listen=f"0.0.0.0:{PORT} 127.0.0.1:{EXTERNAL_PORT}", threads=16, channel_timeout=300,
-          ident="shiguang", trusted_proxy="127.0.0.1", trusted_proxy_count=1,
+          ident="shiguang", max_request_body_size=NOTE_MAX_UPLOAD, trusted_proxy="127.0.0.1", trusted_proxy_count=1,
           trusted_proxy_headers="x-forwarded-for", clear_untrusted_proxy_headers=True)
 
 
@@ -2544,6 +3628,10 @@ def main_worker():
         threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=sweep_loop, daemon=True).start()
     threading.Thread(target=sub_loop, daemon=True).start()
+    threading.Thread(target=note_media_loop, daemon=True).start()
+    threading.Thread(target=idle_loop, daemon=True).start()
+    threading.Thread(target=traffic_loop, daemon=True).start()
+    backfill_usage()
     if TG_TOKEN:
         threading.Thread(target=tg_loop, daemon=True).start()
         threading.Thread(target=tg_progress_loop, daemon=True).start()
@@ -2568,5 +3656,11 @@ if __name__ == "__main__":
         main_worker()
     elif mode == "run-job":
         main_run_job(int(sys.argv[2]))
+    elif mode == "note-media":
+        init_db()
+        process_note(int(sys.argv[2]))
+    elif mode == "idle":
+        init_db()
+        run_idle(sys.argv[2])
     else:
         main_web()
