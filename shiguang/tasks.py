@@ -1,4 +1,5 @@
 """What each kind of task does on the Pi, and what follows it."""
+import base64
 import json
 import os
 import re
@@ -613,6 +614,22 @@ def pi_explain_failure(task, beat):
     advice = f"{out.get('cause') or ''} {out.get('fix') or ''}".strip()
     q("UPDATE jobs SET advice=? WHERE id=?", (advice, jid))
     return {"advice": advice}
+
+
+SHORTCUTS = STATE / "shortcuts"  # each account's iOS shortcut for outside (web.remote_shortcut), signed by the Mac
+
+
+def save_remote_shortcut(task, result):
+    SHORTCUTS.mkdir(parents=True, exist_ok=True)
+    name = Path(json.loads(task["payload"])["file"]).name
+    (SHORTCUTS / name).write_bytes(base64.b64decode(result["data"]))
+    q("UPDATE tasks SET result=NULL WHERE id=?", (task["id"],))  # (a 30 KB file: kept once, on the disk)
+
+
+@board.task("shortcut", "签名快捷指令", "mac", then=save_remote_shortcut)
+def pi_shortcut(task, beat):
+    """Only a Mac can sign a shortcut (`shortcuts sign`): no Pi worker takes these."""
+    raise ValueError("only a Mac signs shortcuts")
 
 
 @board.task("llm", "AI（Mac 上的 Claude）", "mac")

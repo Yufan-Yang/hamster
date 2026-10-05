@@ -695,22 +695,7 @@
 
 <!-- Android share setup -->
 <div class="sheet-bg" id="androidSheet" hidden onclick="if (event.target === this) hide(this)">
-  <div class="sheet">
-    <h2>安卓分享到拾光</h2>
-    <p class="hint">安卓上网页没法直接出现在分享菜单里（需要 HTTPS），用开源的 HTTP Shortcuts 应用代替，设置一次就好：</p>
-    <ol class="steps">
-      <li>在应用商店或 F-Droid 安装 <b>HTTP Shortcuts</b>（作者 Waboodoo）。</li>
-      <li>先在手机浏览器里打开一次本页，这样拾光能认出这台手机。</li>
-      <li>在应用里点 <b>＋</b> → <b>Regular Shortcut</b>，名字填「发送到拾光」。</li>
-      <li><b>Basic Request Settings</b>：Method 选 <b>POST</b>，URL 填：<code class="copy" onclick="copyText(this)">http://192.168.3.200:8088/api/add</code></li>
-      <li><b>Request Body / Parameters</b>：类型选 <b>Custom Text</b>，Content-Type 填 <code class="copy" onclick="copyText(this)">application/json</code>，内容填下面这段，然后把 <b>分享内容</b> 换成变量（点输入框旁的 <b>{}</b> → 新建 Text 变量，在变量设置里勾选 <b>Allow 'Share...'</b>），把「我的安卓」改成你的手机名：<br>
-        <code class="copy block" onclick="copyText(this)">{"text": "分享内容", "device": "我的安卓"}</code></li>
-      <li><b>Trigger &amp; Execution Settings</b> 里打开 <b>Show in Share menu</b>（显示在分享菜单）。</li>
-      <li>以后在 B站、YouTube、浏览器等任意 App 里点 <b>分享</b> → <b>HTTP Shortcuts</b> → <b>发送到拾光</b>，就开始下载了。</li>
-    </ol>
-    <p class="hint">点上面带框的文字可以复制。只能在家里的 Wi-Fi 下用。</p>
-    <div class="row"><button class="btn plain" onclick="hide($('#androidSheet'))">知道了</button></div>
-  </div>
+  <div class="sheet" id="androidBody"></div>
 </div>
 
 <!-- privacy -->
@@ -1910,7 +1895,47 @@ async function doRemove(ids, files) {
 }
 
 /* ---------- ways to send links in (no manual adding on the page) ---------- */
-function openAndroid() { hide($("#accountSheet")); hide($("#addSheet")); $("#androidSheet").hidden = false; }
+async function openAndroid() {
+  hide($("#accountSheet")); hide($("#addSheet"));
+  let acc = {};
+  if (state.user) try { acc = await (await fetch("/api/account")).json(); } catch { /* steps without the key */ }
+  const lan = location.protocol === "http:" ? location.origin : "http://192.168.3.200:8088";
+  const c = t => `<code class="copy" onclick="copyText(this)">${esc(t)}</code>`;
+  const block = t => `<code class="copy block" onclick="copyText(this)">${esc(t)}</code>`;
+  const remote = acc.public_url && acc.shortcut_key;
+  $("#androidBody").innerHTML = `
+    <h2>安卓分享到拾光</h2>
+    <p class="hint">用开源的 <b>HTTP Shortcuts</b> 应用（作者 Waboodoo，应用商店或 F-Droid）在分享菜单里加入口。可以建两个：「发送到拾光」在家用，走局域网；「发送到拾光（外网）」在哪都能用，带你的账号密钥。</p>
+    <ol class="steps">
+      <li>在应用里点 <b>＋</b> → <b>Regular Shortcut</b>，名字填「发送到拾光」。</li>
+      <li><b>Basic Request Settings</b>：Method 选 <b>POST</b>，URL 填：${c(lan + "/api/add")}</li>
+      <li><b>Request Body / Parameters</b>：类型选 <b>Custom Text</b>，Content-Type 填 ${c("application/json")}，内容填下面这段，然后把 <b>分享内容</b> 换成变量（点输入框旁的 <b>{}</b> → 新建 Text 变量，在变量设置里勾选 <b>Allow 'Share...'</b>），把「我的安卓」改成你的手机名：
+        ${block('{"text": "分享内容", "device": "我的安卓"}')}</li>
+      <li><b>Trigger &amp; Execution Settings</b> 里打开 <b>Show in Share menu</b>（显示在分享菜单）。</li>
+      ${remote ? `<li>外网版：在应用里长按「发送到拾光」→ <b>Duplicate</b>，改名「发送到拾光（外网）」，URL 改成：${c(acc.public_url + "/api/add")}<br>内容改成（密钥已经填好，别发给别人）：
+        ${block(`{"text": "分享内容", "device": "我的安卓", "key": "${acc.shortcut_key}"}`)}
+        同样把 <b>分享内容</b> 换成那个变量。</li>`
+      : `<li>外网版需要账号里的快捷指令密钥：${state.user ? "外网地址还没配置。" : "先登录，再打开这页就会显示带密钥的设置。"}</li>`}
+      <li>以后在 B站、YouTube、浏览器等任意 App 里点 <b>分享</b> → <b>HTTP Shortcuts</b> → 选一个，就开始下载了。不带密钥的那个，第一次用之前先在这台手机的浏览器里打开一次本页（在家里），拾光才认得出它。</li>
+    </ol>
+    <p class="hint">点带框的文字可以复制。账号页里「换一个」密钥之后，外网版要把 key 改成新的。</p>
+    <div class="row"><button class="btn plain" onclick="hide($('#androidSheet'))">知道了</button></div>`;
+  $("#androidSheet").hidden = false;
+}
+async function installRemoteShortcut(btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  try {
+    for (let i = 0; i < 40; i++) {
+      const r = await fetch("/shortcut/remote", {method: "HEAD"});
+      if (r.status === 200) { location.href = "/shortcut/remote"; return; }
+      if (r.status !== 202) { toast(r.status === 403 ? "先登录" : "生成失败（要在家里的 Mac 开着时才能生成），稍后再试"); return; }
+      btn.textContent = "正在为你的账号生成…";
+      await new Promise(ok => setTimeout(ok, 3000));
+    }
+    toast("还没生成好（家里的 Mac 可能没开），稍后再试");
+  } finally { btn.disabled = false; btn.textContent = label; }
+}
 // navigator.clipboard needs HTTPS; this page is plain HTTP on the LAN, so copy through a hidden textarea
 function copyText(el) {
   const t = document.createElement("textarea");
@@ -1923,7 +1948,7 @@ function shareTips() {
   const bm = `javascript:void(window.open('${location.origin}/add?url='+encodeURIComponent(location.href),'_blank','width=460,height=220'))`;
   return `<div class="psec" style="margin-top:18px">发送到拾光</div>
     <div class="tips" style="margin-top:0">
-      ▶ iPhone：在手机上打开本页，<a href="/shortcut">安装「发送到拾光」快捷指令</a>，安装时粘贴账号页里的「快捷指令密钥」，之后在任意 App 的分享菜单里点它（在外面也能用）<br>
+      ▶ iPhone：在手机上打开本页，安装快捷指令，之后在任意 App 的分享菜单里点它：<a href="/shortcut">「发送到拾光」</a>在家里的 Wi-Fi 下用；${state.user ? `<a href="#" onclick="installRemoteShortcut(this); return false">「发送到拾光（外网）」</a>在哪都能用（已带上你的账号密钥，装上就行）` : "登录后还能装在外面也能用的「发送到拾光（外网）」"}<br>
       ▶ 安卓：用免费的 HTTP Shortcuts 加一个分享入口，<a href="#" onclick="openAndroid(); return false">看设置步骤</a><br>
       ▶ 电脑：把 <a href="${esc(bm)}" onclick="event.preventDefault(); toast('把这个链接拖到浏览器书签栏使用')">发送到拾光</a> 拖到书签栏，在任何网页上点一下就会下载当前页面
     </div>`;
@@ -3166,7 +3191,7 @@ async function openAccount() {
     <div class="devs">${rows || '<div class="sub">还没有设备</div>'}</div>
     <button class="btn plain wide" style="margin-top:14px" onclick="logout()">退出登录</button>
     ${acc.shortcut_key ? `<div class="psec" style="margin-top:18px">快捷指令密钥</div>
-    <p class="hint" style="margin-top:0">安装 iPhone 快捷指令「发送到拾光」时粘贴这个密钥，分享的链接就会加到这个账号，在外面也能用。别发给别人；手机丢了就换一个，旧密钥立刻失效。</p>
+    <p class="hint" style="margin-top:0">「发送到拾光（外网）」快捷指令和安卓外网版用它认出你的账号（iPhone 版已经带上，不用手填）。别发给别人；手机丢了就换一个，旧密钥立刻失效，外网版快捷指令要重新安装。</p>
     <code class="copy block" id="shortcutKey" onclick="copyText(this)">${esc(acc.shortcut_key)}</code>
     <button class="btn plain" style="margin-top:8px" onclick="newShortcutKey()">换一个</button>` : ""}
     ${shareTips()}`;
@@ -3175,7 +3200,7 @@ async function openAccount() {
 async function newShortcutKey() {
   if (!confirm("换成新密钥？用旧密钥的快捷指令都要重新安装。")) return;
   const r = await (await fetch("/api/shortcut-key/new", {method: "POST"})).json();
-  if (r.shortcut_key) { $("#shortcutKey").textContent = r.shortcut_key; toast("已换新密钥，记得重新安装快捷指令"); }
+  if (r.shortcut_key) { $("#shortcutKey").textContent = r.shortcut_key; toast("已换新密钥，记得重新安装外网版快捷指令"); }
 }
 /* login / register: one mode at a time with a single button, inline checks and errors */
 function renderAuth(mode, keep = {}) {

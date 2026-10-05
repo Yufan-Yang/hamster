@@ -334,6 +334,19 @@ def shortcut_from_outside():
     assert post("/api/shortcut-key/new")["shortcut_key"] != key
     assert send({"text": "smoke 随记", "key": key}).status_code == 403  # the old key stops working
     shiguang.web.login_failures.clear()
+    # the shortcut for outside: asked of the Mac (a task), served once it's back
+    shiguang.web.PUBLIC_URL = "https://example.invalid:8443"
+    r = c.get("/shortcut/remote")
+    assert r.status_code == 202, r.status_code
+    f, target = shiguang.web.remote_shortcut(user)
+    t = G.q("SELECT * FROM tasks WHERE kind='shortcut' AND target=?", (target,), one=True)
+    p = __import__("json").loads(t["payload"])
+    assert t["state"] == "queued" and p["key"] == G.q("SELECT shortcut_key k FROM users WHERE name=?", (user,), one=True)["k"]
+    assert p["url"] == "https://example.invalid:8443/api/add"
+    shiguang.tasks.save_remote_shortcut(t, {"data": __import__("base64").b64encode(b"signed" * 300).decode()})
+    r = c.get("/shortcut/remote")
+    assert r.status_code == 200 and r.data == b"signed" * 300
+    assert c.post("/api/add", json={"text": "https://example.com/x"}, headers={"Origin": "https://evil.example"}).status_code == 403
 
 
 check("iOS shortcut from outside needs its account's key", shortcut_from_outside)

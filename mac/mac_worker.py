@@ -21,7 +21,9 @@ Code (`claude -p`, logged in with the Claude subscription), so they don't go to 
 while a game is in front (it's only waiting on the network). When the subscription's limits are used up they say
 they're paused until it resets, and the Pi asks DeepSeek meanwhile.
 """
+import base64
 import json
+import plistlib
 import re
 import os
 import shutil
@@ -53,7 +55,7 @@ SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the s
 GAME_APPS = HERE / "game-apps.txt"
 CLAUDE = Path(os.environ.get("CLAUDE_BIN") or Path.home() / ".local" / "bin" / "claude")
 CLAUDE_DIR = HERE / "claude-cwd"  # an empty folder to run it in: no project files for it to pick up
-CLAUDE_CAPS = ["llm", "claude"]
+CLAUDE_CAPS = ["llm", "claude", "shortcut"]  # (and signing iOS shortcuts: quick, and keeps going while gaming)
 CLAUDE_LOOPS = 2
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
@@ -429,6 +431,54 @@ def ask_claude(p, beat):
             "seconds": round(time.time() - started, 1)}
 
 
+def text_value(text, attachments=None):
+    v = {"string": text}
+    if attachments:
+        v["attachmentsByRange"] = attachments
+    return {"Value": v, "WFSerializationType": "WFTextTokenString"}
+
+
+def sign_shortcut(p):
+    """An account's iOS shortcut for outside: share a link -> POST {text, device, key} to the public address, show the
+    answer. Built here with the key in it (nothing to fill in when installing) and signed with `shortcuts sign`."""
+    device, request = "2C7B4D3E-5F60-4B2C-8D9E-8F7A6B5C4D32", "6E1C2B1A-0C55-4C7B-9A57-2E7B2E6B9A01"
+    field = lambda k, v: {"WFItemType": 0, "WFKey": text_value(k), "WFValue": v}  # noqa: E731
+    actions = [
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.getdevicedetails",
+         "WFWorkflowActionParameters": {"UUID": device, "WFDeviceDetail": "Device Name"}},
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
+         "WFWorkflowActionParameters": {
+             "UUID": request, "ShowHeaders": False, "WFHTTPMethod": "POST", "WFHTTPBodyType": "JSON", "WFURL": p["url"],
+             "WFJSONValues": {"WFSerializationType": "WFDictionaryFieldValue", "Value": {"WFDictionaryFieldValueItems": [
+                 field("text", text_value("\ufffc", {"{0, 1}": {"Type": "ExtensionInput"}})),
+                 field("device", text_value("\ufffc", {"{0, 1}": {"OutputName": "Device Details", "OutputUUID": device,
+                                                                  "Type": "ActionOutput"}})),
+                 field("key", text_value(p["key"]))]}}}},
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.notification",
+         "WFWorkflowActionParameters": {"WFNotificationActionTitle": "拾光", "WFNotificationActionSound": False,
+                                        "WFNotificationActionBody": text_value("已发送：\ufffc", {"{4, 1}": {
+                                            "OutputName": "Contents of URL", "OutputUUID": request, "Type": "ActionOutput"}})}},
+    ]
+    shortcut = {
+        "WFWorkflowActions": actions, "WFWorkflowClientVersion": "2607.0.2", "WFWorkflowHasShortcutInputVariables": True,
+        "WFWorkflowIcon": {"WFWorkflowIconGlyphNumber": 61440, "WFWorkflowIconStartColor": 4282601983},
+        "WFWorkflowImportQuestions": [], "WFQuickActionSurfaces": [], "WFWorkflowTypes": ["ActionExtension"],
+        "WFWorkflowInputContentItemClasses": ["WFURLContentItem", "WFStringContentItem", "WFSafariWebPageContentItem",
+                                              "WFRichTextContentItem", "WFArticleContentItem"],
+        "WFWorkflowMinimumClientVersion": 900, "WFWorkflowMinimumClientVersionString": "900",
+        "WFWorkflowOutputContentItemClasses": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp) / "in.shortcut", Path(tmp) / "out.shortcut"
+        src.write_bytes(plistlib.dumps(shortcut, fmt=plistlib.FMT_BINARY))
+        for attempt in range(4):  # Apple's signing server fails now and then
+            r = subprocess.run(["shortcuts", "sign", "--mode", "anyone", "--input", src, "--output", out],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and out.exists() and out.stat().st_size > 1000:
+                return {"data": base64.b64encode(out.read_bytes()).decode()}
+            time.sleep(5 * (attempt + 1))
+        raise RuntimeError(f"shortcuts sign: {(r.stderr or r.stdout).strip()[-300:]}")
+
+
 def claude_loop(n):
     name = f"{NAME}-claude-{n}"
     limited_until = 0
@@ -449,6 +499,14 @@ def claude_loop(n):
         if not task:
             continue
         p, tid = task["payload"], task["id"]
+        if task["kind"] == "shortcut":
+            try:
+                call(f"/api/tasks/{tid}/done", worker=name, result=sign_shortcut(p))
+                log("signed shortcut", tid, p.get("title"))
+            except Exception as e:
+                traceback.print_exc()
+                call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
+            continue
         try:
             result = ask_claude(p, lambda: call(f"/api/tasks/{tid}/heartbeat", worker=name))
             call(f"/api/tasks/{tid}/done", worker=name, result=result)

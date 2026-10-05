@@ -1,5 +1,6 @@
 """The web page and its API, accounts and privacy, the task board over HTTP."""
 import gzip
+import hashlib
 import hmac
 import html
 import ipaddress
@@ -124,7 +125,9 @@ def identify():
     # Browsers name the page a request comes from in Origin: another site posting here (a page at home making the
     # browser send links or delete things) is refused. The shortcuts and the Mac worker send no Origin.
     origin = request.headers.get("Origin")
-    if request.method not in ("GET", "HEAD", "OPTIONS") and origin and urllib.parse.urlsplit(origin).netloc != request.host:
+    cross_site = (request.method not in ("GET", "HEAD", "OPTIONS") and bool(origin)
+                  and urllib.parse.urlsplit(origin).netloc != request.host)
+    if cross_site and not (request.path == "/api/add" and not request.cookies):  # (a shortcut's key decides, below)
         return jsonify(error="cross-site request"), 403
     if request.path.startswith("/api/compute/"):  # the Mac worker: token, no cookie, not a browser
         g.device, g.new_device, g.user, g.admin, g.owner = "", False, None, False, None
@@ -157,6 +160,8 @@ def identify():
             if not user:
                 note_failure(client_ip())
                 return Response("快捷指令密钥不对：在拾光的账号页里复制新的密钥，重新安装快捷指令", mimetype="text/plain", status=403)
+        elif cross_site:  # without a key only from home, and never a web page making a browser post here
+            return Response("cross-site request", mimetype="text/plain", status=403)
         elif g.external:  # from outside, only a shortcut with its account's key
             return Response("需要快捷指令密钥：在拾光的账号页里复制，重新安装快捷指令", mimetype="text/plain", status=401)
         g.owner = f"user:{user}" if user else phone_owner(phone) if phone else "shortcut"
@@ -394,7 +399,8 @@ def account():
     # Jobs from before devices were recorded have no device; JSON keys must be strings
     counts = {r["device"] or "未知设备": r["n"] for r in q("SELECT device, COUNT(*) n FROM jobs WHERE owner=? GROUP BY device",
                                                        (f"user:{g.user}",))}
-    return jsonify(user=g.user, devices=devices, counts=counts, shortcut_key=shortcut_key(g.user))
+    return jsonify(user=g.user, devices=devices, counts=counts, shortcut_key=shortcut_key(g.user),
+                   public_url=PUBLIC_URL, remote_shortcut=remote_shortcut_state(g.user, make=False))
 
 
 @app.post("/api/shortcut-key/new")
@@ -402,7 +408,9 @@ def new_shortcut_key():
     """A new key for the iOS shortcut (a phone was lost): shortcuts with the old key stop working."""
     if not g.user:
         return jsonify(error="not logged in"), 403
-    return jsonify(shortcut_key=shortcut_key(g.user, new=True))
+    key = shortcut_key(g.user, new=True)
+    remote_shortcut_state(g.user)  # the Mac makes the shortcut for the new key
+    return jsonify(shortcut_key=key)
 
 
 @app.post("/api/devices/<device_id>/remove")
@@ -451,8 +459,47 @@ def favicon():
 
 @app.get("/shortcut")
 def shortcut():
-    """iOS share-sheet shortcut: share a link from any app and it gets sent to /api/add."""
+    """iOS share-sheet shortcut for home: share a link from any app and it goes to /api/add at the Pi's LAN address."""
     return send_from_directory(HERE, "send-to-pi.shortcut", as_attachment=True, download_name="发送到拾光.shortcut")
+
+
+# The shortcut for outside carries the account's key and the public address, so each account gets its own; iOS only
+# opens signed shortcuts, and only a Mac can sign, so the Mac worker makes it (a `shortcut` task) and the Pi keeps it
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")  # e.g. https://example.org:8443 (not in the code)
+
+
+def remote_shortcut(name):
+    """(file, task target) of this account's shortcut for outside, for its current key."""
+    h = hashlib.sha256(shortcut_key(name).encode()).hexdigest()[:20]
+    return tasks.SHORTCUTS / f"{h}.shortcut", f"shortcut:{h}"
+
+
+def remote_shortcut_state(name, make=True):
+    """"ready", "making", "failed: why" or "off" (no public address); asks the Mac for it when it's missing."""
+    if not PUBLIC_URL:
+        return "off"
+    f, target = remote_shortcut(name)
+    if f.exists():
+        return "ready"
+    t = q("SELECT state, error FROM tasks WHERE kind='shortcut' AND target=?", (target,), one=True)
+    if t and t["state"] == "failed" and not make:
+        return "failed: " + (t["error"] or "")[:200]
+    if make and (not t or t["state"] in ("done", "failed")):
+        board.publish("shortcut", target, 95, force=True,
+                      payload={"url": PUBLIC_URL + "/api/add", "key": shortcut_key(name), "file": f.name,
+                               "title": f"快捷指令 · {name}"})
+    return "making"
+
+
+@app.get("/shortcut/remote")
+def shortcut_remote():
+    """This account's shortcut for outside (public address + key); while the Mac is still making it: 202."""
+    if not g.user:
+        return jsonify(error="先登录"), 403
+    state = remote_shortcut_state(g.user)
+    if state != "ready":
+        return jsonify(state=state), 202 if state == "making" else 503
+    return send_file(remote_shortcut(g.user)[0], as_attachment=True, download_name="发送到拾光（外网）.shortcut")
 
 
 ADD_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
@@ -1632,4 +1679,4 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, books, channels, core, library, llm, notes, pipeline, search, weekly  # noqa: E402
+from . import ask, board, books, channels, core, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
