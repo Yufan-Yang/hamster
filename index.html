@@ -3190,12 +3190,35 @@ async function openAccount() {
     <p style="color:var(--muted);margin:0 0 12px;font-size:13px">已登录这个账号的设备（${acc.devices.length} 台）。在其他手机、电脑上登录同一账号即可加入；点设备只看它添加的内容。</p>
     <div class="devs">${rows || '<div class="sub">还没有设备</div>'}</div>
     <button class="btn plain wide" style="margin-top:14px" onclick="logout()">退出登录</button>
+    ${state.external ? `<p class="hint">改密码要在家里的网络。</p>` : `<button class="btn plain wide" style="margin-top:8px" id="pwBtn" onclick="openPwForm()">修改密码</button>
+    <form id="pwForm" hidden novalidate style="margin-top:8px">
+      <label class="field"><input type="password" id="pwOld" placeholder="原密码" autocomplete="current-password"></label>
+      <label class="field"><input type="password" id="pwNew" placeholder="新密码（至少 8 位）" autocomplete="new-password"></label>
+      <label class="field"><input type="password" id="pwNew2" placeholder="再输一次新密码" autocomplete="new-password"></label>
+      <div class="form-err" id="pwErr" hidden></div>
+      <button class="btn wide">保存新密码</button>
+    </form>`}
     ${acc.shortcut_key ? `<div class="psec" style="margin-top:18px">快捷指令密钥</div>
     <p class="hint" style="margin-top:0">「发送到拾光（外网）」快捷指令和安卓外网版用它认出你的账号（iPhone 版已经带上，不用手填）。别发给别人；手机丢了就换一个，旧密钥立刻失效，外网版快捷指令要重新安装。</p>
     <code class="copy block" id="shortcutKey" onclick="copyText(this)">${esc(acc.shortcut_key)}</code>
     <button class="btn plain" style="margin-top:8px" onclick="newShortcutKey()">换一个</button>` : ""}
     ${shareTips()}`;
   $("#accountSheet").hidden = false;
+}
+function openPwForm() {
+  const f = $("#pwForm"), err = t => { $("#pwErr").textContent = t || ""; $("#pwErr").hidden = !t; };
+  f.hidden = false; $("#pwBtn").hidden = true; $("#pwOld").focus();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const old = $("#pwOld").value, pw = $("#pwNew").value;
+    if (pw.length < 8) { err("新密码至少 8 位"); $("#pwNew").focus(); return; }
+    if (pw !== $("#pwNew2").value) { err("两次输入的新密码不一样"); $("#pwNew2").focus(); return; }
+    const r = await fetch("/api/password", {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify({old, new: pw})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { err(j.error || "没改成"); return; }
+    f.hidden = true; $("#pwBtn").hidden = false; f.reset(); err(""); toast("密码已修改");
+  };
 }
 async function newShortcutKey() {
   if (!confirm("换成新密钥？用旧密钥的快捷指令都要重新安装。")) return;

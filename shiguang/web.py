@@ -28,7 +28,7 @@ from flask import session
 from pathlib import Path
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
-from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, q, safe_name, secret_key)
+from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
 
 
 DEVICE_COOKIE = "grabber_device"
@@ -37,9 +37,15 @@ _seen_cache = {}
 
 
 def ensure_admin():
-    if ADMIN_PASSWORD:
+    """The admin account gets GRABBER_PASSWORD when it's made and whenever that setting changes; a password changed
+    on the page stays until then."""
+    if not ADMIN_PASSWORD:
+        return
+    mark = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
+    if kv_get("admin_env_pw") != mark or not q("SELECT 1 FROM users WHERE name='admin'", one=True):
         q("INSERT INTO users (name, pw, admin, created) VALUES ('admin', ?, 1, ?) "
           "ON CONFLICT(name) DO UPDATE SET pw=excluded.pw, admin=1", (generate_password_hash(ADMIN_PASSWORD), time.time()))
+        kv_set("admin_env_pw", mark)
 
 
 def device_label(ua):
@@ -76,6 +82,10 @@ def shortcut_user(key):
         return None
     row = q("SELECT name FROM users WHERE shortcut_key=?", (key,), one=True)
     return row["name"] if row else None
+
+
+def is_admin(name):
+    return bool((q("SELECT admin FROM users WHERE name=?", (name,), one=True) or {"admin": 0})["admin"])
 
 
 def shortcut_key(name, new=False):
@@ -144,6 +154,9 @@ def identify():
         session.clear()
         g.user = None
     g.admin = bool(g.user and q("SELECT admin FROM users WHERE name=?", (g.user,), one=True)["admin"])
+    if g.admin and g.external:  # the admin sees everyone's things: only from home
+        session.clear()
+        g.user, g.admin = None, False
     g.owner = f"user:{g.user}" if g.user else g.device
     if request.path == "/api/add" and not request.cookies:  # the iOS / Android shortcut
         body = request.get_json(silent=True) or {}
@@ -157,6 +170,8 @@ def identify():
             if locked_out(client_ip()):
                 return Response("尝试次数太多，请 15 分钟后再试", mimetype="text/plain", status=429)
             user = shortcut_user(key)
+            if user and g.external and is_admin(user):
+                return Response("管理员账号只能在家里用", mimetype="text/plain", status=403)
             if not user:
                 note_failure(client_ip())
                 return Response("快捷指令密钥不对：在拾光的账号页里复制新的密钥，重新安装快捷指令", mimetype="text/plain", status=403)
@@ -335,6 +350,8 @@ def login():
     if locked_out(ip):
         return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
     name, pw = credentials()
+    if g.external and is_admin(name):  # (refused before the password is checked: no guessing it from outside)
+        return jsonify(error="管理员账号只能在家里的网络登录"), 403
     if account_locked(name):
         return jsonify(error="这个账号密码错太多次，请 15 分钟后再试（在家里的网络可以直接登录）"), 429
     row = q("SELECT pw FROM users WHERE name=?", (name,), one=True)
@@ -423,6 +440,26 @@ def remove_device(device_id):
         q("UPDATE devices SET user=NULL WHERE id=? AND user=?", (i, g.user))
     if g.device in ids:
         session.clear()
+    return jsonify(ok=True)
+
+
+@app.post("/api/password")
+def change_password():
+    """Change the logged-in account's password: only from home (from outside a stolen login could lock the owner out)."""
+    if not g.user:
+        return jsonify(error="先登录"), 403
+    if g.external:
+        return jsonify(error="只能在家里的网络改密码"), 403
+    body = request.get_json(silent=True) or {}
+    old, new = str(body.get("old", "")), str(body.get("new", ""))
+    if locked_out(client_ip()):
+        return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
+    if not check_password_hash(q("SELECT pw FROM users WHERE name=?", (g.user,), one=True)["pw"], old):
+        note_failure(client_ip())
+        return jsonify(error="原密码不对"), 403
+    if len(new) < 8:
+        return jsonify(error="新密码至少 8 位"), 400
+    q("UPDATE users SET pw=? WHERE name=?", (generate_password_hash(new), g.user))
     return jsonify(ok=True)
 
 

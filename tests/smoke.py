@@ -367,6 +367,33 @@ def web_hardening():
 
 check("/add escapes and asks first; no internal links; no cross-site posts", web_hardening)
 
+
+def admin_home_only_and_password():
+    from werkzeug.security import generate_password_hash
+    ext = {"SERVER_PORT": str(shiguang.core.EXTERNAL_PORT)}
+    out = app.test_client()
+    r = out.post("/api/login", json={"name": "admin", "password": "whatever"}, environ_overrides=ext)
+    assert r.status_code == 403 and "家里" in r.get_json()["error"], r.data
+    adm = app.test_client()  # an admin login made at home, then used through the tunnel: not logged in there
+    G.q("INSERT OR REPLACE INTO devices (id, user, ip, seen, label) VALUES (?,?,?,?,?)", ("e" * 32, "admin", "127.0.0.1", time.time(), "t"))
+    adm.set_cookie(G.DEVICE_COOKIE, "e" * 32)
+    with adm.session_transaction() as s:
+        s["user"] = "admin"
+    assert adm.get("/api/jobs", environ_overrides=ext).get_json()["login_required"]
+    with adm.session_transaction() as s:  # (a browser keeps a separate cookie per address; this client has one jar)
+        s["user"] = "admin"
+    assert adm.get("/api/jobs").get_json()["admin"]
+    G.q("UPDATE users SET pw=? WHERE name=?", (generate_password_hash("old-password"), user))
+    assert c.post("/api/password", json={"old": "wrong", "new": "new-password"}).status_code == 403
+    assert c.post("/api/password", json={"old": "old-password", "new": "short"}).status_code == 400
+    assert c.post("/api/password", json={"old": "old-password", "new": "new-password"}, environ_overrides=ext).status_code == 403
+    assert c.post("/api/password", json={"old": "old-password", "new": "new-password"}).status_code == 200
+    assert app.test_client().post("/api/login", json={"name": user, "password": "new-password"}).status_code == 200
+    shiguang.web.login_failures.clear()
+
+
+check("admin only from home; password changed from home only", admin_home_only_and_password)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)
