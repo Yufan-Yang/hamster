@@ -368,6 +368,170 @@
   @media (hover: none) { #lbPrev, #lbNext { display: none; } }
   #lightbox:not([hidden]) { animation: fadeIn .15s steps(3); }
 
+  /* 书架: e-books */
+  .shelf { max-width: 1200px; }
+  .bkbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 0 0 12px; }
+  .bkbar .subadd { flex: 1; min-width: 240px; }
+  .bktabs { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 18px; }
+  .bktabs button.t { border: 2px solid var(--ink); background: var(--panel); height: 28px; padding: 0 8px; }
+  .bktabs button.t.on { background: var(--ink); color: var(--bg); }
+  .bktabs select { font: inherit; height: 28px; border: 2px solid var(--ink); background: var(--panel); color: var(--ink); }
+  .bktabs .grow { flex: 1; }
+  .bkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 26px 18px; }
+  .book { cursor: pointer; position: relative; min-width: 0; }
+  .bcover { position: relative; aspect-ratio: 3 / 4; border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink);
+            background: var(--soft); overflow: hidden; transition: transform .08s, box-shadow .08s; }
+  .book:hover .bcover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
+  .book:active .bcover { transform: translate(4px, 4px); box-shadow: none; }
+  .bcover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* a book without a cover gets a printed one: its title on a coloured board */
+  .bgen { position: absolute; inset: 0; padding: 12px 10px 10px; display: flex; flex-direction: column; gap: 6px; color: #1d1b26;
+          background-image: repeating-linear-gradient(90deg, rgba(0,0,0,.06) 0 2px, transparent 2px 10px); }
+  .bgen::before { content: ""; position: absolute; left: 8px; top: 0; bottom: 0; border-left: 2px solid rgba(0,0,0,.25); }
+  .bgen b { font-size: 24px; line-height: 1.25; font-weight: normal; overflow-wrap: anywhere; padding-left: 8px;
+            display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+  .bgen i { font-style: normal; padding-left: 8px; opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bgen .fmt { margin-top: auto; align-self: flex-end; border: 2px solid currentColor; padding: 0 4px; text-transform: uppercase; }
+  .bgen.c0 { background-color: var(--yellow); } .bgen.c1 { background-color: #ffb3c7; } .bgen.c2 { background-color: #a9d3ff; }
+  .bgen.c3 { background-color: #b9f0c4; } .bgen.c4 { background-color: #e9e2cd; } .bgen.c5 { background-color: #ffd29e; }
+  .bmore { position: absolute; top: 6px; right: 6px; z-index: 2; height: 24px; min-width: 30px; border: 2px solid var(--ink);
+           background: var(--panel); color: var(--ink); padding: 0 4px; line-height: 1; }
+  .badge.cached { left: 0; right: auto; bottom: auto; top: 0; background: var(--green); color: #fff; }
+  .badge.cached.part { background: var(--muted); }
+  .book .meta { -webkit-line-clamp: 2; }
+  .bhits { margin-top: 4px; }
+  .bhits button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 2px 0; color: var(--muted);
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bhits button:hover { color: var(--ink); }
+  .bkinfo dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 10px 0; color: var(--muted); }
+  .bkinfo dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+  .bkinfo .acts { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 10px 0; }
+  .seg { display: inline-flex; border: 2px solid var(--ink); }
+  .seg button { border: 0; border-left: 2px solid var(--ink); background: var(--panel); padding: 0 10px; height: 30px; }
+  .seg button:first-child { border-left: 0; }
+  .seg button.on { background: var(--ink); color: var(--bg); }
+  .upbar { height: 12px; border: 2px solid var(--ink); background: var(--panel); margin: 8px 0; }
+  .upbar > div { height: 100%; background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 8px); }
+
+  /* reader: one page at a time (columns, swiped / tapped) or scrolling; its own paper colour and fonts */
+  #reader { --rd-bg: #f5f0e1; --rd-ink: #1d1b26; --rd-muted: #8f8b9c; --rd-mx: 22px;
+            --rd-font: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "Noto Serif SC", serif;
+            --rd-size: 19px; --rd-lh: 1.8; position: fixed; inset: 0; z-index: 16; background: var(--rd-bg); color: var(--rd-ink);
+            overflow: hidden; -webkit-user-select: text; user-select: text; }
+  #reader.night { --rd-bg: #1d1b26; --rd-ink: #cfc8b4; --rd-muted: #6f6b7c; }
+  #reader.f-sans { --rd-font: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; }
+  #reader.f-pixel { --rd-font: "Pixel", "PingFang SC", monospace; }
+  #reader:not([hidden]) { animation: slideIn .26s steps(6); }
+  #reader.closing { animation: slideOut .17s steps(4) forwards; }
+  /* text no wider than ~38 Chinese characters a line on big screens (the side margins grow instead) */
+  #reader { --rd-side: max(var(--rd-mx), calc((100vw - 780px) / 2)); }
+  .rd-view { position: absolute; inset: 0; padding: calc(env(safe-area-inset-top) + 34px) var(--rd-side) calc(env(safe-area-inset-bottom) + 30px); }
+  .rd-page { position: relative; width: 100%; height: 100%; overflow: hidden; touch-action: none; }
+  #reader.scroll .rd-page { overflow-y: auto; touch-action: pan-y pinch-zoom; overscroll-behavior: contain; }
+  .rd-flow { height: 100%; column-fill: auto; font-family: var(--rd-font); font-size: var(--rd-size); line-height: var(--rd-lh);
+             text-align: justify; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; overflow-wrap: break-word;
+             will-change: transform; color: var(--rd-ink); }
+  #reader.scroll .rd-flow { height: auto; columns: auto !important; transform: none !important; padding-bottom: 40px; }
+  .rd-flow.anim { transition: transform .16s steps(4); }
+  /* books in Latin script: a Latin face first, so quotes and apostrophes aren't full-width CJK ones */
+  .rd-flow:not(:lang(zh)) { font-family: "Iowan Old Style", Charter, Georgia, "Noto Serif", "DejaVu Serif", serif; }
+  #reader.f-sans .rd-flow:not(:lang(zh)) { font-family: -apple-system, "Helvetica Neue", "Noto Sans", Arial, sans-serif; }
+  #reader.f-pixel .rd-flow:not(:lang(zh)) { font-family: var(--rd-font); }
+  .rd-flow p { margin: 0 0 .5em; text-indent: 2em; }
+  .rd-flow:not(:lang(zh)) p { text-indent: 0; margin-bottom: .8em; }
+  .rd-flow h1, .rd-flow h2, .rd-flow h3, .rd-flow h4, .rd-flow h5, .rd-flow h6 { text-align: center; text-indent: 0; line-height: 1.4;
+             margin: .4em 0 1em; font-weight: bold; break-after: avoid; }
+  .rd-flow h1 { font-size: 1.45em; } .rd-flow h2 { font-size: 1.3em; } .rd-flow h3 { font-size: 1.15em; } .rd-flow h4 { font-size: 1.05em; }
+  .rd-flow img { display: block; max-width: 100%; max-height: var(--rd-imgh, 80vh); height: auto; margin: .4em auto; object-fit: contain;
+                 break-inside: avoid; }
+  .rd-flow p:has(> img) { text-indent: 0; }
+  .rd-flow sup img, .rd-flow a img { display: inline; height: 1em; width: auto; margin: 0; vertical-align: super; }
+  .rd-flow .c { text-align: center; text-indent: 0; } .rd-flow .r { text-align: right; text-indent: 0; }
+  .rd-flow blockquote { margin: .5em 0 .5em 1.5em; } .rd-flow ul, .rd-flow ol { padding-left: 1.6em; }
+  .rd-flow a[href], .rd-flow a[data-go] { color: var(--blue); }
+  .rd-flow sup, .rd-flow sub { line-height: 0; }
+  .rd-flow table { border-collapse: collapse; max-width: 100%; margin: .5em 0; font-size: .9em; }
+  .rd-flow td, .rd-flow th { border: 1px solid var(--rd-muted); padding: 2px 6px; }
+  .rd-flow pre { white-space: pre-wrap; font-size: .85em; }
+  .rd-flow hr { border: 0; border-top: 1px solid var(--rd-muted); margin: 1em 20%; }
+  .rd-flow mark.rd-hit { background: var(--yellow); color: #1d1b26; }
+  .rd-flow .rd-end { display: block; height: 1px; }
+  .rd-next { display: block; margin: 24px auto; }
+  /* running head and foot: chapter, page, how far */
+  .rd-run { position: absolute; left: var(--rd-side); right: var(--rd-side); display: flex; justify-content: space-between; gap: 12px;
+            color: var(--rd-muted); pointer-events: none; white-space: nowrap; font-size: 12px; line-height: 20px; }
+  .rd-run span { overflow: hidden; text-overflow: ellipsis; }
+  .rd-run.head { top: calc(env(safe-area-inset-top) + 8px); }
+  .rd-run.foot { bottom: calc(env(safe-area-inset-bottom) + 6px); }
+  .rd-load { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--rd-muted); padding: 20px; }
+  /* controls: shown by tapping the middle of the page */
+  .rd-top, .rd-bot { position: absolute; left: 0; right: 0; z-index: 3; background: var(--panel); color: var(--ink); display: none; }
+  #reader.ui .rd-top, #reader.ui .rd-bot { display: block; animation: fadeIn .12s steps(2); }
+  .rd-top { top: 0; border-bottom: 2px solid var(--ink); padding: max(8px, env(safe-area-inset-top)) 12px 8px; }
+  .rd-bot { bottom: 0; border-top: 2px solid var(--ink); padding: 8px 12px max(10px, env(safe-area-inset-bottom)); }
+  .rd-row { display: flex; align-items: center; gap: 8px; }
+  .rd-row + .rd-row { margin-top: 8px; }
+  .rd-row b { flex: 1; min-width: 0; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rd-btn { height: 34px; min-width: 34px; padding: 0 10px; border: 2px solid var(--ink); background: var(--panel); color: var(--ink);
+            box-shadow: 3px 3px 0 var(--ink); white-space: nowrap; }
+  .rd-btn:active { transform: translate(3px, 3px); box-shadow: none; }
+  .rd-btn.on { background: var(--yellow); color: #1d1b26; }
+  .rd-row input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 30px; }
+  .rd-where { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* drawer: contents, bookmarks, search */
+  .rd-panel { position: absolute; top: 0; bottom: 0; left: 0; width: min(400px, 88vw); z-index: 5; background: var(--panel); color: var(--ink);
+              border-right: 2px solid var(--ink); box-shadow: 6px 0 0 var(--ink); display: flex; flex-direction: column;
+              padding-top: env(safe-area-inset-top); }
+  .rd-panel:not([hidden]) { animation: fadeIn .15s steps(3); }
+  .rd-tabs { display: flex; border-bottom: 2px solid var(--ink); }
+  .rd-tabs button { flex: 1; height: 40px; border: 0; border-right: 2px solid var(--ink); background: var(--panel); }
+  .rd-tabs button:last-child { border-right: 0; }
+  .rd-tabs button.on { background: var(--ink); color: var(--bg); }
+  .rd-list { flex: 1; overflow-y: auto; padding: 6px 0 max(12px, env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
+  .rd-list button.it { display: block; width: 100%; text-align: left; border: 0; border-bottom: 2px dashed var(--soft); background: none;
+                       padding: 8px 14px; overflow-wrap: anywhere; }
+  .rd-list button.it:hover { background: var(--bg); }
+  .rd-list button.it.cur { background: var(--yellow); color: #1d1b26; }
+  .rd-list .lv1 { padding-left: 30px !important; } .rd-list .lv2 { padding-left: 46px !important; } .rd-list .lv3 { padding-left: 62px !important; }
+  .rd-list .at { float: right; color: var(--muted); margin-left: 8px; font-variant-numeric: tabular-nums; }
+  .rd-list form { display: flex; gap: 8px; padding: 8px 14px; }
+  .rd-list form input { flex: 1; min-width: 0; height: 34px; border: 2px solid var(--ink); background: var(--bg); color: var(--ink); padding: 0 8px; font: inherit; outline: none; }
+  .rd-list .hint { padding: 0 14px; }
+  .rd-shade { position: absolute; inset: 0; z-index: 4; background: rgba(29,27,38,.35); }
+  /* settings */
+  .rd-set { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--panel); color: var(--ink); border-top: 2px solid var(--ink);
+            padding: 14px 16px max(16px, env(safe-area-inset-bottom)); }
+  .rd-set:not([hidden]) { animation: popIn .2s steps(5); }
+  .rd-set .rd-row > span:first-child { width: 4.5em; color: var(--muted); flex: none; }
+  .rd-set .seg button { height: 34px; }
+  /* a footnote opened in place */
+  .rd-pop { position: absolute; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 40px); z-index: 6; max-height: 50%;
+            overflow-y: auto; background: var(--panel); color: var(--ink); border: 2px solid var(--ink); box-shadow: 6px 6px 0 var(--ink);
+            padding: 12px 14px; font-family: var(--rd-font); font-size: calc(var(--rd-size) * .85); line-height: 1.7; }
+  .rd-pop p { margin: 0 0 .4em; } .rd-pop img { max-width: 100%; }
+  .rd-back { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 36px); z-index: 3; }
+  /* PDF: the pages one under another, drawn when they come near */
+  .rd-pdf { position: absolute; inset: 0; overflow: auto; background: var(--soft); padding: calc(env(safe-area-inset-top) + 12px) 0 calc(env(safe-area-inset-bottom) + 40px);
+            -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  #reader.night .rd-pdf { background: #2b2936; }
+  .pdfpage { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 4px 4px 0 var(--ink); }
+  .pdfpage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .pdfpage .pn { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #8f8b9c; }
+  #reader.night .pdfpage canvas { filter: invert(.88) hue-rotate(180deg); }
+  /* 每周总结 */
+  .wkbars { display: flex; align-items: flex-end; gap: 6px; height: 90px; margin: 10px 0 2px; }
+  .wkbars > div { flex: 1; display: flex; flex-direction: column-reverse; height: 100%; position: relative; }
+  .wkbars i { display: block; width: 100%; }
+  .wkbars .r { background: var(--accent); } .wkbars .w { background: var(--blue); }
+  .wkbars .n { position: absolute; top: -2px; left: 0; right: 0; text-align: center; color: var(--green); font-style: normal; }
+  .wkdays { display: flex; gap: 6px; color: var(--faint); } .wkdays span { flex: 1; text-align: center; }
+  .wkrow { display: flex; gap: 10px; align-items: baseline; padding: 4px 0; border-bottom: 2px dashed var(--soft); }
+  .wkrow > :first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .wkrow .sub { white-space: nowrap; }
+  .wkrow a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+  .wklegend { color: var(--muted); }
+  .wklegend i { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 10px; }
+
   @media (max-width: 640px) {
     header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
     .logo span { display: none; }
@@ -385,7 +549,11 @@
     .sheet { width: 100%; border-width: 2px 0 0; box-shadow: none; padding: 18px 14px max(18px, env(safe-area-inset-bottom));
              max-height: 92vh; overflow-y: auto; }
     /* 16px+ stops iOS Safari zooming into fields; 24px keeps the pixel font on its grid */
-    .sheet input[type=text], .sheet input[type=password], .search input, .compose textarea, .note textarea, input.when { font-size: 16px; }
+    .sheet input[type=text], .sheet input[type=password], .search input, .compose textarea, .note textarea, input.when,
+    .subadd input, .rd-list form input { font-size: 16px; }
+    .bkgrid { grid-template-columns: repeat(3, 1fr); gap: 18px 10px; }
+    .bgen b { font-size: 12px; -webkit-line-clamp: 6; }
+    #reader { --rd-mx: 16px; }
     .sheet input[type=text], .sheet input[type=password] { height: 46px; }
     .btn.wide { height: 46px; }
     .eye { top: 8px; }
@@ -437,10 +605,11 @@
 
 <div class="chips" id="chips"></div>
 <main>
-  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
   <div class="understood" id="understood" hidden></div>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
+  <div id="contRead" hidden><div class="contitle">继续阅读</div><div class="controw" id="controwRead"></div></div>
   <div class="grid" id="grid"></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
   <div class="subs" id="subs" hidden></div>
@@ -460,6 +629,20 @@
     </div>
     <div id="noteList"></div>
     <button class="btn plain" id="noteMore" hidden onclick="loadNotes(true)">更早的</button>
+  </div>
+  <div class="shelf" id="books" hidden>
+    <div class="bkbar">
+      <button class="btn" onclick="$('#bookFile').click()">＋ 导入电子书</button>
+      <form class="subadd" onsubmit="addBookLink(event)">
+        <input type="text" id="bookUrl" placeholder="或粘贴电子书的下载链接" autocomplete="off">
+        <button class="btn plain">下载</button>
+      </form>
+    </div>
+    <div id="bookUp"></div>
+    <div class="bktabs" id="bookTabs"></div>
+    <div class="bkgrid" id="bookGrid"></div>
+    <div class="empty" id="bookEmpty" hidden></div>
+    <input type="file" id="bookFile" multiple hidden accept=".epub,.pdf,.txt,.mobi,.azw3,.azw,application/epub+zip,application/pdf,text/plain">
   </div>
   <div class="empty" id="empty">正在加载…</div>
 </main>
@@ -541,6 +724,15 @@
   </div>
 </div>
 
+<div class="sheet-bg" id="weeklySheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet wide-sheet" id="weeklyBody"></div>
+</div>
+
+<div class="sheet-bg" id="bookSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet bkinfo" id="bookSheetBody"></div>
+</div>
+<input type="file" id="bookReplace" hidden accept=".epub,.pdf,.txt,.mobi,.azw3,.azw">
+
 <div class="sheet-bg" id="usageSheet" hidden onclick="if (event.target === this) hide(this)">
   <div class="sheet wide-sheet" id="usageBody"></div>
 </div>
@@ -553,6 +745,46 @@
 <div id="watch" hidden>
   <div class="wbar"><button onclick="closeWatch()" aria-label="返回">◀ 返回</button><b>拾光</b></div>
   <div class="wrap" id="watchBody"></div>
+</div>
+
+<!-- reader -->
+<div id="reader" hidden>
+  <div class="rd-run head"><span id="rdHead"></span><span id="rdHeadR"></span></div>
+  <div class="rd-view" id="rdView"><div class="rd-page" id="rdPage"><div class="rd-flow" id="rdFlow"></div></div></div>
+  <div class="rd-pdf" id="rdPdf" hidden></div>
+  <div class="rd-run foot"><span id="rdFoot"></span><span id="rdFootR"></span></div>
+  <div class="rd-load" id="rdLoad" hidden></div>
+  <button class="rd-btn rd-back" id="rdBack" hidden onclick="rdGoBack()">↩ 回到刚才读的地方</button>
+  <div class="rd-top">
+    <div class="rd-row">
+      <button class="rd-btn" onclick="closeReader()" aria-label="返回">◀</button>
+      <b id="rdTitle"></b>
+      <button class="rd-btn" id="rdMarkBtn" onclick="rdToggleMark()" title="书签">书签</button>
+      <button class="rd-btn" onclick="rdOpenPanel('search')" title="书内搜索">搜</button>
+    </div>
+  </div>
+  <div class="rd-bot">
+    <div class="rd-row"><span class="rd-where" id="rdWhere"></span><b id="rdChap"></b></div>
+    <div class="rd-row">
+      <button class="rd-btn" id="rdPrevCh" onclick="rdChapter(-1)" title="上一章">‹</button>
+      <input type="range" id="rdSlider" min="0" max="1000" value="0">
+      <button class="rd-btn" id="rdNextCh" onclick="rdChapter(1)" title="下一章">›</button>
+    </div>
+    <div class="rd-row">
+      <button class="rd-btn" onclick="rdOpenPanel('toc')">目录</button>
+      <button class="rd-btn" id="rdZoomOut" onclick="rdZoom(-1)" hidden>－</button>
+      <button class="rd-btn" id="rdZoomIn" onclick="rdZoom(1)" hidden>＋</button>
+      <span style="flex:1"></span>
+      <button class="rd-btn" onclick="rdOpenSettings()">Aa 设置</button>
+    </div>
+  </div>
+  <div class="rd-shade" id="rdShade" hidden onclick="rdClosePanels()"></div>
+  <div class="rd-panel" id="rdPanel" hidden>
+    <div class="rd-tabs"><button data-t="toc" onclick="rdOpenPanel('toc')">目录</button><button data-t="marks" onclick="rdOpenPanel('marks')">书签</button><button data-t="search" onclick="rdOpenPanel('search')">搜索</button></div>
+    <div class="rd-list" id="rdList"></div>
+  </div>
+  <div class="rd-set" id="rdSet" hidden></div>
+  <div class="rd-pop" id="rdPop" hidden></div>
 </div>
 
 <div id="toast" hidden></div>
@@ -635,7 +867,7 @@ function renderChips() {
   if (!state.cats) state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
   const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
   const failed = state.jobs.filter(j => j.status === "failed").length;
-  const list = [["all", "全部"], ["notes", `随记${state.notes ? " " + state.notes : ""}`]];
+  const list = [["all", "全部"], ["notes", `随记${state.notes ? " " + state.notes : ""}`], ["books", `书架${state.books ? " " + state.books : ""}`]];
   if (deviceFilter) list.push(["device", `设备：${deviceFilter} ✕`]);
   list.push(["subs", `追更${(state.subs || []).length ? " " + state.subs.length : ""}`]);
   const sf = chip.startsWith("sub:") && (state.subs || []).find(s => "sub:" + s.id === chip);
@@ -654,9 +886,9 @@ function setChip(k) {
   if (k === "all") deviceFilter = null;
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
   const isCat = x => !!(FOLDERS[x] || LIBS[x]);
-  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || isCat(k) || isCat(chip);
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || isCat(k) || isCat(chip);
   chip = k; render();
-  $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : "搜索标题、简介、标签、字幕…";
+  $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : k === "books" ? "搜索书名、作者、书里的文字…" : "搜索标题、简介、标签、字幕…";
   if (refetch) { lastBody = ""; refresh(); }
   if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
 }
@@ -718,16 +950,18 @@ function openNote(id) { focusNote = id; setChip("notes"); window.scrollTo(0, 0);
 
 function render() {
   renderChips();
-  const notes = chip === "notes", list = chip === "subs" || notes;
+  const notes = chip === "notes", shelf = chip === "books", list = chip === "subs" || notes || shelf;
   $("#subs").hidden = chip !== "subs";
   $("#notes").hidden = !notes;
+  $("#books").hidden = !shelf;
   $("#grid").hidden = list;
-  $("#manageBtn").hidden = notes;
+  $("#manageBtn").hidden = notes || shelf;
   if (chip === "subs") renderSubs();
   if (notes) renderNotes();
+  if (shelf) renderBooks();
   // searching from 全部 mixes matching 随记 in with the videos, newest first; other chips just point to them
   const hits = state.note_hits || [], mixNotes = chip === "all" && !!query;
-  $("#noteHits").hidden = notes || mixNotes || !query || !hits.length;
+  $("#noteHits").hidden = notes || shelf || mixNotes || !query || !hits.length;
   $("#noteHits").textContent = `随记里也有 ${hits.length} 条匹配 →`;
   $("#understood").hidden = !(query && state.understood);
   $("#understood").innerHTML = state.understood ? `按 ${esc(state.understood)} 找${state.partial
@@ -745,11 +979,19 @@ function render() {
   $("#continue").hidden = !resume.length;
   const contHtml = resume.map(card).join("");
   if ($("#controw").dataset.html !== contHtml) { $("#controw").innerHTML = contHtml; $("#controw").dataset.html = contHtml; }
+  // 继续阅读: books you're in the middle of
+  const reading = chip === "all" && !query && !selecting ? state.reading || [] : [];
+  $("#contRead").hidden = !reading.length;
+  const readHtml = reading.map(b => `<div class="card" onclick="openReader(${b.id})"><div class="cover">${b.cover ? `<img src="/bookcover/${b.id}?v=${b.version}" alt="" loading="lazy" style="object-fit:contain;background:var(--soft)">` : bookCoverHtml(b)}
+      <div class="watched"><div style="width:${Math.min(100, b.read.pct * 100).toFixed(1)}%"></div></div></div>
+      <div class="info"><div class="title">${esc(b.title)}</div><div class="meta">读到 ${pctStr(b.read.pct)} · ${esc(ago(b.read.at))}</div></div></div>`).join("");
+  if ($("#controwRead").dataset.html !== readHtml) { $("#controwRead").innerHTML = readHtml; $("#controwRead").dataset.html = readHtml; }
   // Patch only the cards that changed, so covers don't reload and the page doesn't flash
-  const items = mixNotes ? [...jobs.map(j => ({j, t: j.created})), ...hits.map(n => ({n, t: n.created}))].sort((a, b) => b.t - a.t)
+  const items = mixNotes ? [...(state.book_hits || []).map(b => ({b})),
+                           ...[...jobs.map(j => ({j, t: j.created})), ...hits.map(n => ({n, t: n.created}))].sort((a, b) => b.t - a.t)]
                          : jobs.map(j => ({j}));
-  const grid = $("#grid"), htmls = items.map(x => x.j ? card(x.j) : noteGridCard(x.n)),
-        ids = items.map(x => x.j ? x.j.id : "n" + x.n.id).join(",");
+  const grid = $("#grid"), htmls = items.map(x => x.j ? card(x.j) : x.b ? bookGridCard(x.b) : noteGridCard(x.n)),
+        ids = items.map(x => x.j ? x.j.id : x.b ? "b" + x.b.id : "n" + x.n.id).join(",");
   if (grid.dataset.ids !== ids) {
     grid.innerHTML = htmls.join("");
     [...grid.children].forEach((el, i) => { el.classList.add("enter"); el.style.setProperty("--i", Math.min(i, 12)); });
@@ -761,12 +1003,16 @@ function render() {
   updateSelbar();
   $("#more").hidden = !state.more || list || !!query || !!(FOLDERS[chip] || LIBS[chip]);
   $("#empty").hidden = items.length > 0 || list;
+  if (shelf) return renderAvatar();
   $("#empty").textContent = query ? "没有找到匹配的内容" : chip.startsWith("sub:") ? "还没有这个 UP 主的视频，列表获取后会自动开始下载"
     : "还没有内容，点右上角「＋ 添加」，或者直接把链接拖进来";
   $("#scope").textContent = notes ? (state.user ? `${state.user} 的随记 · 只有你自己看得到` : "这台设备的随记 · 只有你自己看得到，登录后各设备合并")
     : state.admin ? "所有人的内容（管理员）"
     : state.user ? `${state.user} 的内容（登录过这个账号的所有设备）`
     : "只显示这台设备添加的内容 · 登录后，同一账号在不同设备上的内容会合并";
+  renderAvatar();
+}
+function renderAvatar() {
   $("#privState").innerHTML = privacyToken && (state.privacy || {}).revealed
     ? `<span class="pv on">正在显示隐藏内容</span> <button class="link" onclick="lockPrivacy()">隐藏</button>` : "";
   const av = $("#avatar");
@@ -778,12 +1024,13 @@ function render() {
 async function refresh() {
   try {
     const params = new URLSearchParams();
-    if (query) params.set("q", query);
+    if (query && chip !== "books") params.set("q", query);  // on 书架 the search is in the books (loadBooks)
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
     if (FOLDERS[chip] || LIBS[chip]) params.set("cat", chip);  // the whole category, not a page of the newest
     if (query && smartSearch && !exactSearch) params.set("nl", "1");
     if (pageLimit > 100) params.set("limit", pageLimit);
     if (chip === "notes") loadNotes();
+    if (chip === "books") loadBooks();
     const body = await (await fetch("/api/jobs" + (params.size ? "?" + params : ""))).text();
     if (body !== lastBody) {  // nothing changed: leave the page alone
       lastBody = body;
@@ -792,9 +1039,18 @@ async function refresh() {
       // From outside the home network everything needs an account: go straight to the login form
       if (state.login_required && $("#accountSheet").hidden) openAccount();
     }
-  } catch (e) { toast("连不上 Pi"); }
+  } catch (e) {
+    // no Pi: if this device has books cached, the shelf still works
+    if (!state.jobs.length && chip !== "books" && !wentOffline) {
+      wentOffline = true;
+      await refreshCacheIndex();
+      if (cacheIndex.size) { setChip("books"); toast("连不上 Pi：显示这台设备上缓存的书"); schedule(); return; }
+    }
+    if (!(chip === "books" && booksState.offline)) toast("连不上 Pi");
+  }
   schedule();
 }
+let wentOffline = false;
 // Finished items come 100 at a time (unfinished ones are always all there); 加载更多 asks for the next 100
 let pageLimit = 100;
 function loadMore() { pageLimit += 100; $("#more").disabled = true; refresh().finally(() => $("#more").disabled = false); }
@@ -805,7 +1061,7 @@ function schedule() {
   clearTimeout(pollTimer);
   if (document.hidden) return;
   const busy = state.jobs.some(j => ACTIVE.includes(j.status)) || (state.subs || []).some(s => s.pending)
-    || (chip === "notes" && notesState.notes.some(n => n.pending));
+    || (chip === "notes" && notesState.notes.some(n => n.pending)) || (chip === "books" && booksState.books.some(b => b.status === "importing"));
   pollTimer = setTimeout(refresh, busy ? 5000 : 60000);
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
@@ -1350,8 +1606,15 @@ function openWatch(id, part = 0, t = 0) {
     el.addEventListener("volumechange", () => {
       try { localStorage.setItem("playerVolume", JSON.stringify({volume: el.volume, muted: el.muted})); } catch (e) {}
     });
-    let last = 0;
-    el.addEventListener("timeupdate", () => { if (Date.now() - last > 10000) { last = Date.now(); saveWatch(); } });
+    let last = 0, lastT = null;
+    el.addEventListener("timeupdate", () => {
+      // time really spent watching (not seeking), for 每周总结
+      const t = el.currentTime;
+      if (lastT !== null && t > lastT && t - lastT < 3 && !el.paused) watchSecs += (t - lastT) / (el.playbackRate || 1);
+      lastT = t;
+      if (Date.now() - last > 10000) { last = Date.now(); saveWatch(); }
+    });
+    el.addEventListener("seeking", () => { lastT = null; });
     el.addEventListener("pause", () => saveWatch());
     el.addEventListener("ended", () => saveWatch(true));
   }
@@ -1387,12 +1650,14 @@ async function loadSimilar(id) {
     `<div><a href="#" onclick="openJob(${x.job}); return false">${esc(x.title)}</a><br><span class="sub">${how(x)}</span></div>`).join("")}</div>`;
 }
 // where playback is, for 继续观看 on every device (also sent when the page is left)
+let watchSecs = 0;
 function saveWatch(ended) {
   const el = $("#watchBody video, #watchBody audio");
   if (!el || !watching || !isFinite(el.duration) || (!ended && el.currentTime < 5)) return;
-  const pos = ended ? el.duration : el.currentTime;
+  const pos = ended ? el.duration : el.currentTime, secs = Math.round(watchSecs);
+  watchSecs -= secs;
   fetch(`/api/watch/${watching.id}`, {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-    body: JSON.stringify({part: watching.part, pos, dur: el.duration, ended: !!ended})}).catch(() => {});
+    body: JSON.stringify({part: watching.part, pos, dur: el.duration, ended: !!ended, secs})}).catch(() => {});
   const j = state.jobs.find(x => x.id === watching.id);
   if (j) j.watch = {part: watching.part, pos, dur: el.duration, at: Date.now() / 1000,
                     done: !!ended || !!(j.watch && j.watch.done) || pos > el.duration - 30};
@@ -1640,12 +1905,14 @@ async function send(body) {
   const j = await r.json();
   const dup = (j.duplicates || []).length, link = (j.linked || []).length, fresh = (j.ids || []).length - dup - link;
   const subsNew = (j.subs || []).filter(s => s.how === "new").length, subsDup = (j.subs || []).length - subsNew;
+  const shelfNew = (j.books || []).filter(b => b.how === "new").length, shelfDup = (j.books || []).length - shelfNew;
   toast(!r.ok ? (j.error === "No link found" ? "没找到链接" : j.error)
     : [subsNew ? `开始追更 ${subsNew} 个 UP 主，正在获取视频列表` : "", subsDup ? `${subsDup} 个 UP 主已经在追了` : "",
        fresh ? `已开始下载 ${fresh} 个` : "", link ? `${link} 个别人已经下过，直接加进来了` : "",
-       dup ? `${dup} 个已经在列表里了` : ""].filter(Boolean).join("，"));
+       dup ? `${dup} 个已经在列表里了` : "", shelfNew ? `${shelfNew} 本电子书开始下载到书架` : "",
+       shelfDup ? `${shelfDup} 本电子书已经在书架上了` : ""].filter(Boolean).join("，"));
   if (r.ok && dup && !fresh && j.ids.length === 1) { hide($("#addSheet")); await refresh(); openWatch(j.ids[0]); return; }
-  if (r.ok) { hide($("#addSheet")); chip = (j.subs || []).length && !(j.ids || []).length ? "subs" : "all"; }
+  if (r.ok) { hide($("#addSheet")); chip = (j.subs || []).length && !(j.ids || []).length ? "subs" : (j.books || []).length && !(j.ids || []).length ? "books" : "all"; }
   refresh();
 }
 function sendText(t) { const f = new FormData(); f.append("text", t); return send(f); }
@@ -1656,12 +1923,15 @@ $("#file").onchange = () => { for (const f of $("#file").files) sendFile(f); $("
 let dragDepth = 0;
 document.addEventListener("dragenter", e => {
   e.preventDefault(); dragDepth++;
-  $("#dropAll").textContent = chip === "notes" ? "松开就加到这条随记里" : "松开就开始下载"; $("#dropAll").hidden = false;
+  $("#dropAll").textContent = chip === "notes" ? "松开就加到这条随记里" : chip === "books" ? "松开就加到书架" : "松开就开始下载"; $("#dropAll").hidden = false;
 });
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("#dropAll").hidden = true; } });
 document.addEventListener("drop", e => {
   e.preventDefault(); dragDepth = 0; $("#dropAll").hidden = true;
+  const ebooks = [...e.dataTransfer.files].filter(f => BOOK_EXT.test(f.name));
+  if (ebooks.length && !(chip === "notes" && /\.txt$/i.test(ebooks[0].name))) { uploadBooks(ebooks); return; }  // e-books: onto the shelf
+  if (chip === "books" && e.dataTransfer.files.length) { uploadBooks(e.dataTransfer.files); return; }
   if (chip === "notes") {  // on 随记, dropped photos / videos / audio go into the note being written
     if (e.dataTransfer.files.length) addNoteFiles(e.dataTransfer.files);
     else { const t = e.dataTransfer.getData("text/plain"); if (t) $("#noteText").value += t; }
@@ -1677,6 +1947,1060 @@ document.addEventListener("paste", e => {
   if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
   const t = e.clipboardData.getData("text"); if (/https?:\/\/|magnet:/.test(t)) sendText(t);
 });
+
+/* ---------- 书架: e-books ---------- */
+const BOOK_EXT = /\.(epub|pdf|txt|mobi|azw3?)$/i;
+let booksState = {books: [], q: null, offline: false, loaded: false}, booksBody = "", bookTab = "all";
+let bookSort = lsGet("bookSort", "recent");
+function lsGet(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function bookById(id) {
+  return booksState.books.find(b => b.id === id) || (state.book_hits || []).find(b => b.id === id)
+    || (state.reading || []).find(b => b.id === id) || (cacheIndex.get(id) || {}).book;
+}
+function pctStr(p) { return (p >= 0.995 ? 100 : p * 100 < 10 ? (p * 100).toFixed(1) : Math.floor(p * 100)) + "%"; }
+function wan(n) { return n >= 10000 ? (n / 10000).toFixed(n >= 100000 ? 0 : 1) + " 万" : String(Math.round(n)); }
+
+async function loadBooks() {
+  const p = new URLSearchParams();
+  if (query) p.set("q", query);
+  let body = null;
+  try {
+    const r = await fetch("/api/books" + (p.size ? "?" + p : ""));
+    if (r.ok) body = await r.text();
+  } catch (e) {}
+  await refreshCacheIndex();
+  if (body !== null) {
+    flushPendingProgress();
+    if (body === booksBody && booksState.q === query && !booksState.offline && booksState.loaded) { if (chip === "books") renderBooks(); return; }
+    booksBody = body;
+    booksState = {books: JSON.parse(body).books, q: query, offline: false, loaded: true};
+  } else {
+    // no Pi (away from home, or it's restarting): the books cached on this device
+    const local = pendingAll();
+    booksState = {books: [...cacheIndex.values()].map(m => {
+      const b = {...m.book}, pend = local[m.id];
+      if (pend && (!b.read || pend.at > (b.read.at || 0))) b.read = {...(b.read || {}), pct: pend.pct, pos: pend.pos, at: pend.at};
+      return b;
+    }).filter(b => !query || (b.title + b.author).toLowerCase().includes(query.toLowerCase())), q: query, offline: true, loaded: true};
+    await offlineCovers();
+  }
+  if (chip === "books") renderBooks();
+  schedule();
+}
+function bookState(b) {
+  return b.read && b.read.done ? "done" : b.read && b.read.pct > 0 ? "reading" : b.shelf === "want" ? "want" : "unread";
+}
+function renderBooks() {
+  const all = booksState.books, n = {all: all.length, reading: 0, want: 0, done: 0, unread: 0, cached: 0};
+  all.forEach(b => { n[bookState(b)]++; if (cacheIndex.has(b.id)) n.cached++; });
+  if (bookTab !== "all" && !n[bookTab]) bookTab = "all";
+  const list = all.filter(b => bookTab === "all" || (bookTab === "cached" ? cacheIndex.has(b.id) : bookState(b) === bookTab));
+  const sorts = {recent: (a, b) => ((b.read && b.read.at) || b.created) - ((a.read && a.read.at) || a.created),
+                 added: (a, b) => b.created - a.created, title: (a, b) => a.title.localeCompare(b.title, "zh-CN"),
+                 progress: (a, b) => ((b.read && b.read.pct) || 0) - ((a.read && a.read.pct) || 0)};
+  if (!query) list.sort(sorts[bookSort] || sorts.recent);
+  const size = [...cacheIndex.values()].reduce((a, m) => a + (m.size || 0), 0);
+  const tabs = [["all", "全部"], ["reading", "在读"], ["want", "想读"], ["unread", "没读"], ["done", "读完"], ["cached", "本机"]]
+    .filter(([k]) => k === "all" || n[k]).map(([k, t]) => `<button class="t${k === bookTab ? " on" : ""}" onclick="bookTab='${k}'; renderBooks()">${t} ${n[k]}</button>`).join("");
+  const tabsHtml = `${tabs}<span class="grow"></span>
+    ${query ? "" : `<select onchange="bookSort = this.value; lsSet('bookSort', this.value); renderBooks()">${[["recent", "最近读的"], ["added", "最近加的"], ["title", "书名"], ["progress", "进度"]]
+      .map(([k, t]) => `<option value="${k}"${k === bookSort ? " selected" : ""}>${t}</option>`).join("")}</select>`}
+    <button class="link" onclick="openCacheSheet()">本机缓存 ${bytes(size)}</button>`;
+  if ($("#bookTabs").dataset.html !== tabsHtml) { $("#bookTabs").innerHTML = tabsHtml; $("#bookTabs").dataset.html = tabsHtml; }
+  const html = list.map(bookCard).join("");
+  const grid = $("#bookGrid");
+  if (grid.dataset.html !== html) { grid.innerHTML = html; grid.dataset.html = html; }
+  $("#bookEmpty").hidden = list.length > 0;
+  $("#bookEmpty").innerHTML = booksState.offline ? "连不上 Pi，这台设备上也没有缓存的书"
+    : query ? "书架上没有找到匹配的书" : !booksState.loaded ? "正在加载…"
+    : "书架是空的。点「＋ 导入电子书」，或者把 EPUB、PDF、TXT、MOBI、AZW3 文件拖进来";
+  $("#scope").textContent = booksState.offline ? "离线：这台设备上缓存的书（进度联网后同步）"
+    : (state.user ? `${state.user} 的书架` : "这台设备的书架 · 登录后各设备合并") + " · 只有你自己看得到";
+}
+function bookColor(b) { let h = 0; for (const c of b.title || "") h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 6; }
+function bookCoverHtml(b) {
+  if (b.cover && (!booksState.offline || coverUrls.has(b.id)))
+    return `<img src="${coverUrls.get(b.id) || `/bookcover/${b.id}?v=${b.version}`}" alt="" loading="lazy">`;
+  return `<div class="bgen c${bookColor(b)}"><b>${esc(b.title || "未命名")}</b>${b.author ? `<i>${esc(b.author)}</i>` : ""}<span class="fmt">${esc(b.fmt || "")}</span></div>`;
+}
+function bookCard(b) {
+  const r = b.read, m = cacheIndex.get(b.id);
+  let over = "";
+  if (b.status === "importing") over = `<div class="state">${esc(b.error || (b.url && !b.size ? "正在下载…" : "正在导入…"))}</div>`;
+  else if (b.status === "failed") over = `<div class="state">导入失败</div>`;
+  if (m) over += `<span class="badge cached${m.v !== b.version || !m.complete ? " part" : ""}">${m.v !== b.version ? "旧版" : m.complete ? "已缓存" : "缓存中"}</span>`;
+  if (r && r.done) over += `<span class="badge tr">读完</span>`;
+  else if (r && r.pct > 0) over += `<div class="watched"><div style="width:${Math.min(100, r.pct * 100).toFixed(1)}%"></div></div>`;
+  const meta = [b.author, r && r.done ? "读完了" : r && r.pct > 0 ? "读到 " + pctStr(r.pct) : b.shelf === "want" ? "想读" : null,
+                r && r.at ? ago(r.at) + "读过" : null, b.status === "failed" ? b.error : null].filter(Boolean);
+  const hits = (b.hits || []).slice(0, 3).map(h => `<button onclick="event.stopPropagation(); openBookHit(${b.id}, ${h.ch}, ${esc(JSON.stringify(h.match || query))}, ${h.nth || 0})">${esc(h.title)}：${hl(h.text, [h.match || query])}</button>`).join("");
+  return `<div class="book" onclick="openReader(${b.id})">
+    <div class="bcover">${bookCoverHtml(b)}${over}${booksState.offline ? "" : `<button class="bmore" onclick="event.stopPropagation(); openBookInfo(${b.id})" title="管理这本书">⋯</button>`}</div>
+    <div class="info"><div class="title">${hl(b.title || "未命名")}</div><div class="meta">${esc(meta.join(" · "))}</div>${hits ? `<div class="bhits">${hits}</div>` : ""}</div>
+  </div>`;
+}
+// a book among the search results in 全部 (by its title, or the words found inside it)
+function bookGridCard(b) {
+  const h = (b.hits || [])[0];
+  return `<div class="card" onclick="${h ? `openBookHit(${b.id}, ${h.ch}, ${esc(JSON.stringify(h.match || query))}, ${h.nth || 0})` : `openReader(${b.id})`}">
+    <div class="cover">${b.cover ? `<img src="/bookcover/${b.id}?v=${b.version}" alt="" loading="lazy" style="object-fit:contain;background:var(--soft)">` : bookCoverHtml(b)}<span class="badge left note-badge">书</span></div>
+    <div class="info"><div class="title">${hl(b.title)}</div><div class="meta">书架${b.author ? " · " + esc(b.author) : ""}${b.read && b.read.pct ? " · 读到 " + pctStr(b.read.pct) : ""}</div>
+      ${h ? `<div class="hit">${esc(h.title)}${b.hits.length > 1 ? ` 等 ${b.hits.length} 处` : ""}：${hl(h.text, [h.match || query])}</div>` : ""}</div>
+  </div>`;
+}
+function openBookHit(id, ch, match, nth) { openReader(id, {hit: {ch, match, nth}}); }
+
+function uploadBooks(files) {
+  files = [...files];
+  const ok = files.filter(f => BOOK_EXT.test(f.name));
+  if (!ok.length) { toast("不是电子书（支持 EPUB、PDF、TXT、MOBI、AZW3）"); return; }
+  const fd = new FormData();
+  ok.forEach(f => fd.append("file", f));
+  const total = ok.reduce((a, f) => a + f.size, 0), box = $("#bookUp");
+  if (chip !== "books") setChip("books");
+  box.innerHTML = `<div class="sub">正在上传 ${ok.length} 本（${bytes(total)}）…</div><div class="upbar"><div style="width:0"></div></div>`;
+  const x = new XMLHttpRequest();
+  x.open("POST", "/api/books");
+  x.upload.onprogress = e => { const bar = box.querySelector(".upbar div"); if (bar && e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + "%"; };
+  x.onload = () => {
+    box.innerHTML = "";
+    let j = {};
+    try { j = JSON.parse(x.responseText); } catch (e) {}
+    toast(x.status === 200 ? [j.ids.length ? `${j.ids.length} 本加到书架，正在导入` : "", j.duplicates.length ? `${j.duplicates.length} 本已经在书架上了` : "",
+                              (j.bad || []).length ? `${j.bad.length} 个不是电子书` : ""].filter(Boolean).join("，") : (j.error || "上传失败"));
+    booksBody = ""; loadBooks();
+  };
+  x.onerror = () => { box.innerHTML = ""; toast("上传失败：连不上 Pi"); };
+  x.send(fd);
+}
+$("#bookFile").onchange = () => { uploadBooks($("#bookFile").files); $("#bookFile").value = ""; };
+async function addBookLink(e) {
+  e.preventDefault();
+  const url = $("#bookUrl").value.trim(); if (!url) return;
+  let r, j = {};
+  try { r = await fetch("/api/books", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({url})}); j = await r.json(); }
+  catch (err) { toast("连不上 Pi"); return; }
+  toast(r.ok ? (j.ids.length ? "开始下载，好了就在书架上" : "这个链接已经在书架上了") : (j.error || "没成功"));
+  if (r.ok) { $("#bookUrl").value = ""; booksBody = ""; loadBooks(); }
+}
+
+/* a book's details: rename, 想读 / 读完, cache it here, the file, replace it with a newer one, remove */
+async function openBookInfo(id) {
+  const b = booksState.books.find(x => x.id === id); if (!b) return;
+  const m = cacheIndex.get(id), r = b.read || {};
+  const fmt = (b.fmt || "").toUpperCase(), amount = b.view === "pdf" ? `${b.chapters} 页` : `${b.chapters} 章 · ${wan(b.chars)} 字`;
+  $("#bookSheetBody").innerHTML = `<h2>${esc(b.title)}</h2>
+    <input type="text" id="bkTitle" value="${esc(b.title)}" placeholder="书名">
+    <input type="text" id="bkAuthor" value="${esc(b.author || "")}" placeholder="作者">
+    <div class="seg" style="margin:4px 0 6px">
+      <button class="${b.shelf === "want" && !r.pct ? "on" : ""}" onclick="bookSet(${id}, {shelf: '${b.shelf === "want" ? "" : "want"}'})">想读</button>
+      <button class="${r.done ? "on" : ""}" onclick="bookSet(${id}, {done: ${!r.done}})">读完了</button>
+      ${r.pct || r.done ? `<button onclick="if (confirm('清除这本书的阅读进度？')) bookSet(${id}, {reset: true})">清除进度</button>` : ""}
+    </div>
+    <dl>
+      <dt>格式</dt><dd>${esc(fmt)} · ${bytes(b.size)}${b.status === "ready" ? " · " + amount : ""}</dd>
+      <dt>状态</dt><dd>${b.status === "ready" ? (r.done ? "读完了" : r.pct ? `读到 ${pctStr(r.pct)}${r.seconds ? `，读了 ${hours(r.seconds)}` : ""}` : "还没读") : b.status === "failed" ? `导入失败：${esc(b.error)}` : "正在导入"}</dd>
+      <dt>本机</dt><dd>${m ? `已缓存 ${bytes(m.size)}${m.pinned ? "（手动，不会被自动清掉）" : "（打开时自动缓存）"}${m.v !== b.version ? "，是旧版本" : ""}` : "没有缓存"}</dd>
+      <dt>加入</dt><dd>${esc(new Date(b.created * 1000).toLocaleDateString("zh-CN"))}${b.device ? " · " + esc(b.device.replace(/^📱\s*/, "")) : ""}${b.url ? ` · <a class="link" href="${esc(b.url)}" target="_blank" rel="noopener">来源</a>` : ""}</dd>
+    </dl>
+    <div class="acts">
+      <button class="link" onclick="bookSave(${id})">保存书名和作者</button>
+      ${b.status === "ready" ? (m && m.pinned && m.v === b.version ? `<button class="link" onclick="uncacheBook(${id})">删除本机缓存</button>`
+        : `<button class="link" onclick="pinBook(${id})">缓存到本机（离线也能读）</button>`) : ""}
+      ${m && !m.pinned ? `<button class="link" onclick="uncacheBook(${id})">删除本机缓存</button>` : ""}
+      ${b.size ? `<a class="link" href="/bookfile/${id}?download=1">下载原文件</a>` : ""}
+      <button class="link" onclick="replaceBookFile(${id})">换成新文件（保留进度）</button>
+      ${b.status !== "importing" ? `<button class="link" onclick="bookAct(${id}, 'retry')">重新导入</button>` : ""}
+      <button class="link" style="color:var(--accent)" onclick="deleteBook(${id})">从书架删除</button>
+    </div>
+    <p class="hint">「换成新文件」：比如追的网文 TXT 更新了，传新版进来，读到哪里不变。</p>
+    <div class="row"><button class="btn plain" onclick="hide($('#bookSheet'))">关闭</button>${b.status === "ready" ? `<button class="btn" onclick="hide($('#bookSheet')); openReader(${id})">${r.pct ? "接着读" : "开始读"}</button>` : ""}</div>`;
+  $("#bookSheet").hidden = false;
+}
+async function bookApi(id, path, body) {
+  try {
+    const r = await fetch(`/api/books/${id}${path}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const j = await r.json();
+    if (!r.ok) { toast(j.error || "没成功"); return null; }
+    return j;
+  } catch (e) { toast("连不上 Pi"); return null; }
+}
+async function bookSet(id, body) { if (await bookApi(id, "", body)) { booksBody = ""; await loadBooks(); openBookInfo(id); } }
+async function bookSave(id) { await bookSet(id, {title: $("#bkTitle").value, author: $("#bkAuthor").value}); toast("保存了"); }
+async function bookAct(id, action) { if (await bookApi(id, "/" + action)) { hide($("#bookSheet")); toast({retry: "重新导入中"}[action] || "好了"); booksBody = ""; loadBooks(); } }
+async function deleteBook(id) {
+  const b = booksState.books.find(x => x.id === id);
+  if (!confirm(`从书架删除《${b ? b.title : ""}》？文件、阅读进度和书签都会删掉。`)) return;
+  if (await bookApi(id, "/delete")) { await cacheDrop(id).catch(() => {}); hide($("#bookSheet")); toast("删掉了"); booksBody = ""; loadBooks(); }
+}
+let replacing = null;
+function replaceBookFile(id) { replacing = id; $("#bookReplace").click(); }
+$("#bookReplace").onchange = async () => {
+  const f = $("#bookReplace").files[0]; $("#bookReplace").value = "";
+  if (!f || !replacing) return;
+  const fd = new FormData(); fd.append("file", f);
+  toast("正在上传新文件…");
+  try {
+    const r = await fetch(`/api/books/${replacing}/replace`, {method: "POST", body: fd}), j = await r.json();
+    toast(r.ok ? "换好了，正在重新导入（进度保留）" : j.error || "没成功");
+  } catch (e) { toast("连不上 Pi"); }
+  hide($("#bookSheet")); booksBody = ""; loadBooks();
+};
+async function pinBook(id) {
+  const b = booksState.books.find(x => x.id === id); if (!b) return;
+  hide($("#bookSheet")); toast(`正在缓存《${b.title}》…`);
+  try { const m = await cacheBook(b, {pinned: true}); toast(`缓存好了（${bytes(m.size)}），离线也能读`); }
+  catch (e) { toast("缓存失败：" + (e.message || "连不上 Pi")); }
+  renderBooks();
+}
+async function uncacheBook(id) { await cacheDrop(id).catch(() => {}); hide($("#bookSheet")); toast("删掉了这台设备上的缓存"); renderBooks(); }
+
+/* ---------- books cached on this device (IndexedDB): meta (small, listed), data (the pack; a PDF's file), res (pictures, covers)
+   Books you open are cached automatically (oldest dropped past the limit); 缓存到本机 keeps one for good. */
+const cacheIndex = new Map(), coverUrls = new Map();
+const idb = {
+  p: null,
+  open() {
+    return this.p || (this.p = new Promise((ok, no) => {
+      const r = indexedDB.open("shiguang-books", 1);
+      r.onupgradeneeded = () => { for (const n of ["meta", "data", "res"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => no(r.error);
+    }));
+  },
+  async run(store, mode, fn) {
+    const d = await this.open();
+    return new Promise((ok, no) => {
+      const t = d.transaction(store, mode), req = fn(t.objectStore(store));
+      t.oncomplete = () => ok(req ? req.result : undefined);
+      t.onerror = t.onabort = () => no(t.error);
+    });
+  },
+  get(st, k) { return this.run(st, "readonly", s => s.get(k)); },
+  put(st, k, v) { return this.run(st, "readwrite", s => s.put(v, k)); },
+  del(st, k) { return this.run(st, "readwrite", s => s.delete(k)); },
+  all(st) { return this.run(st, "readonly", s => s.getAll()); },
+};
+const autoCache = () => lsGet("bookAutoCache", "1") === "1";
+const cacheLimitMB = () => +lsGet("bookCacheLimit", "1024");
+async function refreshCacheIndex() {
+  let metas = [];
+  try { metas = await idb.all("meta"); } catch (e) { return; }
+  cacheIndex.clear();
+  metas.forEach(m => cacheIndex.set(m.id, m));
+}
+async function offlineCovers() {
+  for (const m of cacheIndex.values()) {
+    if (coverUrls.has(m.id) || !m.book.cover) continue;
+    const bl = await idb.get("res", `${m.id}|cover`).catch(() => null);
+    if (bl) coverUrls.set(m.id, URL.createObjectURL(bl));
+  }
+}
+const resUrl = (b, p) => `/bookres/${b.id}?p=${encodeURIComponent(p)}&v=${b.version}`;
+let caching = {};
+async function cacheBook(b, {pinned = false, pack = null} = {}) {
+  if (caching[b.id]) return caching[b.id];
+  return caching[b.id] = (async () => {
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+    if (!pack) {
+      const r = await fetch(`/api/books/${b.id}/pack`);
+      if (!r.ok) throw new Error("书还没准备好");
+      pack = await r.json();
+    }
+    const old = cacheIndex.get(b.id), data = {pack};
+    let size = new Blob([JSON.stringify(pack)]).size;
+    if (pack.view === "pdf") {
+      const r = await fetch(`/bookfile/${b.id}?v=${b.version}`);
+      if (!r.ok) throw new Error("PDF 下载失败");
+      data.file = await r.blob();
+      size += data.file.size;
+    }
+    if (old && old.v !== b.version) await cacheDrop(b.id);
+    await idb.put("data", b.id, data);
+    const book = {...b}; delete book.hits;
+    const meta = {id: b.id, v: b.version, size, pinned: pinned || !!(old && old.pinned && old.v === b.version), cached: Date.now(),
+                  used: Date.now(), complete: false, book};
+    await idb.put("meta", b.id, meta);
+    cacheIndex.set(b.id, meta);
+    // the pictures and the cover too, so the book reads the same without the Pi
+    for (const p of [...(pack.res || []), ...(b.cover ? ["cover"] : [])]) {
+      if (await idb.get("res", `${b.id}|${p}`).catch(() => null)) continue;
+      try {
+        const r = await fetch(p === "cover" ? `/bookcover/${b.id}?v=${b.version}` : resUrl(b, p));
+        if (!r.ok) continue;
+        const bl = await r.blob();
+        await idb.put("res", `${b.id}|${p}`, bl);
+        meta.size += bl.size;
+      } catch (e) {}
+    }
+    meta.complete = true;
+    await idb.put("meta", b.id, meta);
+    await evictCache(b.id);
+    return meta;
+  })().finally(() => { delete caching[b.id]; if (chip === "books") renderBooks(); });
+}
+async function cacheDrop(id) {
+  await idb.del("meta", id);
+  await idb.del("data", id);
+  await idb.run("res", "readwrite", s => s.delete(IDBKeyRange.bound(`${id}|`, `${id}|￿`)));
+  cacheIndex.delete(id);
+  if (coverUrls.has(id)) { URL.revokeObjectURL(coverUrls.get(id)); coverUrls.delete(id); }
+}
+async function evictCache(keep) {
+  const limit = cacheLimitMB() * 1048576;
+  if (!limit) return;
+  let total = [...cacheIndex.values()].reduce((a, m) => a + m.size, 0);
+  for (const m of [...cacheIndex.values()].sort((a, b) => a.used - b.used)) {
+    if (total <= limit) break;
+    if (m.pinned || m.id === keep) continue;
+    await cacheDrop(m.id);
+    total -= m.size;
+  }
+}
+async function openCacheSheet() {
+  await refreshCacheIndex();
+  const metas = [...cacheIndex.values()].sort((a, b) => b.used - a.used), total = metas.reduce((a, m) => a + m.size, 0);
+  let est = "";
+  try { const e = await navigator.storage.estimate(); est = `浏览器给这个网页的空间约 ${bytes(e.quota)}，已用 ${bytes(e.usage)}。`; } catch (e) {}
+  const lim = cacheLimitMB();
+  $("#bookSheetBody").innerHTML = `<h2>本机缓存</h2>
+    <p class="hint">书缓存在这台设备的浏览器里，打开时不用再从 Pi 下载；不在家、连不上 Pi 也能读（进度联网后同步）。${est}</p>
+    <label class="check" style="margin-bottom:10px"><input type="checkbox" ${autoCache() ? "checked" : ""} onchange="lsSet('bookAutoCache', this.checked ? '1' : '0')"> 打开过的书自动缓存</label>
+    <div class="rd-row" style="margin-bottom:10px"><span class="sub">自动缓存最多占</span>
+      <div class="seg">${[[512, "512 MB"], [1024, "1 GB"], [4096, "4 GB"], [0, "不限"]].map(([v, t]) =>
+        `<button class="${v === lim ? "on" : ""}" onclick="lsSet('bookCacheLimit', '${v}'); evictCache().then(openCacheSheet)">${t}</button>`).join("")}</div></div>
+    <div class="devs">${metas.map(m => `<div class="dev"><div class="dev-main"><b>${esc(m.book.title)}</b><div class="sub">${bytes(m.size)} · ${m.pinned ? "手动缓存" : "自动缓存"} · ${esc(ago(m.used / 1000))}打开${m.complete ? "" : " · 没缓存完"}</div></div>
+      <button class="btn plain" onclick="cacheDrop(${m.id}).then(openCacheSheet).then(renderBooks)">删除</button></div>`).join("") || '<p class="sub">还没有缓存的书。</p>'}</div>
+    <div class="row" style="margin-top:14px">
+      ${metas.length ? `<button class="btn plain" onclick="if (confirm('删除这台设备上缓存的所有书？书架上的书不受影响。')) Promise.all([...cacheIndex.keys()].map(cacheDrop)).then(openCacheSheet).then(renderBooks)">全部删除 ${bytes(total)}</button>` : ""}
+      ${booksState.offline ? "" : `<button class="btn plain" onclick="cacheAll()">缓存全部书</button>`}
+      <button class="btn" onclick="hide($('#bookSheet'))">好</button>
+    </div>`;
+  $("#bookSheet").hidden = false;
+}
+async function cacheAll() {
+  hide($("#bookSheet"));
+  const todo = booksState.books.filter(b => b.status === "ready" && !(cacheIndex.get(b.id) && cacheIndex.get(b.id).v === b.version && cacheIndex.get(b.id).complete));
+  let done = 0;
+  for (const b of todo) {
+    toast(`正在缓存 ${done + 1}/${todo.length}：《${b.title}》`);
+    try { await cacheBook(b, {pinned: true}); done++; } catch (e) {}
+  }
+  toast(todo.length ? `缓存好了 ${done} 本` : "都已经缓存了");
+}
+
+/* ---------- reading progress: saved to the Pi (every device carries on where you are), queued while offline ---------- */
+function pendingAll() { try { return JSON.parse(localStorage.getItem("bookPending") || "{}"); } catch (e) { return {}; } }
+function queueProgress(id, body) {
+  const q = pendingAll(), old = q[id];
+  q[id] = {...body, secs: ((old && old.secs) || 0) + (body.secs || 0), at: body.at || Date.now() / 1000};
+  lsSet("bookPending", JSON.stringify(q));
+}
+function postProgress(id, body) {
+  fetch(`/api/books/${id}/progress`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), keepalive: true})
+    .then(r => { if (r.status >= 500 || r.status === 0) throw new Error(); })
+    .catch(() => queueProgress(id, body));
+}
+function flushPendingProgress() {
+  const q = pendingAll();
+  if (!Object.keys(q).length) return;
+  try { localStorage.removeItem("bookPending"); } catch (e) {}
+  for (const [id, body] of Object.entries(q)) postProgress(+id, body);
+}
+window.addEventListener("online", flushPendingProgress);
+
+/* ---------- the reader ---------- */
+let rd = {id: null};
+const RD_DEFAULT = {size: innerWidth < 640 ? 18 : 20, lh: 1.8, font: "serif", mode: "paged", theme: "paper"};
+let rdPrefs = (() => { try { return {...RD_DEFAULT, ...JSON.parse(localStorage.getItem("readerPrefs") || "{}")}; } catch (e) { return {...RD_DEFAULT}; } })();
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function rdApplyPrefs() {
+  const r = $("#reader");
+  r.classList.toggle("night", rdPrefs.theme === "night");
+  r.classList.toggle("f-sans", rdPrefs.font === "sans");
+  r.classList.toggle("f-pixel", rdPrefs.font === "pixel");
+  r.classList.toggle("scroll", rdPrefs.mode === "scroll" && !!rd.pack && rd.pack.view !== "pdf");
+  r.style.setProperty("--rd-size", rdPrefs.size + "px");
+  r.style.setProperty("--rd-lh", rdPrefs.lh);
+}
+async function openReader(id, at = null) {
+  let b = bookById(id);
+  if (!b || !b.version) {
+    try { const r = await fetch(`/api/books/${id}`); if (r.ok) b = (await r.json()).book; } catch (e) {}
+    b = b || (cacheIndex.get(id) || {}).book;
+  }
+  if (!b) { toast("这本书不见了"); return; }
+  if (b.status && b.status !== "ready") { toast(b.status === "failed" ? "这本书导入失败了：" + b.error : "还在导入，等一下"); return; }
+  if (rd.id) rdClose(true);
+  rd = {id, b, secs: 0, lastAct: Date.now(), urls: [], marks: [], page: 0, ch: 0, zoom: 1, zoomKey: 1};
+  hide($("#bookSheet")); hide($("#askSheet"));
+  const el = $("#reader");
+  el.classList.remove("ui");
+  rdApplyPrefs();
+  $("#rdTitle").textContent = b.title;
+  $("#rdFlow").innerHTML = ""; $("#rdPdf").innerHTML = ""; $("#rdPop").hidden = true; $("#rdBack").hidden = true;
+  $("#rdHead").textContent = $("#rdHeadR").textContent = $("#rdFoot").textContent = $("#rdFootR").textContent = "";
+  rdClosePanels();
+  $("#rdLoad").hidden = false; $("#rdLoad").textContent = `正在打开《${b.title}》…`;
+  el.hidden = false;
+  document.body.style.overflow = "hidden";
+  if (!(history.state && history.state.reader)) history.pushState({reader: id}, "", "#book=" + id);
+  else history.replaceState({reader: id}, "", "#book=" + id);
+  let data;
+  try { data = await bookData(b); }
+  catch (e) { if (rd.id === id) $("#rdLoad").textContent = "打不开：连不上 Pi，这本书也没有缓存在这台设备上。"; return; }
+  if (rd.id !== id) return;
+  rd.pack = data.pack; rd.file = data.file || null; rd.cached = !!data.cached;
+  fetch(`/api/books/${id}`).then(r => r.json()).then(j => { if (rd.id === id) { rd.marks = j.book.marks || []; rdUpdate(); } }).catch(() => {});
+  // where to start: a search hit, else where you were (a save made offline on this device if it's newer)
+  const pend = pendingAll()[id];
+  const pos = (at && at.pos) || (pend && (!b.read || pend.at > (b.read.at || 0)) ? pend.pos : b.read && b.read.pos) || null;
+  rdApplyPrefs();
+  try {
+    if (rd.pack.view === "pdf") await rdSetupPdf(pos, at);
+    else await rdSetupFlow(pos, at);
+  } catch (e) {
+    console.error(e);
+    if (rd.id === id) { $("#rdLoad").hidden = false; $("#rdLoad").textContent = "这本书打不开：" + (e.message || e); }
+    return;
+  }
+  if (rd.id === id && pos && !at && (pos.ch || pos.page || pos.f)) toast(`接着上次读：${pctStr(rdPct())}`);
+}
+async function bookData(b) {
+  const m = cacheIndex.get(b.id);
+  if (m && (m.v === b.version || booksState.offline)) {
+    const d = await idb.get("data", b.id).catch(() => null);
+    if (d) { m.used = Date.now(); idb.put("meta", b.id, m).catch(() => {}); return {...d, cached: true}; }
+  }
+  const r = await fetch(`/api/books/${b.id}/pack`);
+  if (!r.ok) throw new Error("pack " + r.status);
+  const pack = await r.json();
+  if (autoCache() || (m && m.pinned)) setTimeout(() => cacheBook(b, {pack, pinned: !!(m && m.pinned)}).catch(() => {}), 1500);
+  return {pack, cached: false};
+}
+function closeReader() {
+  if (history.state && history.state.reader) history.back();
+  else rdClose();
+}
+window.addEventListener("popstate", () => { if (rd.id && !(history.state && history.state.reader)) rdClose(); });
+function rdClose(instant) {
+  if (!rd.id) return;
+  rdSave();
+  rdRevoke();
+  if (rd.io) rd.io.disconnect();
+  if (rd.pdfTask) rd.pdfTask.destroy().catch(() => {});
+  clearTimeout(rd.saveT);
+  rd = {id: null};
+  if (location.hash.startsWith("#book=")) history.replaceState(null, "", location.pathname + location.search);
+  document.body.style.overflow = "";
+  const done = () => { $("#rdFlow").innerHTML = ""; $("#rdPdf").innerHTML = ""; };
+  if (instant) { $("#reader").hidden = true; done(); } else hide($("#reader"), done);
+  booksBody = ""; lastBody = "";
+  if (chip === "books") loadBooks(); else refresh();
+}
+function rdRevoke() { (rd.urls || []).forEach(u => URL.revokeObjectURL(u)); if (rd.urls) rd.urls = []; }
+
+/* reflowed books: one chapter at a time, as pages side by side (CSS columns) that slide, or scrolling */
+async function rdSetupFlow(pos, at) {
+  $("#rdPdf").hidden = true; $("#rdView").hidden = false;
+  rdZoomButtons(false);
+  const p = rd.pack;
+  rd.cum = []; let t = 0;
+  p.chapters.forEach(c => { rd.cum.push(t); t += c.n || 0; });
+  rd.total = Math.max(1, t);
+  $("#rdFlow").lang = /^zh/i.test(p.lang || "zh") ? "zh" : p.lang;
+  const ch = at && at.hit ? at.hit.ch : Math.min(p.chapters.length - 1, Math.max(0, (pos && pos.ch) || 0));
+  await rdRender(ch, at && at.hit ? {hit: at.hit} : {f: (pos && pos.f) || 0});
+  $("#rdLoad").hidden = true;
+}
+async function rdRender(i, opts = {}) {
+  const flow = $("#rdFlow"), token = rd.token = (rd.token || 0) + 1;
+  rd.ch = i;
+  rd.busy = true;  // page turns wait until the chapter is laid out (two quick taps mustn't skip a chapter)
+  rdRevoke();
+  flow.classList.remove("anim");
+  flow.style.transform = "none";
+  flow.innerHTML = rd.pack.chapters[i].h + '<span class="rd-end"></span>'
+    + (rdPrefs.mode === "scroll" ? `<button class="btn plain rd-next" onclick="rdChapter(1)" ${i >= rd.pack.chapters.length - 1 ? "hidden" : ""}>下一章 ›</button>` : "");
+  $("#rdPop").hidden = true;
+  await rdImages(flow);
+  if (token !== rd.token || !rd.id) return;
+  rd.busy = false;
+  rdLayout();
+  const page = $("#rdPage");
+  if (rdPrefs.mode === "scroll") {
+    page.scrollTop = 0;
+    const target = opts.anchor ? flow.querySelector("#" + CSS.escape(opts.anchor)) : opts.hit ? rdShowHit(opts.hit) : null;
+    if (target) target.scrollIntoView({block: "center"});
+    else if (opts.last) page.scrollTop = page.scrollHeight;
+    else if (opts.f) page.scrollTop = opts.f * (page.scrollHeight - page.clientHeight);
+    rdUpdate();
+    return;
+  }
+  let n = 0;
+  if (opts.last) n = rd.pages - 1;
+  else if (opts.anchor) n = rdPageOf(flow.querySelector("#" + CSS.escape(opts.anchor)));
+  else if (opts.hit) n = rdPageOf(rdShowHit(opts.hit));
+  else if (opts.f) n = Math.round(opts.f * rd.pages);
+  rdGo(n, false);
+}
+async function rdImages(root) {
+  const imgs = [...root.querySelectorAll("img[data-res]")];
+  await Promise.all(imgs.map(async img => {
+    const p = img.dataset.res;
+    let src = null;
+    if (cacheIndex.has(rd.id)) {
+      const bl = await idb.get("res", `${rd.id}|${p}`).catch(() => null);
+      if (bl) { src = URL.createObjectURL(bl); rd.urls.push(src); }
+    }
+    img.src = src || resUrl(rd.b, p);
+    if (img.complete) return;
+    const loaded = new Promise(r => { img.onload = img.onerror = r; });
+    // a slow picture: lay out without it, then again once it's there
+    if (await Promise.race([loaded.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]) === false)
+      loaded.then(() => { if (rd.id && img.isConnected) rdRelayout(); });
+  }));
+}
+function rdGap() { return (parseFloat(getComputedStyle($("#reader")).getPropertyValue("--rd-mx")) || 20) * 2; }
+function rdLayout() {
+  const page = $("#rdPage"), flow = $("#rdFlow");
+  flow.style.setProperty("--rd-imgh", Math.max(100, page.clientHeight - 8) + "px");
+  if (rdPrefs.mode === "scroll") { flow.style.columnWidth = flow.style.columnGap = ""; rd.pages = 1; return; }
+  const W = page.clientWidth, gap = rdGap();
+  flow.style.columnWidth = W + "px";
+  flow.style.columnGap = gap + "px";
+  rd.pageW = W + gap;
+  const saved = flow.style.transform;
+  flow.style.transform = "none";
+  const end = flow.querySelector(".rd-end");
+  const x = end ? end.getBoundingClientRect().left - flow.getBoundingClientRect().left : 0;
+  rd.pages = Math.max(1, Math.floor((x + 1) / rd.pageW) + 1);
+  flow.style.transform = saved;
+}
+function rdPageOf(el) {
+  if (!el || rdPrefs.mode === "scroll") return 0;
+  const x = el.getBoundingClientRect().left - $("#rdFlow").getBoundingClientRect().left;
+  return Math.max(0, Math.min(rd.pages - 1, Math.floor((x + 1) / rd.pageW)));
+}
+// the first thing on the page you're looking at (kept in view when the layout changes: font size, rotating the phone)
+function rdAnchor() {
+  const box = $("#rdPage").getBoundingClientRect();
+  for (const el of $("#rdFlow").querySelectorAll("p,h1,h2,h3,h4,h5,h6,li,img,pre,blockquote,td,dt,dd,figcaption")) {
+    for (const r of el.getClientRects()) {
+      if (rdPrefs.mode === "scroll" ? r.bottom > box.top + 2 : (r.right > box.left + 2 && r.left < box.right - 2)) return el;
+    }
+  }
+  return null;
+}
+function rdRelayout() {
+  if (!rd.pack || rd.pack.view === "pdf") return;
+  const el = rdAnchor();
+  rdLayout();
+  if (rdPrefs.mode === "scroll") { if (el) el.scrollIntoView({block: "start"}); rdUpdate(); }
+  else rdGo(rdPageOf(el), false);
+}
+function rdGo(n, anim = true) {
+  rd.page = Math.max(0, Math.min(rd.pages - 1, n));
+  const flow = $("#rdFlow");
+  flow.classList.toggle("anim", anim && !reduced);
+  flow.style.transform = `translateX(${-rd.page * rd.pageW}px)`;
+  rdUpdate();
+  rdTouched();
+}
+function rdNext() {
+  if (!rd.pack || rd.busy) return;
+  if (rd.pack.view === "pdf") { const b = $("#rdPdf"); b.scrollBy({top: b.clientHeight * 0.9, behavior: reduced ? "auto" : "smooth"}); return; }
+  if (rdPrefs.mode === "scroll") {
+    const p = $("#rdPage");
+    if (p.scrollTop + p.clientHeight < p.scrollHeight - 4) { p.scrollBy({top: p.clientHeight - 40, behavior: reduced ? "auto" : "smooth"}); return; }
+  } else if (rd.page < rd.pages - 1) { rdGo(rd.page + 1); return; }
+  if (rd.ch < rd.pack.chapters.length - 1) rdRender(rd.ch + 1);
+  else { rdTouched(); toast("已经是最后一页了"); }
+}
+function rdPrev() {
+  if (!rd.pack || rd.busy) return;
+  if (rd.pack.view === "pdf") { const b = $("#rdPdf"); b.scrollBy({top: -b.clientHeight * 0.9, behavior: reduced ? "auto" : "smooth"}); return; }
+  if (rdPrefs.mode === "scroll") {
+    const p = $("#rdPage");
+    if (p.scrollTop > 4) { p.scrollBy({top: -(p.clientHeight - 40), behavior: reduced ? "auto" : "smooth"}); return; }
+  } else if (rd.page > 0) { rdGo(rd.page - 1); return; }
+  if (rd.ch > 0) rdRender(rd.ch - 1, {last: true});
+  else toast("已经是开头了");
+}
+function rdChapter(d) {
+  if (!rd.pack) return;
+  if (rd.pack.view === "pdf") {
+    // previous / next section of the contents, else a page
+    const toc = rd.pack.toc || [], cur = rd.page;
+    const t = d > 0 ? toc.find(e => e.ch > cur) : [...toc].reverse().find(e => e.ch < cur);
+    rdPdfGo(t ? t.ch : cur + d);
+    return;
+  }
+  const i = rd.ch + d;
+  if (i >= 0 && i < rd.pack.chapters.length) rdRender(i);
+}
+// how far into the chapter (0..1) the page you're on starts
+function rdF() {
+  if (rd.pack.view === "pdf") return rd.pf || 0;
+  if (rdPrefs.mode === "scroll") { const p = $("#rdPage"); return p.scrollHeight > p.clientHeight ? p.scrollTop / (p.scrollHeight - p.clientHeight) : 0; }
+  return rd.pages ? rd.page / rd.pages : 0;
+}
+// how much of the book has been read, the page you're on included
+function rdPct() {
+  if (!rd.pack) return 0;
+  if (rd.pack.view === "pdf") return Math.min(1, (rd.page + 1) / rd.pack.pages);
+  let f;
+  if (rdPrefs.mode === "scroll") { const p = $("#rdPage"); f = p.scrollHeight ? Math.min(1, (p.scrollTop + p.clientHeight) / p.scrollHeight) : 1; }
+  else f = (rd.page + 1) / (rd.pages || 1);
+  return Math.min(1, (rd.cum[rd.ch] + (rd.pack.chapters[rd.ch].n || 0) * f) / rd.total);
+}
+function rdPos() { return rd.pack.view === "pdf" ? {page: rd.page, f: +(rd.pf || 0).toFixed(3)} : {ch: rd.ch, f: +rdF().toFixed(4)}; }
+function rdTocTitle() {
+  const toc = rd.pack.toc || [], at = rd.pack.view === "pdf" ? rd.page : rd.ch;
+  const e = [...toc].reverse().find(x => x.ch <= at);
+  return rd.pack.view === "pdf" ? (e ? e.t : "") : (e && e.ch === rd.ch ? e.t : rd.pack.chapters[rd.ch].t);
+}
+function rdUpdate() {
+  if (!rd.pack) return;
+  const pct = rdPct(), title = rdTocTitle();
+  $("#rdHead").textContent = title || rd.b.title;
+  $("#rdHeadR").textContent = "";
+  if (rd.pack.view === "pdf") {
+    $("#rdFoot").textContent = `${rd.page + 1} / ${rd.pack.pages}`;
+  } else if (rdPrefs.mode === "scroll") {
+    $("#rdFoot").textContent = `第 ${rd.ch + 1} / ${rd.pack.chapters.length} 章`;
+  } else {
+    $("#rdFoot").textContent = `${rd.page + 1} / ${rd.pages}`;
+  }
+  $("#rdFootR").textContent = pctStr(pct);
+  $("#rdWhere").textContent = pctStr(pct);
+  $("#rdChap").textContent = title || "";
+  if (document.activeElement !== $("#rdSlider")) $("#rdSlider").value = Math.round(pct * 1000);
+  $("#rdMarkBtn").classList.toggle("on", !!rdMarkHere());
+}
+function rdTouched() {
+  rd.lastAct = Date.now();
+  clearTimeout(rd.saveT);
+  rd.saveT = setTimeout(rdSave, 3000);
+}
+setInterval(() => { if (rd.id && rd.pack && !document.hidden && Date.now() - rd.lastAct < 180000) rd.secs += 5; }, 5000);
+setInterval(() => { if (rd.id && rd.secs >= 30) rdSave(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (document.hidden && rd.id) rdSave(); });
+function rdSave() {
+  if (!rd.id || !rd.pack) return;
+  const body = {pos: rdPos(), pct: +rdPct().toFixed(4), secs: Math.round(rd.secs)};
+  rd.secs = 0;
+  const b = bookById(rd.id);
+  if (b) b.read = {...(b.read || {}), pct: body.pct, pos: body.pos, at: Date.now() / 1000, done: !!(b.read && b.read.done) || body.pct >= 0.99};
+  if (booksState.offline) queueProgress(rd.id, body);
+  else postProgress(rd.id, body);
+}
+
+/* taps, swipes, keys */
+(() => {
+  const view = $("#rdView"), page = $("#rdPage");
+  let sw = null, lastWheel = 0;
+  page.addEventListener("pointerdown", e => { sw = {x: e.clientX, y: e.clientY}; });
+  page.addEventListener("pointerup", e => {
+    if (!sw || rdPrefs.mode !== "paged") return;
+    const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+    sw = null;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.3 && getSelection().isCollapsed) {
+      rd.swiped = true; setTimeout(() => { rd.swiped = false; }, 350);
+      dx < 0 ? rdNext() : rdPrev();
+    }
+  });
+  page.addEventListener("scroll", () => { if (rdPrefs.mode === "scroll" && rd.pack) { rdUpdate(); rdTouched(); } }, {passive: true});
+  view.addEventListener("wheel", e => {
+    if (rdPrefs.mode !== "paged" || !rd.pack) return;
+    e.preventDefault();
+    if (Date.now() - lastWheel < 350 || Math.abs(e.deltaY) + Math.abs(e.deltaX) < 8) return;
+    lastWheel = Date.now();
+    (e.deltaY || e.deltaX) > 0 ? rdNext() : rdPrev();
+  }, {passive: false});
+  view.addEventListener("click", e => {
+    if (rd.swiped) return;
+    const a = e.target.closest("a");
+    if (a && a.dataset.go !== undefined) { e.preventDefault(); rdFollow(a); return; }
+    if (a && a.href) return;  // a link out of the book: opens in a new tab
+    if (!getSelection().isCollapsed) return;  // selecting text
+    if (!$("#rdPop").hidden) { $("#rdPop").hidden = true; return; }
+    if ($("#reader").classList.contains("ui")) { rdToggleUI(); return; }
+    const x = e.clientX / innerWidth;
+    if (rdPrefs.mode === "paged" && x < 0.3) rdPrev();
+    else if (rdPrefs.mode === "paged" && x > 0.7) rdNext();
+    else rdToggleUI();
+  });
+  $("#rdPdf").addEventListener("click", e => { if (!$("#rdPop").hidden) $("#rdPop").hidden = true; else rdToggleUI(); });
+  $("#rdPdf").addEventListener("scroll", () => rdPdfScrolled(), {passive: true});
+  $("#rdPop").addEventListener("click", e => { if (!e.target.closest("a[href]")) $("#rdPop").hidden = true; });
+  const slider = $("#rdSlider");
+  slider.addEventListener("input", () => { $("#rdWhere").textContent = pctStr(slider.value / 1000); });
+  slider.addEventListener("change", () => rdSeekPct(slider.value / 1000));
+  window.addEventListener("keydown", e => {
+    if (!rd.id || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+    const k = e.key;
+    if (k === "Escape") {
+      if (!$("#rdPanel").hidden || !$("#rdSet").hidden) rdClosePanels();
+      else if (!$("#rdPop").hidden) $("#rdPop").hidden = true;
+      else closeReader();
+    } else if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(k)) {
+      if (rd.pack && rd.pack.view !== "pdf" && rdPrefs.mode === "scroll" && k === "ArrowDown") return;
+      rdNext();
+    } else if (["ArrowLeft", "ArrowUp", "PageUp"].includes(k)) {
+      if (rd.pack && rd.pack.view !== "pdf" && rdPrefs.mode === "scroll" && k === "ArrowUp") return;
+      rdPrev();
+    } else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+  let rt;
+  window.addEventListener("resize", () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => { if (!rd.pack) return; if (rd.pack.view === "pdf") rdPdfRebuild(); else rdRelayout(); }, 200);
+  });
+})();
+function rdToggleUI() { $("#reader").classList.toggle("ui"); rdUpdate(); }
+function rdSeekPct(p) {
+  if (!rd.pack) return;
+  if (rd.pack.view === "pdf") { rdPdfGo(Math.round(p * (rd.pack.pages - 1))); return; }
+  const at = p * rd.total;
+  let ch = 0;
+  while (ch < rd.cum.length - 1 && rd.cum[ch + 1] <= at) ch++;
+  rdRender(ch, {f: Math.min(0.999, (at - rd.cum[ch]) / Math.max(1, rd.pack.chapters[ch].n))});
+}
+// a link inside the book: a footnote opens in place, anything else is gone to (with a way back)
+function rdFollow(a) {
+  const [chs, id] = (a.dataset.go || "").split("#"), ch = +chs;
+  if (!(ch >= 0 && ch < rd.pack.chapters.length)) return;
+  const note = a.dataset.note || a.textContent.trim().length <= 4 || a.querySelector("img");
+  if (note && id) {
+    let target = null;
+    if (ch === rd.ch) target = $("#rdFlow").querySelector("#" + CSS.escape(id));
+    else { const d = document.createElement("div"); d.innerHTML = rd.pack.chapters[ch].h; target = d.querySelector("#" + CSS.escape(id)); }
+    const box = target && (target.closest("aside, li, p, dd, blockquote, div") || target);
+    if (box && !/^H\d$/.test(box.tagName) && box.textContent.trim() && box.textContent.length < 1200) {
+      const pop = $("#rdPop");
+      pop.innerHTML = box.innerHTML;
+      pop.querySelectorAll("a[data-go]").forEach(x => x.removeAttribute("data-go"));
+      pop.querySelectorAll("[id]").forEach(x => x.removeAttribute("id"));
+      rdImages(pop);
+      pop.hidden = false;
+      return;
+    }
+  }
+  rd.back = {ch: rd.ch, f: rdF()};
+  $("#rdBack").hidden = false;
+  clearTimeout(rd.backT);
+  rd.backT = setTimeout(() => { $("#rdBack").hidden = true; }, 20000);
+  rdRender(ch, id ? {anchor: id} : {});
+}
+function rdGoBack() { $("#rdBack").hidden = true; if (rd.back) rdRender(rd.back.ch, {f: rd.back.f}); }
+// a search hit: the n-th place in the chapter where (a variant of) the words are, marked
+function rdShowHit(hit) {
+  const terms = [...new Set([hit.match, rd.searchQ, query].filter(Boolean).map(s => s.toLowerCase()))];
+  if (!terms.length) return null;
+  const walker = document.createTreeWalker($("#rdFlow"), NodeFilter.SHOW_TEXT);
+  let node, count = 0, first = null;
+  while ((node = walker.nextNode())) {
+    const low = node.data.toLowerCase();
+    let i = 0;
+    for (;;) {
+      let best = -1, len = 0;
+      for (const t of terms) { const j = low.indexOf(t, i); if (j >= 0 && (best < 0 || j < best)) { best = j; len = t.length; } }
+      if (best < 0) break;
+      if (count === (hit.nth || 0) || (!first && count > (hit.nth || 0))) {
+        const range = document.createRange();
+        range.setStart(node, best); range.setEnd(node, best + len);
+        const mark = document.createElement("mark");
+        mark.className = "rd-hit";
+        range.surroundContents(mark);
+        return mark;
+      }
+      if (!first) first = [node, best, len];
+      count++;
+      i = best + len;
+    }
+  }
+  if (first) {
+    const range = document.createRange(), mark = document.createElement("mark");
+    range.setStart(first[0], first[1]); range.setEnd(first[0], first[1] + first[2]);
+    mark.className = "rd-hit"; range.surroundContents(mark);
+    return mark;
+  }
+  return null;
+}
+
+/* contents, bookmarks, search in the book */
+function rdOpenPanel(tab) {
+  if (!rd.pack) return;
+  rd.tab = tab;
+  $("#rdSet").hidden = true;
+  $("#rdPanel").hidden = false; $("#rdShade").hidden = false;
+  document.querySelectorAll("#rdPanel .rd-tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  rdRenderPanel();
+  if (tab === "search") setTimeout(() => { const i = $("#rdSearchQ"); if (i && !i.value) i.focus(); }, 50);
+}
+function rdClosePanels() { $("#rdPanel").hidden = true; $("#rdSet").hidden = true; $("#rdShade").hidden = true; }
+function rdRenderPanel() {
+  const list = $("#rdList"), pdf = rd.pack.view === "pdf";
+  if (rd.tab === "toc") {
+    const toc = rd.pack.toc && rd.pack.toc.length ? rd.pack.toc : pdf ? [] : rd.pack.chapters.map((c, i) => ({t: c.t, ch: i, lv: 0}));
+    const at = pdf ? rd.page : rd.ch;
+    const cur = toc.reduce((best, e, i) => e.ch <= at ? i : best, -1);
+    list.innerHTML = toc.length ? toc.map((e, i) => `<button class="it lv${e.lv || 0}${i === cur ? " cur" : ""}" onclick="rdClosePanels(); ${pdf ? `rdPdfGo(${e.ch})` : `rdRender(${e.ch})`}">${pdf ? `<span class="at">${e.ch + 1}</span>` : ""}${esc(e.t)}</button>`).join("")
+      : `<p class="hint">这本 PDF 没有目录。用下面的进度条跳页。</p>`;
+    const c = list.querySelector(".cur");
+    if (c) c.scrollIntoView({block: "center"});
+  } else if (rd.tab === "marks") {
+    list.innerHTML = `<form onsubmit="event.preventDefault(); rdToggleMark()"><button class="btn" style="flex:1">${rdMarkHere() ? "删除这一页的书签" : "＋ 给这一页加书签"}</button></form>`
+      + (rd.marks.length ? rd.marks.map(m => `<button class="it" onclick="rdClosePanels(); rdGoPos(${esc(JSON.stringify(m.pos))})"><span class="at">${pctStr(m.pct)}</span>${esc(m.text || "书签")}<br><span class="sub">${esc(ago(m.created))}</span></button>`).join("")
+        : `<p class="hint">还没有书签。读的时候点顶上的「书签」。</p>`);
+  } else {
+    const hits = rd.searchHits;
+    list.innerHTML = `<form onsubmit="rdSearch(event)"><input type="search" id="rdSearchQ" placeholder="在这本书里找…" value="${esc(rd.searchQ || "")}" autocomplete="off"><button class="btn">找</button></form>`
+      + (hits === undefined ? "" : hits === "busy" ? `<p class="hint">正在找…</p>` : hits === null ? `<p class="hint">离线时 PDF 不能搜索</p>`
+        : `<p class="hint">找到 ${hits.length}${hits.length >= 300 ? "+" : ""} 处</p>` + hits.map((h, i) => `<button class="it" onclick="rdClosePanels(); rdGoHit(${i})">${pdf ? `<span class="at">${h.ch + 1}</span>` : ""}<span class="sub">${esc(h.title)}</span><br>${hl(h.text, [h.match || rd.searchQ])}</button>`).join(""));
+  }
+}
+async function rdSearch(e) {
+  e.preventDefault();
+  const t = $("#rdSearchQ").value.trim();
+  if (!t) return;
+  rd.searchQ = t; rd.searchHits = "busy"; rdRenderPanel();
+  try {
+    const r = await fetch(`/api/books/${rd.id}/search?q=${encodeURIComponent(t)}`);
+    if (!r.ok) throw new Error();
+    rd.searchHits = (await r.json()).hits;
+  } catch (err) {
+    rd.searchHits = rd.pack.view === "pdf" ? null : rdLocalSearch(t);  // offline: in the chapters cached here
+  }
+  if (rd.tab === "search") rdRenderPanel();
+}
+function rdLocalSearch(t) {
+  const out = [], tl = t.toLowerCase(), d = document.createElement("div");
+  rd.pack.chapters.forEach((c, ch) => {
+    d.innerHTML = c.h;
+    const text = d.textContent, low = text.toLowerCase();
+    for (let i = low.indexOf(tl), nth = 0; i >= 0 && out.length < 300; i = low.indexOf(tl, i + tl.length), nth++)
+      out.push({ch, title: c.t, match: text.substr(i, t.length), nth, text: (i > 20 ? "…" : "") + text.slice(Math.max(0, i - 20), i + t.length + 40) + "…"});
+  });
+  return out;
+}
+function rdGoHit(i) {
+  const h = rd.searchHits[i];
+  if (rd.pack.view === "pdf") rdPdfGo(h.ch);
+  else rdRender(h.ch, {hit: h});
+}
+function rdGoPos(pos) {
+  if (!pos) return;
+  if (rd.pack.view === "pdf") rdPdfGo(pos.page || 0, pos.f || 0);
+  else rdRender(Math.min(rd.pack.chapters.length - 1, pos.ch || 0), {f: pos.f || 0});
+}
+function rdMarkHere() {
+  if (!rd.pack) return null;
+  if (rd.pack.view === "pdf") return rd.marks.find(m => m.pos && m.pos.page === rd.page);
+  if (rdPrefs.mode === "scroll") return rd.marks.find(m => m.pos && m.pos.ch === rd.ch && Math.abs((m.pos.f || 0) - rdF()) < 0.02);
+  return rd.marks.find(m => m.pos && m.pos.ch === rd.ch && Math.min(rd.pages - 1, Math.round((m.pos.f || 0) * rd.pages)) === rd.page);
+}
+async function rdToggleMark() {
+  const here = rdMarkHere();
+  let text = "";
+  if (rd.pack.view === "pdf") text = `第 ${rd.page + 1} 页` + (rdTocTitle() ? " · " + rdTocTitle() : "");
+  else { const el = rdAnchor(); text = (el ? el.textContent : "").replace(/\s+/g, " ").trim().slice(0, 60) || rdTocTitle(); }
+  const j = here ? await bookApi(rd.id, `/marks/${here.id}/delete`) : await bookApi(rd.id, "/marks", {pos: rdPos(), pct: rdPct(), text});
+  if (!j || !rd.id) return;
+  rd.marks = j.book.marks || [];
+  toast(here ? "删除了书签" : "加了书签");
+  rdUpdate();
+  if (!$("#rdPanel").hidden) rdRenderPanel();
+}
+
+/* settings */
+function rdOpenSettings() {
+  rdClosePanels();
+  $("#rdSet").hidden = false; $("#rdShade").hidden = false;
+  rdRenderSettings();
+}
+function rdRenderSettings() {
+  const s = rdPrefs, pdf = rd.pack && rd.pack.view === "pdf";
+  const seg = (k, opts) => `<div class="seg">${opts.map(([v, t]) => `<button class="${s[k] === v ? "on" : ""}" onclick="rdPref('${k}', ${JSON.stringify(v).replace(/"/g, "'")})">${t}</button>`).join("")}</div>`;
+  $("#rdSet").innerHTML = (pdf ? "" : `
+    <div class="rd-row"><span>字号</span><button class="rd-btn" onclick="rdPref('size', -1)">A－</button><b style="text-align:center">${s.size}</b><button class="rd-btn" onclick="rdPref('size', 1)">A＋</button></div>
+    <div class="rd-row"><span>行距</span>${seg("lh", [[1.5, "紧"], [1.8, "中"], [2.1, "松"]])}</div>
+    <div class="rd-row"><span>字体</span>${seg("font", [["serif", "宋体"], ["sans", "黑体"], ["pixel", "像素"]])}</div>
+    <div class="rd-row"><span>翻页</span>${seg("mode", [["paged", "左右翻页"], ["scroll", "上下滚动"]])}</div>`)
+    + `<div class="rd-row"><span>背景</span>${seg("theme", [["paper", "米色"], ["night", "夜间"]])}</div>
+    <p class="hint" style="margin:10px 0 0">${pdf ? "PDF 用下面的 －／＋ 缩放，双指也可以放大。" : "点页面左边 / 右边翻页，点中间显示菜单；也可以左右滑。电脑上用方向键或滚轮。"}</p>`;
+}
+function rdPref(k, v) {
+  const keep = rd.pack && rd.pack.view !== "pdf" ? rdF() : 0;
+  if (k === "size") rdPrefs.size = rdPrefs.font === "pixel" ? (v > 0 ? 24 : 12) : Math.max(12, Math.min(36, rdPrefs.size + v));
+  else rdPrefs[k] = v;
+  if (k === "font" && v === "pixel") rdPrefs.size = rdPrefs.size >= 18 ? 24 : 12;  // the pixel font is sharp at 12 and 24 only
+  lsSet("readerPrefs", JSON.stringify(rdPrefs));
+  rdApplyPrefs();
+  rdRenderSettings();
+  if (!rd.pack || rd.pack.view === "pdf") return;
+  if (k === "mode") rdRender(rd.ch, {f: keep});
+  else if (k !== "theme") rdRelayout();
+}
+
+/* PDF: pdf.js draws the pages that come near; far ones are let go (phones have little memory for pictures) */
+async function rdSetupPdf(pos, at) {
+  $("#rdView").hidden = true;
+  const box = $("#rdPdf");
+  box.hidden = false;
+  rdZoomButtons(true);
+  $("#rdLoad").textContent = `正在打开《${rd.b.title}》…`;
+  const id = rd.id;
+  const pdfjs = await import("/static/pdfjs/pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.mjs";
+  const opts = {cMapUrl: "/static/pdfjs/cmaps/", cMapPacked: true, standardFontDataUrl: "/static/pdfjs/standard_fonts/",
+                wasmUrl: "/static/pdfjs/wasm/", iccUrl: "/static/pdfjs/iccs/", enableXfa: false};
+  if (rd.file) opts.data = new Uint8Array(await rd.file.arrayBuffer());
+  else opts.url = `/bookfile/${id}?v=${rd.b.version}`;
+  const task = pdfjs.getDocument(opts);
+  rd.pdfTask = task;
+  const pdf = await task.promise;
+  if (rd.id !== id) { task.destroy(); return; }
+  rd.pdf = pdf;
+  rdPdfBuild();
+  $("#rdLoad").hidden = true;
+  rdPdfGo(at && at.hit ? at.hit.ch : (pos && pos.page) || 0, at && at.hit ? 0 : (pos && pos.f) || 0);
+}
+function rdZoomButtons(on) { $("#rdZoomIn").hidden = $("#rdZoomOut").hidden = !on; }
+function rdPdfBuild() {
+  const box = $("#rdPdf"), sizes = rd.pack.sizes, n = rd.pack.pages;
+  const base = Math.min(box.clientWidth - 16, 980) * rd.zoom;
+  if (rd.io) rd.io.disconnect();
+  box.innerHTML = "";
+  rd.pdfEls = [];
+  for (let i = 0; i < n; i++) {
+    const [w, h] = sizes[i] || sizes[0];
+    const el = document.createElement("div");
+    el.className = "pdfpage";
+    el.style.width = base + "px";
+    el.style.height = (base * h / w) + "px";
+    el.dataset.i = i;
+    el.innerHTML = `<span class="pn">${i + 1}</span>`;
+    box.appendChild(el);
+    rd.pdfEls.push(el);
+  }
+  rd.io = new IntersectionObserver(es => es.forEach(e => e.isIntersecting ? rdPdfDraw(+e.target.dataset.i) : rdPdfUndraw(+e.target.dataset.i)),
+                                   {root: box, rootMargin: "120% 0px"});
+  rd.pdfEls.forEach(el => rd.io.observe(el));
+}
+function rdPdfRebuild() { const page = rd.page, f = rd.pf || 0; rd.zoomKey++; rdPdfBuild(); rdPdfGo(page, f); }
+async function rdPdfDraw(i) {
+  const el = rd.pdfEls[i], key = String(rd.zoomKey);
+  if (!el || el.dataset.drawn === key || !rd.pdf) return;
+  el.dataset.drawn = key;
+  const pdf = rd.pdf;
+  let page;
+  try { page = await pdf.getPage(i + 1); } catch (e) { return; }
+  if (rd.pdf !== pdf || el.dataset.drawn !== key) return;
+  const vp1 = page.getViewport({scale: 1});
+  let scale = el.clientWidth / vp1.width * Math.min(devicePixelRatio || 1, 2);
+  const most = 5e6;  // pixels per page at most (iPhones refuse huge canvases)
+  if (vp1.width * vp1.height * scale * scale > most) scale = Math.sqrt(most / (vp1.width * vp1.height));
+  const vp = page.getViewport({scale}), canvas = document.createElement("canvas");
+  canvas.width = Math.floor(vp.width); canvas.height = Math.floor(vp.height);
+  const task = page.render({canvas, viewport: vp});
+  el._task = task;
+  try { await task.promise; } catch (e) { return; }
+  if (el.dataset.drawn !== key) { canvas.width = canvas.height = 0; return; }
+  const old = el.querySelector("canvas");
+  if (old) { old.width = old.height = 0; old.remove(); }
+  el.appendChild(canvas);
+}
+function rdPdfUndraw(i) {
+  const el = rd.pdfEls && rd.pdfEls[i];
+  if (!el) return;
+  if (el._task) { try { el._task.cancel(); } catch (e) {} el._task = null; }
+  const c = el.querySelector("canvas");
+  if (c) { c.width = c.height = 0; c.remove(); }
+  delete el.dataset.drawn;
+}
+function rdPdfGo(i, f = 0) {
+  if (!rd.pdfEls) return;
+  i = Math.max(0, Math.min(rd.pdfEls.length - 1, i));
+  const el = rd.pdfEls[i];
+  $("#rdPdf").scrollTop = el.offsetTop + f * el.offsetHeight - 8;
+  rd.page = i; rd.pf = f;
+  rdUpdate();
+  rdTouched();
+}
+function rdPdfScrolled() {
+  if (!rd.pdfEls || !rd.pdfEls.length) return;
+  const box = $("#rdPdf"), y = box.scrollTop + box.clientHeight * 0.3;
+  let lo = 0, hi = rd.pdfEls.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (rd.pdfEls[mid].offsetTop <= y) lo = mid; else hi = mid - 1; }
+  const el = rd.pdfEls[lo];
+  rd.page = lo;
+  rd.pf = Math.max(0, Math.min(1, (box.scrollTop - el.offsetTop + 8) / el.offsetHeight));
+  rdUpdate();
+  rdTouched();
+}
+function rdZoom(d) {
+  if (!rd.pdf) return;
+  rd.zoom = Math.max(0.5, Math.min(4, rd.zoom * (d > 0 ? 1.25 : 0.8)));
+  rdPdfRebuild();
+  toast(`缩放 ${Math.round(rd.zoom * 100)}%`);
+}
+
+/* ---------- 每周总结 ---------- */
+let weeklyData = null, weeklyPick = 0;
+async function openWeekly() {
+  $("#weeklySheet").hidden = false;
+  if (!weeklyData) $("#weeklyBody").innerHTML = "<h2>每周总结</h2><p class='hint'>正在统计…</p>";
+  try { weeklyData = await (await fetch("/api/weekly")).json(); } catch (e) { toast("连不上 Pi"); return; }
+  renderWeekly();
+}
+function mins(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : sec > 0 && sec < 60 ? "不到 1 分钟" : Math.round(sec / 60) + " 分钟"; }
+function renderWeekly() {
+  const weeks = [weeklyData.current, ...weeklyData.past.filter(w => w.start !== weeklyData.current.start)];
+  const w = weeks[weeklyPick] || weeks[0], bl = w.backlog;
+  const pick = `<select onchange="weeklyPick = +this.value; renderWeekly()">${weeks.map((x, i) =>
+    `<option value="${i}"${i === weeklyPick ? " selected" : ""}>${i === 0 ? "本周到现在" : "上周"} ${esc(x.start.slice(5))} ~ ${esc(x.end.slice(5))}</option>`).join("")}</select>`;
+  const stat = (v, k) => `<div class="ustat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+  const B = w.books, V = w.videos, N = w.notes;
+  const peak = Math.max(60, ...w.days.map(d => d.read + d.watch));
+  const bars = `<div class="wkbars">${w.days.map(d => `<div title="${d.day} 读书 ${mins(d.read)} · 看视频 ${mins(d.watch)} · 随记 ${d.notes} 条">
+      <i class="r" style="height:${d.read / peak * 100}%"></i><i class="w" style="height:${d.watch / peak * 100}%"></i>${d.notes ? `<em class="n">${"■".repeat(Math.min(d.notes, 3))}</em>` : ""}</div>`).join("")}</div>
+    <div class="wkdays">${w.days.map(d => `<span>${"日一二三四五六"[new Date(d.day + "T12:00").getDay()]}</span>`).join("")}</div>
+    <div class="wklegend"><i style="background:var(--accent)"></i>读书<i style="background:var(--blue)"></i>看视频<i style="background:var(--green)"></i>随记</div>`;
+  const amount = (B.chars ? `约 ${wan(B.chars)} 字` : "") + (B.pages ? `${B.chars ? "、" : "约 "}${B.pages} 页` : "");
+  const books = B.list.map(b => `<div class="wkrow"><span><a onclick="hide($('#weeklySheet')); openReader(${b.id})">《${esc(b.title)}》</a>${b.done ? ' <span class="pv on">读完</span>' : ""}</span>
+      <span class="sub">${b.from != null && b.to != null ? `${pctStr(b.from)} → ${pctStr(b.to)}` : ""}${b.seconds ? " · " + mins(b.seconds) : ""}</span></div>`).join("");
+  const vids = V.top.map(v => `<div class="wkrow"><span><a onclick="hide($('#weeklySheet')); openJob(${v.id})">${esc(v.title)}</a></span><span class="sub">${mins(v.seconds)}</span></div>`).join("");
+  let back = "";
+  if (bl) {
+    const subs = bl.subs.filter(s => s.waiting || s.unwatched || s.failed).map(s => `<div class="wkrow"><span><a onclick="hide($('#weeklySheet')); setChip('sub:${s.id}')">${esc(s.name)}</a></span>
+        <span class="sub">${[s.waiting ? `${s.waiting} 个没下完` : "", s.failed ? `${s.failed} 个失败` : "", s.unwatched ? `${s.unwatched} 个没看${s.started ? `（${s.started} 个看了一半）` : ""}` : ""].filter(Boolean).join(" · ")}</span></div>`).join("");
+    const reading = bl.reading.map(b => `<div class="wkrow"><span><a onclick="hide($('#weeklySheet')); openReader(${b.id})">《${esc(b.title)}》</a></span>
+        <span class="sub">读到 ${pctStr(b.pct)} · 还剩${b.view === "pdf" ? ` ${b.left} 页` : `约 ${wan(b.left)} 字`} · 约 ${mins(b.seconds_left)}</span></div>`).join("");
+    back = `<div class="usec"><b>追更还剩</b><span class="sub">${weeklyPick === 0 ? "现在" : "那周一早上"}</span></div>
+      ${bl.subs.length ? `<div class="ugrid">${stat(bl.sub_waiting, "个还没下载完")}${stat(bl.sub_unwatched, "个下好了还没看完")}${bl.sub_failed ? stat(bl.sub_failed, "个下载失败") : ""}</div>${subs || '<p class="hint">都看完了。</p>'}` : '<p class="hint">没有追更的 UP 主。</p>'}
+      <div class="usec"><b>在追的书</b><span class="sub">按你的速度：每分钟约 ${bl.speed.chars_per_min} 字${bl.reading.some(b => b.view === "pdf") ? `、${bl.speed.minutes_per_page} 分钟一页` : ""}</span></div>
+      ${reading || '<p class="hint">没有读到一半的书。</p>'}
+      <p class="hint">书架共 ${bl.books_total} 本，读完 ${bl.books_done} 本${bl.want ? `，想读 ${bl.want} 本` : ""}${bl.unopened ? `，${bl.unopened} 本还没打开过` : ""}。</p>`;
+  }
+  $("#weeklyBody").innerHTML = `<div class="dhead"><b>每周总结</b>${pick}</div>
+    <div class="ugrid" style="margin-top:12px">
+      ${stat(mins(B.seconds), `读书 · ${B.count} 本${B.finished ? `，读完 ${B.finished} 本` : ""}${amount ? "<br>" + amount : ""}`)}
+      ${stat(V.watched + " 个", `看了视频${V.finished ? ` · 看完 ${V.finished} 个` : ""}${V.seconds ? "<br>共 " + mins(V.seconds) : ""}`)}
+      ${stat(V.added + " 个", `新视频${V.added_subs ? ` · 追更 ${V.added_subs} 个` : ""}`)}
+      ${stat(N.count + " 条", `随记${[N.photos ? `照片 ${N.photos}` : "", N.videos ? `视频 ${N.videos}` : "", N.voice ? `语音 ${N.voice}` : ""].filter(Boolean).map(x => " · " + x).join("")}`)}
+    </div>
+    ${bars}
+    ${books ? `<div class="usec"><b>读的书</b></div>${books}` : ""}
+    ${vids ? `<div class="usec"><b>看得最久的视频</b></div>${vids}` : ""}
+    ${back}
+    <p class="hint">每周一早上 8 点把上一周记下来；"本周到现在" 随时更新。阅读和观看时长从加了这个功能才开始记。</p>
+    <button class="btn plain wide" onclick="hide($('#weeklySheet'))">关闭</button>`;
+}
 
 /* ---------- 问拾光 ---------- */
 function openAsk() { $("#askSheet").hidden = false; setTimeout(() => $("#askText").focus(), 50); }
@@ -1911,7 +3235,7 @@ function searchFor(t) { closeWatch(); $("#search").value = t; query = t; refresh
 let searchTimer;
 // A sentence ("上个月小王讲伊朗、画面里有地图的片段") is read by the AI once typing pauses; words search right away
 let smartSearch = false, exactSearch = false;
-function looksLikeSentence(t) { return t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes"; }
+function looksLikeSentence(t) { return t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
   const t = $("#search").value.trim();
@@ -1920,7 +3244,14 @@ $("#search").oninput = () => {
 };
 function searchExact() { exactSearch = true; lastBody = ""; refresh(); }
 
-refresh();
+refresh().then(() => {
+  // a link to a book (#book=12) opens it; so does reloading the page while reading
+  const m = /^#book=(\d+)$/.exec(location.hash);
+  if (m) openReader(+m[1]);
+});
+refreshCacheIndex();
+// over https (from outside) the page itself is kept too, so cached books open without the Pi
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 </body>
 </html>

@@ -128,6 +128,10 @@ def traffic_loop():
         except Exception:
             traceback.print_exc()
         try:
+            weekly.make_reports()
+        except Exception:
+            traceback.print_exc()
+        try:
             llm.record_balance()
         except Exception:
             traceback.print_exc()
@@ -188,4 +192,4 @@ def usage_summary():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import board, llm, tasks  # noqa: E402
+from . import board, llm, tasks, weekly  # noqa: E402

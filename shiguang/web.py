@@ -1,4 +1,5 @@
 """The web page and its API, accounts and privacy, the task board over HTTP."""
+import gzip
 import hmac
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+import zipfile
 
 from flask import Response
 from flask import g
@@ -21,7 +23,7 @@ from flask import session
 from pathlib import Path
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
-from .core import (ADMIN_PASSWORD, AUDIO_EXT, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, q, safe_name, secret_key)
+from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, q, safe_name, secret_key)
 
 
 DEVICE_COOKIE = "grabber_device"
@@ -64,7 +66,7 @@ def phone_owner(name):
 
 
 # From outside, only these work without logging in (everything else needs an account)
-PUBLIC_PATHS = ("/", "/api/login", "/api/jobs", "/api/account")
+PUBLIC_PATHS = ("/", "/api/login", "/api/jobs", "/api/account", "/sw.js")
 login_failures = {}  # ip -> [failed attempts, first failure time]
 
 
@@ -118,6 +120,8 @@ def identify():
     g.device_label = device_label(request.headers.get("User-Agent"))
     if request.path.startswith("/api/notes") and request.method == "POST":
         request.max_content_length = NOTE_MAX_UPLOAD
+    if request.path.startswith("/api/books") and request.method == "POST":
+        request.max_content_length = BOOK_MAX_UPLOAD
     # Remember where each browser was last seen (throttled; the page polls every 2 s)
     key = (g.device, client_ip())
     if time.time() - _seen_cache.get(key, 0) > 600:
@@ -155,6 +159,10 @@ def sign_in(name):
     q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     q("UPDATE notes SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     q("UPDATE OR IGNORE watch SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    # the books on this browser's shelf and where it was in them
+    q("UPDATE books SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    for t in ("book_read", "book_marks", "activity"):
+        q(f"UPDATE OR IGNORE {t} SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     # bring this device's privacy settings into the account
     dev, acc = privacy_get(g.device), privacy_get(f"user:{name}")
     privacy_set(f"user:{name}", list(dict.fromkeys(acc["tags"] + dev["tags"])), list(dict.fromkeys(acc["ids"] + dev["ids"])))
@@ -349,6 +357,14 @@ def static_file(name):
     return send_from_directory(HERE / "static", name, max_age=30 * 86400)
 
 
+@app.get("/sw.js")
+def service_worker():
+    """Keeps the page itself for reading cached books without the Pi (only works over https; see static/sw.js)."""
+    resp = send_from_directory(HERE / "static", "sw.js", mimetype="text/javascript", max_age=0)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.get("/favicon.ico")
 def favicon():
     return send_from_directory(HERE / "static", "favicon.ico", max_age=30 * 86400, mimetype="image/x-icon")
@@ -392,19 +408,26 @@ def add_post():
         m = re.search(r'"device"\s*:\s*"([^"]{1,60})"', raw)
         device = m.group(1) if m else ""
     source = f"shortcut:{device}" if device else "web"
-    hows, subs = [], []
+    hows, subs, shelf = [], [], []
     for u in find_urls(text):
         if channels.channel_of(u):  # an uploader's page: follow it instead of downloading the page
             sid, how = channels.add_sub(u, g.owner, g.device_label)
             subs.append({"id": sid, "how": how})
             continue
+        if books.is_book_url(u):  # a link to an .epub / .pdf / .txt / .mobi file: onto the shelf
+            bid, how = books.add_url(g.owner, g.device_label, u)
+            if how == "new":
+                board.publish("book_import", f"book:{bid}", 80, force=True)
+            shelf.append({"id": bid, "how": how})
+            continue
         jid, how = pipeline.add_job_ex(u, source=source, owner=g.owner, device=g.device_label)
         ids.append(jid)
         hows.append(how)
-    if not ids and subs:
+    if not ids and (subs or shelf):
         if not request.cookies:
-            return Response(f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载", mimetype="text/plain")
-        return jsonify(ids=[], duplicates=[], linked=[], subs=subs)
+            return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",
+                                                  f"{len(shelf)} 本电子书加到书架了" if shelf else "") if x), mimetype="text/plain")
+        return jsonify(ids=[], duplicates=[], linked=[], subs=subs, books=shelf)
     if not ids and not request.cookies and text.strip():
         # the iOS / Android shortcut shared plain text (no link): keep it as a 随记
         now = time.time()
@@ -420,11 +443,12 @@ def add_post():
     if not request.cookies:
         # iOS shortcut / Android HTTP Shortcuts show the reply as a notification: keep it readable
         new = len(ids) - len(dupes) - len(linked)
-        msg = "，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主" if subs else "", f"开始下载 {new} 个" if new else "",
+        msg = "，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主" if subs else "", f"{len(shelf)} 本电子书加到书架了" if shelf else "",
+                                    f"开始下载 {new} 个" if new else "",
                                     f"{len(linked)} 个别人已经下过，直接加进来了" if linked else "",
                                     f"{len(dupes)} 个已经在拾光里了" if dupes else "") if x)
         return Response(msg, mimetype="text/plain")
-    return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs)
+    return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs, books=shelf)
 
 
 def owner_label(o):
@@ -569,12 +593,37 @@ def jobs():
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
                    subs=subs_list(), sub_interval=channels.SUB_INTERVAL, more=more,
                    notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
+                   books=q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
+                   # ... and books: by title / author and by what's written in them
+                   book_hits=book_hits(term) if term and not parsed else [],
+                   reading=reading_now() if not term else [],
                    # a search also shows matching 随记 among the videos
                    note_hits=[notes.note_dict(r, m, seen) for r, m, seen in
                               search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
                    if term else [],
                    understood=search.understood(parsed) if parsed else None,
                    partial=bool(parsed and out and out[0].get("partial")), cats=category_counts())
+
+
+def reading_now():
+    """继续阅读: the books you're in the middle of, last read first."""
+    reads = q("SELECT * FROM book_read WHERE owner=? AND done=0 AND pct > 0 ORDER BY updated DESC LIMIT 8", (g.owner,))
+    rows = {r["id"]: r for r in q(f"SELECT * FROM books WHERE owner=? AND id IN ({','.join('?' * len(reads))})",
+                                  (g.owner, *[r["book"] for r in reads]))} if reads else {}
+    return [books.book_dict(rows[r["book"]], r) for r in reads if r["book"] in rows]
+
+
+def book_hits(term):
+    found = books.search(g.owner, term, limit=60)
+    if not found:
+        return []
+    reads = {r["book"]: r for r in q("SELECT * FROM book_read WHERE owner=?", (g.owner,))}
+    out = []
+    for r in q(f"SELECT * FROM books WHERE id IN ({','.join('?' * len(found))})", list(found)):
+        d = books.book_dict(r, reads.get(r["id"]))
+        d["hits"] = found[r["id"]][:5]
+        out.append(d)
+    return sorted(out, key=lambda d: -d["updated"])[:20]
 
 
 def subs_list():
@@ -717,6 +766,19 @@ def api_ingest():
         return jsonify(error=f"no account {account!r}"), 400
     g.owner, g.device_label = f"user:{account}", "Mac mini · 投递"
     return note_add()
+
+
+@app.post("/api/tasks/ingest-book")
+def api_ingest_book():
+    """The Mac's drop folder: an e-book dropped there goes onto `account`'s shelf."""
+    if (denied := compute_auth()):
+        return denied
+    request.max_content_length = BOOK_MAX_UPLOAD
+    account = str(request.form.get("account", ""))
+    if not q("SELECT 1 FROM users WHERE name=?", (account,), one=True):
+        return jsonify(error=f"no account {account!r}"), 400
+    g.owner, g.device_label = f"user:{account}", "Mac mini · 投递"
+    return books_upload()
 
 
 @app.post("/api/tasks/<int:tid>/release")
@@ -938,6 +1000,251 @@ def note_file(nid, n, what="file"):
     return send_file(path, conditional=True, max_age=86400)  # Range requests: videos seek, iPhones play them
 
 
+# ---------------------------------------------------------------- 书架: e-books
+
+def book_row(bid):
+    """The book if it's on this browser's / account's shelf (shelves are private, like 随记)."""
+    row = q("SELECT * FROM books WHERE id=?", (bid,), one=True)
+    return row if row and row["owner"] == g.owner else None
+
+
+@app.get("/api/books")
+def books_list():
+    """The shelf; with q: books whose title / author / text has the words, and where in the text."""
+    term = request.args.get("q", "").strip()
+    hits = books.search(g.owner, term) if term else None
+    reads = {r["book"]: r for r in q("SELECT * FROM book_read WHERE owner=?", (g.owner,))}
+    out = []
+    for r in q("SELECT * FROM books WHERE owner=? ORDER BY id DESC", (g.owner,)):
+        if hits is not None and r["id"] not in hits:
+            continue
+        d = books.book_dict(r, reads.get(r["id"]))
+        if hits:
+            d["hits"] = hits[r["id"]]
+        out.append(d)
+    return jsonify(books=out)
+
+
+@app.post("/api/books")
+def books_upload():
+    """Files (`file`, several at once) and/or a link (`url`) onto the shelf."""
+    added, dupes, bad = [], [], []
+    for f in request.files.getlist("file"):
+        bid, how = books.add_file(g.owner, g.device_label, f)
+        if how == "new":
+            added.append(bid)
+        elif how == "duplicate":
+            dupes.append(bid)
+        else:
+            bad.append(f.filename)
+    url = (request.form.get("url") or (request.get_json(silent=True) or {}).get("url") or "").strip()
+    if url:
+        if not URL_RE.fullmatch(url):
+            bad.append(url)
+        else:
+            bid, how = books.add_url(g.owner, g.device_label, url)
+            (added if how == "new" else dupes).append(bid)
+    for bid in added:
+        board.publish("book_import", f"book:{bid}", 80, force=True)
+    if not added and not dupes:
+        return jsonify(error="不是电子书（支持 EPUB、PDF、TXT、MOBI、AZW3）", bad=bad), 400
+    return jsonify(ids=added, duplicates=dupes, bad=bad)
+
+
+@app.get("/api/books/<int:bid>")
+def book_info(bid):
+    row = book_row(bid)
+    if not row:
+        return jsonify(error="not found"), 404
+    read = q("SELECT * FROM book_read WHERE owner=? AND book=?", (g.owner, bid), one=True)
+    d = books.book_dict(row, read)
+    d["toc"] = json.loads(row["toc"] or "[]")
+    d["marks"] = [{"id": m["id"], "pos": json.loads(m["pos"] or "null"), "pct": m["pct"], "text": m["text"], "created": m["created"]}
+                  for m in q("SELECT * FROM book_marks WHERE owner=? AND book=? ORDER BY pct", (g.owner, bid))]
+    return jsonify(book=d)
+
+
+@app.get("/api/books/<int:bid>/pack")
+def book_pack(bid):
+    """Everything needed to read the book (chapters, contents; for a PDF its page sizes), gzipped once at import."""
+    row = book_row(bid)
+    path = BOOKS_DIR / f"{bid}.pack.json.gz"
+    if not row or row["status"] != "ready" or not path.exists():
+        return jsonify(error="not ready"), 404
+    if "gzip" not in request.headers.get("Accept-Encoding", ""):
+        return Response(gzip.decompress(path.read_bytes()), mimetype="application/json")
+    resp = send_file(path, mimetype="application/json", conditional=False)
+    resp.headers.update({"Content-Encoding": "gzip", "Vary": "Accept-Encoding", "Cache-Control": "no-cache"})
+    return resp
+
+
+@app.get("/bookres/<int:bid>")
+def book_res(bid):
+    """A picture inside a book (`p`: its path in the EPUB). Served so that an SVG can't run anything."""
+    row = book_row(bid)
+    path = request.args.get("p", "")
+    zpath = books.res_zip(row) if row else None
+    ctype = books.IMAGE_TYPES.get(Path(path).suffix.lower())
+    if not zpath or not ctype:
+        return "", 404
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            data = z.read(path)
+    except KeyError:
+        return "", 404
+    resp = Response(data, mimetype=ctype)
+    resp.headers.update({"Cache-Control": "private, max-age=2592000", "X-Content-Type-Options": "nosniff",
+                         "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox"})
+    return resp
+
+
+@app.get("/bookcover/<int:bid>")
+def book_cover(bid):
+    row = book_row(bid)
+    path = BOOKS_DIR / f"{bid}.jpg"
+    if not row or not path.exists():
+        return "", 404
+    return send_file(path, max_age=86400)
+
+
+@app.get("/bookfile/<int:bid>")
+def book_file(bid):
+    """The book's file: as it was sent (?download=1), or the PDF the reader shows (Range requests work)."""
+    row = book_row(bid)
+    if not row or not row["file"] or not (BOOKS_DIR / row["file"]).exists():
+        return "", 404
+    if request.args.get("download"):
+        return send_file(BOOKS_DIR / row["file"], as_attachment=True,
+                         download_name=safe_name(row["title"] or "book", 100) + Path(row["file"]).suffix)
+    if row["view"] != "pdf":
+        return "", 404
+    return send_file(books.pdf_file(row), mimetype="application/pdf", conditional=True, max_age=0)
+
+
+@app.post("/api/books/<int:bid>")
+def book_edit(bid):
+    """title, author, shelf ("want" / ""), done (true/false: 读完 / not), reset (forget where you are)."""
+    row = book_row(bid)
+    if not row:
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    title = str(body.get("title", row["title"])).strip()[:200] or row["title"]
+    author = str(body.get("author", row["author"])).strip()[:100]
+    shelf = body.get("shelf", row["shelf"]) if body.get("shelf", row["shelf"]) in ("", "want") else row["shelf"]
+    q("UPDATE books SET title=?, author=?, shelf=?, updated=? WHERE id=?", (title, author, shelf, time.time(), bid))
+    now = time.time()
+    if body.get("reset"):
+        q("DELETE FROM book_read WHERE owner=? AND book=?", (g.owner, bid))
+    elif "done" in body:
+        done = bool(body["done"])
+        q("INSERT INTO book_read (owner, book, pct, done, started, finished, updated) VALUES (?,?,?,?,?,?,?) "
+          "ON CONFLICT(owner, book) DO UPDATE SET done=excluded.done, finished=excluded.finished, updated=excluded.updated",
+          (g.owner, bid, 1.0 if done else 0, int(done), now, now if done else None, now))
+    return jsonify(ok=True)
+
+
+@app.post("/api/books/<int:bid>/delete")
+def book_delete(bid):
+    row = book_row(bid)
+    if not row:
+        return jsonify(error="not found"), 404
+    books.remove(row)
+    return jsonify(ok=True)
+
+
+@app.post("/api/books/<int:bid>/retry")
+def book_retry(bid):
+    row = book_row(bid)
+    if not row:
+        return jsonify(error="not found"), 404
+    q("UPDATE books SET status='importing', error='', updated=? WHERE id=?", (time.time(), bid))
+    board.publish("book_import", f"book:{bid}", 80, force=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/books/<int:bid>/replace")
+def book_replace(bid):
+    """A newer file of the same book (a TXT novel with new chapters): read again; where you are stays."""
+    row = book_row(bid)
+    f = request.files.get("file")
+    if not row or not f:
+        return jsonify(error="not found"), 404
+    err = books.replace_file(row, f)
+    if err:
+        return jsonify(error=err), 400
+    board.publish("book_import", f"book:{bid}", 80, force=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/books/<int:bid>/progress")
+def book_progress(bid):
+    """Where reading is (pos: {ch, f} or {page, f}; pct: of the whole book) and the seconds read since the last save.
+    `at`: when it was read (saves made offline come later); an older position doesn't overwrite a newer one."""
+    if not book_row(bid):
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        pct = max(0.0, min(1.0, float(body.get("pct") or 0)))
+        at = min(float(body.get("at") or time.time()), time.time())
+    except (TypeError, ValueError):
+        return jsonify(error="bad position"), 400
+    pos = json.dumps(body.get("pos"))[:500]
+    prev = q("SELECT * FROM book_read WHERE owner=? AND book=?", (g.owner, bid), one=True)
+    weekly.record(g.owner, "book", bid, body.get("secs"), prev["pct"] if prev else 0, pct)
+    secs = max(0.0, min(float(body.get("secs") or 0), weekly.MAX_SAVE_SECONDS))
+    if prev and prev["updated"] and at < prev["updated"]:  # a newer position came from another device meanwhile
+        q("UPDATE book_read SET seconds=seconds+? WHERE owner=? AND book=?", (secs, g.owner, bid))
+        return jsonify(ok=True, stale=True)
+    done = bool(prev and prev["done"]) or pct >= 0.99
+    finished = (prev["finished"] if prev and prev["finished"] else time.time()) if done else None
+    q("INSERT INTO book_read (owner, book, pos, pct, done, seconds, started, finished, updated) VALUES (?,?,?,?,?,?,?,?,?) "
+      "ON CONFLICT(owner, book) DO UPDATE SET pos=excluded.pos, pct=excluded.pct, done=excluded.done, "
+      "seconds=seconds+excluded.seconds, started=COALESCE(started, excluded.started), finished=excluded.finished, "
+      "updated=excluded.updated", (g.owner, bid, pos, pct, int(done), secs, time.time(), finished, at))
+    if not prev and q("SELECT shelf FROM books WHERE id=?", (bid,), one=True)["shelf"] == "want":
+        q("UPDATE books SET shelf='' WHERE id=?", (bid,))  # started reading: no longer just 想读
+    return jsonify(ok=True, done=done)
+
+
+@app.post("/api/books/<int:bid>/marks")
+def book_mark_add(bid):
+    if not book_row(bid):
+        return jsonify(error="not found"), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        pct = max(0.0, min(1.0, float(body.get("pct") or 0)))
+    except (TypeError, ValueError):
+        return jsonify(error="bad position"), 400
+    q("INSERT INTO book_marks (owner, book, pos, pct, text, created) VALUES (?,?,?,?,?,?)",
+      (g.owner, bid, json.dumps(body.get("pos"))[:500], pct, str(body.get("text", ""))[:300], time.time()))
+    return book_info(bid)
+
+
+@app.post("/api/books/<int:bid>/marks/<int:mid>/delete")
+def book_mark_delete(bid, mid):
+    if not book_row(bid):
+        return jsonify(error="not found"), 404
+    q("DELETE FROM book_marks WHERE id=? AND owner=? AND book=?", (mid, g.owner, bid))
+    return book_info(bid)
+
+
+@app.get("/api/books/<int:bid>/search")
+def book_search(bid):
+    term = request.args.get("q", "").strip()
+    if not book_row(bid) or not term:
+        return jsonify(hits=[])
+    return jsonify(hits=books.search_in(bid, term))
+
+
+@app.get("/api/weekly")
+def weekly_get():
+    """每周总结: this week so far, and the weeks kept on Monday mornings."""
+    start = weekly.week_start()
+    past = [{**json.loads(r["body"]), "created": r["created"]}
+            for r in q("SELECT * FROM weekly WHERE owner=? ORDER BY start DESC LIMIT 12", (g.owner,))]
+    return jsonify(current=weekly.report(g.owner, start, weekly.plus_days(start, 7)), past=past)
+
+
 @app.get("/api/points/<int:jid>")
 def key_point_times(jid):
     if not visible(jid):
@@ -1022,7 +1329,10 @@ def save_watch(jid):
     except (TypeError, ValueError):
         return jsonify(error="bad position"), 400
     done = bool(body.get("ended")) or (dur > 0 and (pos > dur - 30 or pos / dur > 0.95))
-    prev = q("SELECT done FROM watch WHERE owner=? AND job_id=?", (g.owner, jid), one=True)
+    prev = q("SELECT done, pos, dur FROM watch WHERE owner=? AND job_id=?", (g.owner, jid), one=True)
+    if dur > 0:  # how long it was really played since the last save (每周总结)
+        weekly.record(g.owner, "video", jid, body.get("secs"), (prev["pos"] / prev["dur"]) if prev and prev["dur"] else 0,
+                      1.0 if done and body.get("ended") else min(1.0, pos / dur))
     q("INSERT INTO watch (owner, job_id, part, pos, dur, done, updated) VALUES (?,?,?,?,?,?,?) "
       "ON CONFLICT(owner, job_id) DO UPDATE SET part=excluded.part, pos=excluded.pos, dur=excluded.dur, "
       "done=excluded.done, updated=excluded.updated",
@@ -1170,4 +1480,4 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, channels, core, library, llm, notes, pipeline, search  # noqa: E402
+from . import ask, board, books, channels, core, library, llm, notes, pipeline, search, weekly  # noqa: E402

@@ -46,9 +46,10 @@ CLIP_MODEL = "chinese-clip-vit-base-patch16-int8"  # its name on the Pi (search.
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the same shot (talk shows: a handful)
 GAME_APPS = HERE / "game-apps.txt"
-DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text)
+DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
-CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 the drop folder fills
+CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 / 书架 the drop folder fills
+BOOK_EXT = {".epub", ".pdf", ".mobi", ".azw3", ".azw"}  # (.txt stays a 随记's text)
 MEDIA_EXT = {".jpg", ".jpeg", ".png", ".heic", ".gif", ".webp", ".mp4", ".mov", ".m4v", ".m4a", ".mp3", ".wav", ".aac"}  # more apps (names or bundle ids, one a line) that count as playing
 # Whisper's well-known inventions on silence and music (credits of the subtitle volunteers it was trained on)
 JUNK = ("字幕由", "Amara.org", "请不吝点赞", "订阅 转发", "打赏支持", "明镜与点点", "Thank you for watching",
@@ -108,7 +109,8 @@ _sizes = {}
 
 def check_drop():
     """Send what's been put in ~/拾光投递 (once its size stopped changing) to the Pi as a 随记, then move it to
-    已投递. One note per file; a .txt or .md next to a picture with the same name becomes its text."""
+    已投递. One note per file; a .txt or .md next to a picture with the same name becomes its text. E-books go onto
+    the account's 书架 instead."""
     if not CONFIG.exists():
         return
     account = json.loads(CONFIG.read_text()).get("account")
@@ -120,6 +122,17 @@ def check_drop():
         size = f.stat().st_size
         if _sizes.get(f) != size:  # still being copied in: look again next round
             _sizes[f] = size
+            continue
+        if f.suffix.lower() in BOOK_EXT:
+            with open(f, "rb") as fh:
+                r = http.post(PI + "/api/tasks/ingest-book", timeout=(10, 1800), data={"account": account},
+                              files=[("file", (f.name, fh))])
+            if r.status_code != 200:
+                log("drop folder: book not sent", f.name, r.text[:200])
+                continue
+            f.rename(DROPPED / f.name)
+            _sizes.pop(f, None)
+            log("drop folder: book sent", f.name)
             continue
         text_file = next((f.with_suffix(x) for x in (".txt", ".md") if f.with_suffix(x).exists()), None)
         if f.suffix.lower() in (".txt", ".md"):

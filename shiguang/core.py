@@ -22,6 +22,9 @@ INCOMPLETE = MEDIA / ".incomplete"
 # 随记 files live on the disks, not the SD card; the folder is private to the grabber user (the Samba share is public)
 NOTES_DIR = MEDIA / ".notes"
 NOTE_MAX_UPLOAD = 4 << 30  # one note's files at most (phone videos are big)
+# 书架: e-books (the file as sent, a cover, the readable "pack"); private to the grabber user like the notes
+BOOKS_DIR = MEDIA / ".books"
+BOOK_MAX_UPLOAD = 1 << 30  # one upload of books at most (scanned PDFs get big)
 STATE = Path(os.environ.get("STATE_DIR", "/var/lib/grabber"))
 # On the Pi the database lives on a hard disk (DB_PATH=/mnt/disk1/.grabber/grabber.db): it's written all day, which
 # wears out an SD card; the disks spin anyway
@@ -272,6 +275,28 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS health (ts REAL, cpu REAL, disks TEXT);
     -- DeepSeek balance over time: drops are what was really charged
     CREATE TABLE IF NOT EXISTS balance (ts REAL, currency TEXT, total REAL);
+    -- 书架: e-books per account (private like 随记). `fmt` = what was sent (epub, txt, pdf, mobi, azw3), `view` =
+    -- how it's read (flow: reflowed chapters; pdf: pages); `version` goes up when the file is replaced, so copies
+    -- cached on phones know they're stale; `shelf` = 'want' for 想读
+    CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, title TEXT DEFAULT '',
+        author TEXT DEFAULT '', lang TEXT DEFAULT '', fmt TEXT, view TEXT DEFAULT '', file TEXT DEFAULT '', size INTEGER DEFAULT 0,
+        sha1 TEXT, cover INTEGER DEFAULT 0, chars INTEGER DEFAULT 0, chapters INTEGER DEFAULT 0, toc TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'importing', error TEXT DEFAULT '', url TEXT DEFAULT '', shelf TEXT DEFAULT '',
+        version INTEGER DEFAULT 1, device TEXT, created REAL, updated REAL);
+    CREATE INDEX IF NOT EXISTS books_owner ON books (owner, id);
+    -- a book's text per chapter (per page for PDFs): search, how much there is to read
+    CREATE TABLE IF NOT EXISTS book_ch (book INTEGER, idx INTEGER, title TEXT, text TEXT, chars INTEGER,
+        PRIMARY KEY (book, idx));
+    -- where each account is in each book (继续阅读 on every device), reading time, 读完
+    CREATE TABLE IF NOT EXISTS book_read (owner TEXT, book INTEGER, pos TEXT, pct REAL DEFAULT 0, done INTEGER DEFAULT 0,
+        seconds REAL DEFAULT 0, started REAL, finished REAL, updated REAL, PRIMARY KEY (owner, book));
+    CREATE TABLE IF NOT EXISTS book_marks (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, book INTEGER, pos TEXT,
+        pct REAL, text TEXT, created REAL);
+    -- time spent per day reading a book / watching a video, and how far it got that day (每周总结)
+    CREATE TABLE IF NOT EXISTS activity (owner TEXT, day TEXT, kind TEXT, ref INTEGER, seconds REAL DEFAULT 0,
+        pct0 REAL, pct1 REAL, PRIMARY KEY (owner, day, kind, ref));
+    -- 每周总结: a week's numbers per account, kept as they were that Monday (what was still left to watch / read)
+    CREATE TABLE IF NOT EXISTS weekly (owner TEXT, start TEXT, end TEXT, body TEXT, created REAL, PRIMARY KEY (owner, start));
     """)
     from . import migrations  # imports core: only here, at run time
     migrations.run(DB)

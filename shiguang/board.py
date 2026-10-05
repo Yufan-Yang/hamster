@@ -72,6 +72,12 @@ def task_payload(kind, target):
             raise ValueError(f"no note {n.group(1)}")
         return {"note": int(n.group(1)), "title": (row["text"] or "随记")[:30],
                 "files": [{"file": m["file"], "kind": m["kind"]} for m in json.loads(row["media"]) if m.get("todo")]}
+    b = re.fullmatch(r"book:(\d+)", target)
+    if b:
+        row = q("SELECT title FROM books WHERE id=?", (int(b.group(1)),), one=True)
+        if not row:
+            raise ValueError(f"no book {b.group(1)}")
+        return {"book": int(b.group(1)), "title": row["title"] or "电子书"}
     d = re.fullmatch(r"(?:digest|notes-recap):(.+):(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)", target)
     if d:
         return {"owner": d.group(1), "start": d.group(2), "end": d.group(3), "title": f"{d.group(2)} ~ {d.group(3)}"}

@@ -139,6 +139,110 @@ check("transcripts compared", lambda: (G.text_alike("今天天气很好，我们
 check("forgiving note match", lambda: G.note_marks({"text": "Yannan San 结婚", "media": "[]"}, "yanan") or 1 / 0)
 check("place names", lambda: G.place_name(31.23, 121.47) == "上海" or 1 / 0)
 
+# ---- 书架: a small EPUB (with things that must not get through) and a GBK TXT, imported, read, searched, removed
+import io  # noqa: E402
+import json  # noqa: E402
+import zipfile  # noqa: E402
+
+for mod in (shiguang.core, shiguang.books, shiguang.web):  # book files go to the temp dir, not the library disks
+    mod.BOOKS_DIR = tmp / "books"
+
+
+def make_epub():
+    from PIL import Image
+    pic = io.BytesIO()
+    Image.new("RGB", (60, 80), (255, 0, 77)).save(pic, "PNG")
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("mimetype", "application/epub+zip", zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                   '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/content.opf", '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                   '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>测试之书</dc:title><dc:creator>某作者</dc:creator>'
+                   '<dc:language>zh</dc:language></metadata><manifest>'
+                   '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                   '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>'
+                   '<item id="c2" href="text/c2.xhtml" media-type="application/xhtml+xml"/>'
+                   '<item id="img" href="images/cover.png" media-type="image/png" properties="cover-image"/></manifest>'
+                   '<spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>')
+        z.writestr("OEBPS/nav.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+                   '<nav epub:type="toc"><ol><li><a href="text/c1.xhtml">第一章 开始</a></li>'
+                   '<li><a href="text/c2.xhtml#n1">第二章 注释</a></li></ol></nav></body></html>')
+        z.writestr("OEBPS/text/c1.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>x</title><style>p{color:red}</style>'
+                   '<script>alert(1)</script></head><body><h1>第一章 开始</h1><p onclick="alert(2)">拾光书架的第一段，'
+                   '见<a href="c2.xhtml#n1">注一</a>。</p><img src="../images/cover.png" alt="图"/>'
+                   '<p><a href="javascript:alert(3)">坏链接</a><iframe src="https://example.com"></iframe></p></body></html>')
+        z.writestr("OEBPS/text/c2.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第二章 注释</h1>'
+                   '<p>第二章的正文。</p><aside id="n1"><p>注一：这里是注释。</p></aside></body></html>')
+        z.writestr("OEBPS/images/cover.png", pic.getvalue())
+    return out.getvalue()
+
+
+book_ids = {}
+
+
+def upload(name, data):
+    r = c.post("/api/books", data={"file": (io.BytesIO(data), name)}, content_type="multipart/form-data")
+    assert r.status_code == 200, r.data[:200]
+    bid = r.get_json()["ids"][0]
+    G.import_book(bid)
+    return bid
+
+
+def epub_import():
+    bid = book_ids["epub"] = upload("测试.epub", make_epub())
+    pack = json.loads(c.get(f"/api/books/{bid}/pack").data)
+    assert [ch["t"] for ch in pack["chapters"]] == ["第一章 开始", "第二章 注释"], pack["chapters"]
+    html = pack["chapters"][0]["h"]
+    for bad in ("<script", "onclick", "javascript:", "<iframe", "<style", "alert"):
+        assert bad not in html, (bad, html)
+    assert 'data-go="1#x-n1"' in html and 'data-res="OEBPS/images/cover.png"' in html, html
+    assert pack["toc"][1] == {"t": "第二章 注释", "ch": 1, "lv": 0}, pack["toc"]
+    r = c.get(f"/bookres/{bid}?p=OEBPS/images/cover.png")
+    assert r.status_code == 200 and r.mimetype == "image/png" and "sandbox" in r.headers["Content-Security-Policy"]
+    assert c.get(f"/bookres/{bid}?p=OEBPS/text/c1.xhtml").status_code == 404  # pictures only
+    assert c.get(f"/bookcover/{bid}").status_code == 200
+    b = next(x for x in get("/api/books")["books"] if x["id"] == bid)
+    assert b["title"] == "测试之书" and b["author"] == "某作者" and b["status"] == "ready", b
+
+
+def txt_import():
+    text = "书名：测试小说\n作者：某人\n\n第一章 起\n　　第一章的内容，拾光书架。\n\n第二章 承\n　　第二章的内容。\n第三章 转\n　　内容三。\n"
+    bid = book_ids["txt"] = upload("测试小说.txt", text.encode("gb18030"))
+    pack = json.loads(c.get(f"/api/books/{bid}/pack").data)
+    assert [ch["t"] for ch in pack["chapters"]] == ["前言", "第一章 起", "第二章 承", "第三章 转"], [ch["t"] for ch in pack["chapters"]]
+    assert "第一章的内容" in pack["chapters"][1]["h"]
+
+
+def book_search_and_progress():
+    hits = get("/api/books?q=%E6%8B%BE%E5%85%89%E4%B9%A6%E6%9E%B6")["books"]  # 拾光书架
+    assert {b["id"] for b in hits} >= set(book_ids.values()), hits
+    assert get(f"/api/books/{book_ids['epub']}/search?q=%E6%B3%A8%E9%87%8A")["hits"]  # 注释
+    bid = book_ids["epub"]
+    assert post(f"/api/books/{bid}/progress", {"pos": {"ch": 1, "f": 0.5}, "pct": 0.6, "secs": 120})["ok"]
+    assert post(f"/api/books/{bid}/marks", {"pos": {"ch": 1, "f": 0}, "pct": 0.5, "text": "书签"})["book"]["marks"]
+    info = get(f"/api/books/{bid}")["book"]
+    assert info["read"]["pct"] == 0.6 and info["read"]["seconds"] == 120, info["read"]
+    w = get("/api/weekly")["current"]
+    assert any(b["id"] == bid for b in w["books"]["list"]) and w["books"]["seconds"] >= 120, w["books"]
+    assert "backlog" in w and "subs" in w["backlog"]
+    assert any(b["id"] == bid for b in get("/api/jobs")["reading"])
+
+
+def book_remove():
+    for bid in book_ids.values():
+        assert post(f"/api/books/{bid}/delete")["ok"]
+    assert not G.q("SELECT 1 FROM book_ch WHERE book IN (?, ?)", tuple(book_ids.values()), one=True)
+    assert not list((tmp / "books").glob(f"{book_ids['epub']}.*"))
+
+
+check("e-book: EPUB imported, cleaned (no scripts), links and pictures kept", epub_import)
+check("e-book: GBK TXT split into chapters", txt_import)
+check("e-book: search, progress, bookmark, 每周总结, 继续阅读", book_search_and_progress)
+check("e-book: removed with its files", book_remove)
+check("每周总结 for last week (Monday 8:00)", lambda: G.make_reports() or 1)
+check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.epub?dl=1") and not G.is_book_url("https://youtu.be/x")) or 1 / 0)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)

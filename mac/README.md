@@ -5,7 +5,7 @@ realtime, against ~1x for whisper small on the Pi), what covers and video keyfra
 model, ~30 ms a picture against ~3 s on the Pi) and the text on covers (macOS Vision). The board and everything else
 stay on the Pi; the Mac claims tasks (`/api/tasks/*` on the Pi, LAN only, token), hands results back, and can publish
 tasks itself. When the Mac is off, asleep or a game is in front, its tasks go back on the board and the Pi does them,
-slowly. Files put in `~/拾光投递` become 随记 of the account in `config.json`. Install: `./install.sh` (needs Homebrew `uv` and `ffmpeg`).
+slowly. Files put in `~/拾光投递` become 随记 of the account in `config.json` (e-books — EPUB, PDF, MOBI, AZW3 — go onto its 书架). Install: `./install.sh` (needs Homebrew `uv` and `ffmpeg`).
 
 ## Everything that was changed on the Mac (2026-10-04)
 

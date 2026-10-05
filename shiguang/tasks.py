@@ -12,7 +12,7 @@ import urllib.parse
 
 from pathlib import Path
 
-from . import board, download, library, llm, notes, search
+from . import board, books, download, library, llm, notes, search
 from .migrations import once
 from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, kv_set, log_usage, q, update)
 
@@ -609,6 +609,23 @@ def pi_explain_failure(task, beat):
     advice = f"{out.get('cause') or ''} {out.get('fix') or ''}".strip()
     q("UPDATE jobs SET advice=? WHERE id=?", (advice, jid))
     return {"advice": advice}
+
+
+@board.task("book_import", "导入电子书", "now")
+def pi_book_import(task, beat):
+    """A book just added (uploaded, a link, the Mac's drop folder): read it into chapters / pages, its text and the
+    pack phones cache. Someone is waiting for it, so it's done right away."""
+    bid = task["payload"]["book"]
+    try:
+        return books.import_book(bid, beat)
+    except books.BookError as e:  # not a readable book: say why on the shelf, don't try again
+        q("UPDATE books SET status='failed', error=?, updated=? WHERE id=?", (str(e), time.time(), bid))
+        raise ValueError(str(e))
+    except Exception as e:  # the network, a full disk...: the board tries again (1, 4, 9, 16 minutes)
+        last = (q("SELECT attempts FROM tasks WHERE id=?", (task["id"],), one=True) or {"attempts": 5})["attempts"] >= 5
+        q("UPDATE books SET status=?, error=?, updated=? WHERE id=?",
+          ("failed" if last else "importing", (f"导入出错{'' if last else '，稍后自动重试'}：{e}")[:300], time.time(), bid))
+        raise
 
 
 @once("notes_ai_backfilled", background=True)
