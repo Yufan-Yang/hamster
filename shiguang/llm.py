@@ -154,7 +154,9 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
                 log_usage("claude", purpose, job_id, amount=1, tokens_in=int(res.get("tokens_in") or 0),
                           tokens_out=int(res.get("tokens_out") or 0), seconds=float(res.get("seconds") or 0),
                           cache_hit=int(res.get("cache_read") or 0))
-                return {k: out.get(k) for k in fields}
+                # Claude sometimes writes "null" as text where the prompt allows null ("show": "null")
+                return {k: None if isinstance(out.get(k), str) and out[k].strip().lower() in ("null", "none") else out.get(k)
+                        for k in fields}
             if row["state"] == "failed":
                 print(f"claude {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
                 return None
