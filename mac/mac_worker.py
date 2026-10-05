@@ -444,7 +444,7 @@ def claude_loop(n):
                 continue
             task = call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS, wait=25)["task"]
         except requests.RequestException:
-            time.sleep(60)
+            time.sleep(5)  # the Pi restarting (a deploy): back soon, and someone may be waiting on a search
             continue
         if not task:
             continue

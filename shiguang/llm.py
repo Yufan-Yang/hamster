@@ -111,8 +111,10 @@ def record_balance():
 CLAUDE_VIA_MAC = os.environ.get("CLAUDE_VIA_MAC", "1") != "0"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
 CLAUDE_MODEL_LIGHT = os.environ.get("CLAUDE_MODEL_LIGHT", "haiku")  # short mechanical answers
-CLAUDE_LIGHT = {"classify", "tags", "failure", "notes"}
-CLAUDE_SKIP = {"search", "ask"}  # someone is looking at the screen: a few seconds matter, so DeepSeek first
+CLAUDE_LIGHT = {"classify", "tags", "failure", "notes", "search"}
+# someone is looking at the screen (the search box, 问拾光): first in line on the Mac, and DeepSeek after 20 s
+CLAUDE_URGENT = {"search", "ask"}
+CLAUDE_SKIP = set(x for x in os.environ.get("CLAUDE_SKIP", "").split(",") if x)  # kinds that go to DeepSeek first
 CLAUDE_CLAIM_WAIT = int(os.environ.get("CLAUDE_CLAIM_WAIT", "90"))
 CLAUDE_RUN_WAIT = 900  # once the Mac has it
 
@@ -132,7 +134,9 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
     q("DELETE FROM tasks WHERE kind='llm' AND state != 'running' AND created < ?", (now - 3600,))  # askers that died
     payload = {"system": system, "user": user, "fields": list(fields), "purpose": purpose, "title": purpose,
                "model": CLAUDE_MODEL_LIGHT if purpose in CLAUDE_LIGHT else CLAUDE_MODEL, "effort": "medium" if think else "low"}
-    tid = board.publish("llm", f"llm:{purpose}:{secrets.token_hex(6)}", 60 if purpose == "classify" else 50, payload=payload)
+    tid = board.publish("llm", f"llm:{purpose}:{secrets.token_hex(6)}",
+                        90 if purpose in CLAUDE_URGENT else 60 if purpose == "classify" else 50, payload=payload)
+    claim_wait = 20 if purpose in CLAUDE_URGENT else CLAUDE_CLAIM_WAIT
     try:
         checked = now
         while True:
@@ -155,11 +159,11 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
                 print(f"claude {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
                 return None
             late = time.time() - now
-            if row["state"] == "queued" and (late > CLAUDE_CLAIM_WAIT or (time.time() - checked > 15 and not claude_ready())):
+            if row["state"] == "queued" and (late > claim_wait or (time.time() - checked > 15 and not claude_ready())):
                 if board._write("UPDATE tasks SET state='failed', error='not taken in time' WHERE id=? AND state='queued'", (tid,)):
                     return None
                 continue  # taken just now
-            if late > CLAUDE_CLAIM_WAIT + CLAUDE_RUN_WAIT:
+            if late > claim_wait + CLAUDE_RUN_WAIT:
                 board._write("UPDATE tasks SET state='failed', error='took too long' WHERE id=?", (tid,))
                 return None
             if time.time() - checked > 15:
