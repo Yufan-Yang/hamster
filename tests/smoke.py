@@ -244,8 +244,35 @@ check("e-book: EPUB imported, cleaned (no scripts), links and pictures kept", ep
 check("e-book: GBK TXT split into chapters", txt_import)
 check("e-book: search, progress, bookmark, 每周总结, 继续阅读", book_search_and_progress)
 check("e-book: removed with its files", book_remove)
+def weekly_privacy():
+    """A video hidden by privacy mode isn't in 每周总结: not in the list, the counts or the day bars."""
+    owner = f"user:{user}"
+    prev = G.q("SELECT tags FROM privacy WHERE owner=?", (owner,), one=True)
+    hidden = json.loads(prev["tags"]) if prev else []
+    row = next((r for r in G.q("SELECT id, analysis FROM jobs WHERE owner=? AND status='done' ORDER BY id DESC LIMIT 50", (owner,))
+                if not shiguang.web.is_hidden({"analysis": json.loads(r["analysis"] or "{}")}, {"tags": hidden})), None)
+    if not row:
+        return
+    jid, tag = row["id"], "隐私测试标签"
+    a = json.loads(G.q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
+    G.q("UPDATE jobs SET analysis=? WHERE id=?", (json.dumps({**a, "tags": [*(a.get("tags") or []), tag]}), jid))
+    shiguang.weekly.record(owner, "video", jid, 200, 0, 0.5)
+    before = get("/api/weekly")["current"]["videos"]
+    assert any(v["id"] == jid for v in before["top"]) or before["watched"], before
+    G.q("INSERT INTO privacy (owner, tags, ids) VALUES (?,?,'[]') ON CONFLICT(owner) DO UPDATE SET tags=excluded.tags",
+        (owner, json.dumps([*hidden, tag], ensure_ascii=False)))
+    try:
+        after = get("/api/weekly")["current"]["videos"]
+        assert not any(v["id"] == jid for v in after["top"]), after
+        assert after["seconds"] <= before["seconds"] - 200 and after["watched"] < before["watched"], (before, after)
+    finally:
+        G.q("UPDATE privacy SET tags=? WHERE owner=?", (prev["tags"] if prev else "[]", owner))
+
+
+check("每周总结 leaves out videos hidden by privacy mode", weekly_privacy)
 check("每周总结 for last week (Monday 8:00)", lambda: G.make_reports() or 1)
-check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.epub?dl=1") and not G.is_book_url("https://youtu.be/x")) or 1 / 0)
+check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.epub?dl=1") and not G.is_book_url("https://youtu.be/x")
+                                          and G.is_book_url("https://z-library.biz/book/6r60kDvygG/x.html?ts=1") and not G.is_book_url("https://z-library.biz/s/x")) or 1 / 0)
 
 
 

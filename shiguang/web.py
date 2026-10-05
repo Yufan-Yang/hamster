@@ -204,6 +204,16 @@ def is_hidden(d, prefs):
     return any(aliases.get(t, t).lower() in hide for t in (d.get("analysis") or {}).get("tags") or [])
 
 
+def hidden_ids():
+    """Videos this page must not mention right now (privacy mode, not revealed): none of them, nor their counts."""
+    prefs = privacy_get(g.owner)
+    if not prefs["tags"] or revealed():
+        return set()
+    scope, scope_args = scope_sql()
+    return {r["id"] for r in q(f"SELECT id, analysis FROM jobs WHERE {scope}", scope_args)
+            if is_hidden({"analysis": json.loads(r["analysis"] or "{}")}, prefs)}
+
+
 @app.post("/api/privacy/unlock")
 def privacy_unlock():
     """Open the hidden privacy menu (reached by tapping the avatar three times) with the account password."""
@@ -1239,10 +1249,15 @@ def book_search(bid):
 @app.get("/api/weekly")
 def weekly_get():
     """每周总结: this week so far, and the weeks kept on Monday mornings."""
-    start = weekly.week_start()
-    past = [{**json.loads(r["body"]), "created": r["created"]}
-            for r in q("SELECT * FROM weekly WHERE owner=? ORDER BY start DESC LIMIT 12", (g.owner,))]
-    return jsonify(current=weekly.report(g.owner, start, weekly.plus_days(start, 7)), past=past)
+    start, skip = weekly.week_start(), hidden_ids()
+    past = []
+    for r in q("SELECT * FROM weekly WHERE owner=? ORDER BY start DESC LIMIT 12", (g.owner,)):
+        body = json.loads(r["body"])
+        if skip:  # kept before those were hidden (or with them): count the week again without them
+            t0 = time.mktime(time.strptime(r["start"], "%Y-%m-%d"))
+            body = {**body, **weekly.report(g.owner, t0, weekly.plus_days(t0, 7), backlog=False, skip=skip)}
+        past.append({**body, "created": r["created"]})
+    return jsonify(current=weekly.report(g.owner, start, weekly.plus_days(start, 7), skip=skip), past=past)
 
 
 @app.get("/api/points/<int:jid>")
@@ -1263,10 +1278,10 @@ def similar_of(jid):
     """Same content elsewhere in the library: re-uploads, clips of it, or what it's a clip of."""
     if not visible(jid):
         return jsonify(error="not found"), 404
-    out = []
+    out, skip = [], hidden_ids()
     for r in q("SELECT * FROM similar WHERE a=? OR b=?", (jid, jid)):
         other = r["b"] if r["a"] == jid else r["a"]
-        if not visible(other):
+        if not visible(other) or other in skip:
             continue
         mine, theirs = (r["a_in_b"], r["b_in_a"]) if r["a"] == jid else (r["b_in_a"], r["a_in_b"])
         row = q("SELECT title, analysis FROM jobs WHERE id=?", (other,), one=True)
@@ -1286,6 +1301,9 @@ def ask_question():
         return jsonify(error="没有配置 AI"), 400
     scope, scope_args = scope_sql()
     ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
+    skip = hidden_ids()
+    if skip:
+        scope, scope_args = scope + f" AND id NOT IN ({','.join('?' * len(skip))})", (*scope_args, *skip)
     return jsonify(ask.answer(question, scope + " AND status != 'cancelled'", scope_args, g.owner, ups))
 
 
@@ -1294,7 +1312,14 @@ def digests_list():
     rows = q("SELECT * FROM digests WHERE owner=? ORDER BY end DESC, id DESC LIMIT 8", (g.owner,))
     pending = q("SELECT state FROM tasks WHERE kind='digest' AND target LIKE ? AND state IN ('queued','running')",
                 (f"digest:{g.owner}:%",), one=True)
-    return jsonify(digests=[{"id": r["id"], **json.loads(r["body"]), "created": r["created"]} for r in rows],
+    skip, out = hidden_ids(), []
+    for r in rows:
+        body = json.loads(r["body"])
+        for u in body.get("uploaders") or []:
+            u["videos"] = [v for v in u.get("videos") or [] if v.get("job") not in skip]
+        body["uploaders"] = [u for u in body.get("uploaders") or [] if u["videos"]]
+        out.append({"id": r["id"], **body, "created": r["created"]})
+    return jsonify(digests=out,
                    pending=bool(pending))
 
 

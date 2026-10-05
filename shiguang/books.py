@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from . import core
-from .core import BOOKS_DIR, UA, db_lock, q, safe_name
+from .core import BOOKS_DIR, CHROMIUM, UA, db_lock, heavy_slot, q, safe_name
 
 
 BOOK_EXT = {".epub": "epub", ".txt": "txt", ".pdf": "pdf", ".mobi": "mobi", ".azw3": "azw3", ".azw": "azw3"}
@@ -36,11 +36,20 @@ def book_fmt(name):
     return BOOK_EXT.get(Path(name or "").suffix.lower())
 
 
+# a book's page on Z-Library (any of its mirrors): the file behind its download button, fetched in a browser
+BOOK_PAGE = re.compile(r"^https?://([\w-]+\.)*(z-?lib(rary)?|1lib|singlelogin)[\w-]*\.[a-z]+/book/", re.I)
+
+
+def is_book_page(url):
+    return bool(BOOK_PAGE.match(url))
+
+
 def is_book_url(url):
-    """A link straight to an e-book file (…/x.epub, …/x.pdf?dl=1): goes to the shelf instead of the download queue."""
+    """A link straight to an e-book file (…/x.epub, …/x.pdf?dl=1) or to a book's page on Z-Library: goes to the
+    shelf instead of the download queue."""
     if not url.startswith(("http://", "https://")):
         return False
-    return book_fmt(urllib.parse.unquote(urllib.parse.urlsplit(url).path)) is not None
+    return is_book_page(url) or book_fmt(urllib.parse.unquote(urllib.parse.urlsplit(url).path)) is not None
 
 
 def sniff(head, name=""):
@@ -769,32 +778,75 @@ def save_cover(bid, data):
         return False
 
 
+def file_name(url, headers):
+    name = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+    cd = headers.get("Content-Disposition") or headers.get("content-disposition") or ""
+    m = re.search(r"filename\*=UTF-8''([^;]+)", cd) or re.search(r'filename="?([^";]+)"?', cd)
+    return urllib.parse.unquote(m.group(1)) if m else name
+
+
+def page_download(url):
+    """A book's page (Z-Library): open it in Chromium (it checks for a browser first), take its download button —
+    the first is the main file, the others are conversions — and fetch that with the page's cookies.
+    Returns (file name, bytes)."""
+    from playwright.sync_api import sync_playwright
+    with heavy_slot("browser"), sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=CHROMIUM, headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 800})
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                link = page.wait_for_selector('a.addDownloadedBook[href*="/dl/"], a[href*="/dl/"]', timeout=40000)
+            except Exception:
+                raise BookError("这个书页上没找到下载按钮（书可能被下架了）")
+            r = ctx.request.get(urllib.parse.urljoin(page.url, link.get_attribute("href")), timeout=300000)
+            body = r.body()
+            if r.status >= 400:
+                raise BookError(f"下载失败：网站回答 HTTP {r.status}")
+            if len(body) > DOWNLOAD_MAX:
+                raise BookError("文件超过 500 MB，不像是电子书")
+            if not sniff(body[:8192], file_name(r.url, r.headers)):  # an error page: today's free downloads used up...
+                text = re.sub(r"<[^>]+>|\s+", " ", body[:20000].decode("utf-8", "replace"))
+                hint = "，网站说：" + text.strip()[:80] if text.strip() else ""
+                raise BookError(f"书页给的不是电子书（可能是今天的免费下载次数用完了，或要登录）{hint}")
+            return file_name(r.url, r.headers), body
+        finally:
+            browser.close()
+
+
 def fetch(row):
     """A book added by its link: download it (through the Pi's proxy like everything else)."""
     import requests
     BOOKS_DIR.mkdir(mode=0o700, exist_ok=True)
     tmp = BOOKS_DIR / f"{row['id']}.part"
-    with requests.get(row["url"], stream=True, timeout=(15, 120), headers={"User-Agent": UA}) as r:
-        if r.status_code >= 400:
-            raise BookError(f"下载失败：网站回答 HTTP {r.status_code}")
-        name = urllib.parse.unquote(urllib.parse.urlsplit(r.url).path.rsplit("/", 1)[-1])
-        cd = r.headers.get("Content-Disposition", "")
-        m = re.search(r"filename\*=UTF-8''([^;]+)", cd) or re.search(r'filename="?([^";]+)"?', cd)
-        if m:
-            name = urllib.parse.unquote(m.group(1))
-        size, sha = 0, hashlib.sha1()
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(1 << 16):
-                size += len(chunk)
-                if size > DOWNLOAD_MAX:
-                    raise BookError("文件超过 500 MB，不像是电子书")
-                sha.update(chunk)
-                f.write(chunk)
+    if is_book_page(row["url"]):
+        name, data = page_download(row["url"])
+        size, sha = len(data), hashlib.sha1(data)
+        tmp.write_bytes(data)
+    else:
+        with requests.get(row["url"], stream=True, timeout=(15, 120), headers={"User-Agent": UA}) as r:
+            if r.status_code >= 400:
+                raise BookError(f"下载失败：网站回答 HTTP {r.status_code}")
+            name = file_name(r.url, r.headers)
+            size, sha = 0, hashlib.sha1()
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    size += len(chunk)
+                    if size > DOWNLOAD_MAX:
+                        raise BookError("文件超过 500 MB，不像是电子书")
+                    sha.update(chunk)
+                    f.write(chunk)
     with open(tmp, "rb") as f:
         fmt = sniff(f.read(8192), name)
     if not fmt:
         tmp.unlink(missing_ok=True)
         raise BookError("下载到的不是电子书（可能是网页或要登录才能下载）")
+    dup = q("SELECT id FROM books WHERE owner=? AND sha1=? AND id != ?", (row["owner"], sha.hexdigest(), row["id"]), one=True)
+    if dup:  # the same file is on this shelf already (uploaded, or from another link): keep that one
+        tmp.unlink(missing_ok=True)
+        remove(row)
+        return None
     ext = next(e for e, v in BOOK_EXT.items() if v == fmt)
     final = f"{row['id']}{ext}"
     tmp.rename(BOOKS_DIR / final)
@@ -812,6 +864,8 @@ def import_book(bid, beat=None):
         raise BookError(f"没有这本书 {bid}")
     if not row["file"]:
         row = fetch(row)
+        if not row:
+            return {"duplicate": True}
     path = BOOKS_DIR / row["file"]
     if not path.exists():
         raise BookError("书的文件不见了")
@@ -903,6 +957,8 @@ def add_file(owner, device, f):
 
 def add_url(owner, device, url):
     """A link to an e-book file -> a book row; the import task downloads it. The same link twice is one book."""
+    if is_book_page(url):
+        url = url.split("?")[0].split("#")[0]  # (?ts=… differs each time it's shared)
     dup = q("SELECT id FROM books WHERE owner=? AND url=?", (owner, url), one=True)
     if dup:
         return dup["id"], "duplicate"

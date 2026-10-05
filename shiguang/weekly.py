@@ -56,11 +56,12 @@ def reading_speed(owner):
     return (cps if 2 <= cps <= 30 else 6.0), (pps if 1 / 600 <= pps <= 1 / 10 else 1 / 90)
 
 
-def report(owner, start, end, backlog=True):
+def report(owner, start, end, backlog=True, skip=frozenset()):
     """The numbers for [start, end) (timestamps). `backlog`: also what's still waiting now (only meaningful for the
-    week just over or this one)."""
+    week just over or this one). `skip`: videos left out entirely — in no list, count or bar (privacy mode)."""
     d0, d1 = day_str(start), day_str(end - 1)
-    acts = q("SELECT * FROM activity WHERE owner=? AND day >= ? AND day <= ? ORDER BY day", (owner, d0, d1))
+    acts = [a for a in q("SELECT * FROM activity WHERE owner=? AND day >= ? AND day <= ? ORDER BY day", (owner, d0, d1))
+            if not (a["kind"] == "video" and a["ref"] in skip)]
     days = []
     t = start
     while t < end and len(days) < 7:
@@ -108,11 +109,13 @@ def report(owner, start, end, backlog=True):
         v["to"] = a["pct1"]
         if a["day"] in by_day:
             by_day[a["day"]]["watch"] += a["seconds"] or 0
-    seen = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=? AND updated >= ? AND updated < ?", (owner, start, end))}
+    seen = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=? AND updated >= ? AND updated < ?", (owner, start, end))
+            if r["job_id"] not in skip}
     watched_ids = set(per_video) | set(seen)
     done_ids = {j for j, r in seen.items() if r["done"]} | {j for j, v in per_video.items() if (v["to"] or 0) >= 0.95}
-    added = q("SELECT COUNT(*) n, SUM(source LIKE 'sub:%') subs FROM jobs WHERE owner=? AND created >= ? AND created < ? "
-              "AND status IN ('done', 'linked')", (owner, start, end), one=True)
+    new_jobs = [r for r in q("SELECT id, source FROM jobs WHERE owner=? AND created >= ? AND created < ? "
+                             "AND status IN ('done', 'linked')", (owner, start, end)) if r["id"] not in skip]
+    added = {"n": len(new_jobs), "subs": sum((r["source"] or "").startswith("sub:") for r in new_jobs)}
     top = sorted(per_video.items(), key=lambda x: -x[1]["seconds"])[:5]
     titles = {r["id"]: json.loads(r["analysis"] or "{}").get("title") or r["title"]
               for r in q(f"SELECT id, title, analysis FROM jobs WHERE id IN ({','.join('?' * len(top))})", [j for j, _ in top])} if top else {}
