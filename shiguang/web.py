@@ -300,6 +300,27 @@ def hidden_ids():
             if is_hidden({"analysis": json.loads(r["analysis"] or "{}")}, prefs)}
 
 
+def hidden_subs(skip=None):
+    """Followed uploaders this page must not name right now (privacy mode, not revealed): adult sites', and any with
+    a hidden video."""
+    prefs = privacy_get(g.owner)
+    if not prefs["tags"] or revealed():
+        return set()
+    skip = hidden_ids() if skip is None else skip
+    out = {r["id"] for r in q("SELECT id, platform FROM subs") if r["platform"] in channels.ADULT_PLATFORMS}
+    if skip:
+        out |= {int(r["source"][4:]) for r in q(f"SELECT DISTINCT source FROM jobs WHERE source LIKE 'sub:%' AND id IN "
+                                                 f"({','.join('?' * len(skip))})", tuple(skip))}
+    return out
+
+
+def sub_names():
+    """Names of the followed uploaders this page may mention (for the AI reading a search or a question)."""
+    hide = hidden_subs()
+    return "、".join(r["name"] for r in q("SELECT id, name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin)))
+                    if r["id"] not in hide)
+
+
 @app.post("/api/privacy/unlock")
 def privacy_unlock():
     """Open the hidden privacy menu (reached by tapping the avatar three times) with the account password."""
@@ -697,7 +718,7 @@ def jobs():
     # uploader and dates (the page asks for this once typing pauses; `exact` searches the words as typed)
     if term and not wanted_tags and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
         try:
-            ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
+            ups = sub_names()
             parsed = llm.parse_query(term, ups, time.strftime("%Y-%m-%d"))
         except Exception:
             traceback.print_exc()
@@ -862,8 +883,10 @@ def subs_list():
     for r in q("SELECT source, status, COUNT(*) n FROM jobs WHERE source LIKE 'sub:%' GROUP BY source, status"):
         c = counts.setdefault(r["source"], {})
         c[r["status"]] = c.get(r["status"], 0) + r["n"]
-    out = []
+    out, hide = [], hidden_subs()
     for r in q(f"SELECT * FROM subs WHERE {where} ORDER BY id DESC", args):
+        if r["id"] in hide:
+            continue
         c = counts.get(f"sub:{r['id']}", {})
         out.append({"id": r["id"], "platform": r["platform"], "name": r["name"], "url": r["url"],
                     "avatar": bool(r["avatar"]), "total": r["total"], "backfill": r["backfill"],
@@ -1469,6 +1492,7 @@ def book_search(bid):
 def weekly_get():
     """每周总结: this week so far, and the weeks kept on Monday mornings."""
     start, skip = weekly.week_start(), hidden_ids()
+    hide = hidden_subs(skip)
     past = []
     for r in q("SELECT * FROM weekly WHERE owner=? ORDER BY start DESC LIMIT 12", (g.owner,)):
         body = json.loads(r["body"])
@@ -1476,7 +1500,11 @@ def weekly_get():
             t0 = time.mktime(time.strptime(r["start"], "%Y-%m-%d"))
             body = {**body, **weekly.report(g.owner, t0, weekly.plus_days(t0, 7), backlog=False, skip=skip)}
         past.append({**body, "created": r["created"]})
-    return jsonify(current=weekly.report(g.owner, start, weekly.plus_days(start, 7), skip=skip), past=past)
+    current = weekly.report(g.owner, start, weekly.plus_days(start, 7), skip=skip, skip_subs=hide)
+    for body in past:  # (kept with every uploader in it)
+        if body.get("backlog"):
+            body["backlog"] = weekly.without_subs(body["backlog"], hide)
+    return jsonify(current=current, past=past)
 
 
 @app.get("/api/points/<int:jid>")
@@ -1519,7 +1547,7 @@ def ask_question():
     if not LLM_API_KEY:
         return jsonify(error="没有配置 AI"), 400
     scope, scope_args = scope_sql()
-    ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
+    ups = sub_names()
     skip = hidden_ids()
     if skip:
         scope, scope_args = scope + f" AND id NOT IN ({','.join('?' * len(skip))})", (*scope_args, *skip)
@@ -1532,8 +1560,10 @@ def digests_list():
     pending = q("SELECT state FROM tasks WHERE kind='digest' AND target LIKE ? AND state IN ('queued','running')",
                 (f"digest:{g.owner}:%",), one=True)
     skip, out = hidden_ids(), []
+    hide = hidden_subs(skip)
     for r in rows:
         body = json.loads(r["body"])
+        body["uploaders"] = [u for u in body.get("uploaders") or [] if u.get("sub") not in hide]
         for u in body.get("uploaders") or []:
             u["videos"] = [v for v in u.get("videos") or [] if v.get("job") not in skip]
         body["uploaders"] = [u for u in body.get("uploaders") or [] if u["videos"]]

@@ -56,9 +56,10 @@ def reading_speed(owner):
     return (cps if 2 <= cps <= 30 else 6.0), (pps if 1 / 600 <= pps <= 1 / 10 else 1 / 90)
 
 
-def report(owner, start, end, backlog=True, skip=frozenset()):
+def report(owner, start, end, backlog=True, skip=frozenset(), skip_subs=frozenset()):
     """The numbers for [start, end) (timestamps). `backlog`: also what's still waiting now (only meaningful for the
-    week just over or this one). `skip`: videos left out entirely — in no list, count or bar (privacy mode)."""
+    week just over or this one). `skip`: videos left out entirely — in no list, count or bar (privacy mode);
+    `skip_subs`: followed uploaders left out of the backlog the same way."""
     d0, d1 = day_str(start), day_str(end - 1)
     acts = [a for a in q("SELECT * FROM activity WHERE owner=? AND day >= ? AND day <= ? ORDER BY day", (owner, d0, d1))
             if not (a["kind"] == "video" and a["ref"] in skip)]
@@ -140,8 +141,17 @@ def report(owner, start, end, backlog=True, skip=frozenset()):
                       "top": [{"id": j, "title": titles.get(j, ""), "seconds": round(v["seconds"])} for j, v in top if titles.get(j)]},
            "notes": notes}
     if backlog:
-        out["backlog"] = backlog_now(owner)
+        out["backlog"] = without_subs(backlog_now(owner), skip_subs)
     return out
+
+
+def without_subs(backlog, hide):
+    """The backlog without these followed uploaders (and their numbers out of the totals)."""
+    if not hide:
+        return backlog
+    subs = [s for s in backlog.get("subs") or [] if s["id"] not in hide]
+    return {**backlog, "subs": subs, "sub_waiting": sum(s["waiting"] for s in subs),
+            "sub_unwatched": sum(s["unwatched"] for s in subs), "sub_failed": sum(s["failed"] for s in subs)}
 
 
 def backlog_now(owner):

@@ -231,6 +231,7 @@
   .subrow .plat { font-size: 12px; border: 2px solid var(--ink); padding: 0 4px; margin-left: 8px; vertical-align: middle; }
   .subrow .plat.bilibili { background: #fb7299; color: #fff; border-color: var(--ink); }
   .subrow .plat.youtube { background: var(--accent); color: #fff; }
+  .subrow .plat.pornhub { background: #000; color: #ff9000; }
   .subrow .acts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
   .err { white-space: pre-line; color: var(--accent); margin-top: 12px; overflow-wrap: anywhere; }
   /* 随记: everyday notes */
@@ -1059,7 +1060,7 @@ function schedule() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
 /* ---------- 追更: followed uploaders ---------- */
-const PLAT = {bilibili: "B站", youtube: "YouTube"};
+const PLAT = {bilibili: "B站", youtube: "YouTube", pornhub: "PH"};
 function until(t) {
   const d = t - Date.now() / 1000;
   return d < 60 ? "马上" : d < 3600 ? Math.round(d / 60) + " 分钟后" : d < 2 * 86400 ? Math.round(d / 3600) + " 小时后"
@@ -1717,7 +1718,7 @@ function setupMediaSession(j) {
 const SUB_NAMES = {"zh": "中文", "en": "English", "en-orig": "English（自动）", "ja": "日本語", "ko": "한국어", "yue": "粤语"};
 function videoTag(j, m, t = 0) {
   // English videos with translated subtitles: both languages together, shown by default
-  const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="中英双语" srclang="zh" default>` : "";
+  const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="双语" srclang="zh" default>` : "";
   const tracks = bi + m.subs.map((label, k) =>
     `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}"${k === 0 && !bi ? " default" : ""}>`).join("");
   return `<video controls autoplay playsinline preload="metadata" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;

@@ -11,7 +11,7 @@ from .core import (COOKIES, STATE, UA, db_lock, link_key, q, update)
 
 
 # ---------------------------------------------------------------- following channels (追更)
-# A link to an uploader's page (a B站 space, a YouTube channel) follows it instead of downloading one video:
+# A link to an uploader's page (a B站 space, a YouTube channel, a Pornhub model / pornstar / channel) follows it instead of downloading one video:
 # its latest videos are queued right away (SUB_BACKFILL of them, or all with "缓存全部"), and the worker
 # checks it again every SUB_INTERVAL seconds (a week) and queues whatever is new, like following a show.
 SUB_INTERVAL = int(os.environ.get("SUB_INTERVAL", str(7 * 86400)))  # once a week
@@ -19,6 +19,9 @@ SUB_BACKFILL = int(os.environ.get("SUB_BACKFILL", "50"))
 SUB_WORKERS = int(os.environ.get("SUB_WORKERS", "2"))  # download slots followed channels may use; the rest stay free for links you send
 SUB_SEEN_MAX = 5000
 SUB_RETRY = 3600  # a failed check (e.g. B站 risk control) is tried again an hour later, not next week
+# Adult sites: their uploaders are left out of 追更周报 (its AI headline covers everyone) and, in privacy mode, out of
+# every list that names uploaders (web.hidden_subs)
+ADULT_PLATFORMS = {"pornhub"}
 
 
 def channel_of(url):
@@ -34,6 +37,11 @@ def channel_of(url):
         if m:
             path = urllib.parse.unquote(m.group(1))
             return "youtube", path, f"https://www.youtube.com/{urllib.parse.quote(path, safe='/@')}/videos"
+    if host == "pornhub.com" or host.endswith(".pornhub.com"):  # a model / pornstar / channel / user page
+        m = re.match(r"/(model|pornstar|channels|users)/([\w.-]+)", parts.path)
+        if m:
+            path = f"{m.group(1)}/{m.group(2).lower()}"
+            return "pornhub", path, f"https://www.pornhub.com/{path}/videos" + ("/public" if m.group(1) == "users" else "")
     return None
 
 
@@ -46,7 +54,7 @@ def add_sub(url, owner, device=None):
         return row["id"], "duplicate"
     with db_lock:
         cur = core.DB.execute("INSERT INTO subs (owner, platform, key, url, name, backfill, device, created) VALUES (?,?,?,?,?,?,?,?)",
-                         (owner, platform, key, videos, cid.removeprefix("@"), SUB_BACKFILL, device, time.time()))
+                         (owner, platform, key, videos, cid.removeprefix("@").rsplit("/", 1)[-1], SUB_BACKFILL, device, time.time()))
         core.DB.commit()
     return cur.lastrowid, "new"  # the worker fetches the list within a minute (checked IS NULL)
 
@@ -107,7 +115,8 @@ def list_bilibili(mid, limit):
             "entries": out[:limit] if limit else out}
 
 
-def list_youtube(url, limit):
+def list_ytdlp(url, limit):
+    """An uploader's videos through yt-dlp's flat playlist (YouTube, Pornhub), newest first."""
     import yt_dlp
     opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
     if limit:
@@ -116,8 +125,8 @@ def list_youtube(url, limit):
         opts["cookiefile"] = str(COOKIES)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-    entries = [{"url": e.get("url") or f"https://www.youtube.com/watch?v={e['id']}", "title": e.get("title") or ""}
-               for e in info.get("entries") or [] if e and e.get("id")]
+    entries = [{"url": re.sub(r"^http://", "https://", e.get("url") or f"https://www.youtube.com/watch?v={e['id']}"),
+                "title": e.get("title") or ""} for e in info.get("entries") or [] if e and (e.get("url") or e.get("id"))]  # (Pornhub's have no id)
     avatar = next((t["url"] for t in info.get("thumbnails") or [] if t.get("id") == "avatar_uncropped"), "")
     return {"name": info.get("channel") or info.get("uploader") or "", "avatar": avatar,
             "total": info.get("playlist_count") or (None if limit else len(entries)), "entries": entries}
@@ -127,7 +136,7 @@ def list_channel(sub, limit):
     """The uploader's videos, newest first (at most `limit`; None = all)."""
     if sub["platform"] == "bilibili":
         return list_bilibili(sub["key"].split(":", 1)[1], limit)
-    return list_youtube(sub["url"], limit)
+    return list_ytdlp(sub["url"], limit)
 
 
 AVATARS = STATE / "avatars"

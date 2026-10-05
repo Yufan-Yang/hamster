@@ -13,7 +13,7 @@ import urllib.parse
 
 from pathlib import Path
 
-from . import board, books, download, library, llm, notes, search
+from . import board, books, channels, download, library, llm, notes, search
 from .migrations import once
 from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, kv_set, log_usage, q, update)
 
@@ -114,10 +114,31 @@ def pi_summarize(task, beat):
     return {"summary": bool(a.get("key_points"))}
 
 
+LANG_NAMES = {"ja": "Japanese", "ko": "Korean", "fr": "French", "de": "German", "es": "Spanish", "it": "Italian",
+              "pt": "Portuguese", "ru": "Russian", "th": "Thai", "vi": "Vietnamese", "id": "Indonesian", "ms": "Malay",
+              "ar": "Arabic", "hi": "Hindi", "tr": "Turkish", "nl": "Dutch", "pl": "Polish", "uk": "Ukrainian"}
+
+
+def translatable(subs, stem):
+    """The subtitle file to translate into Chinese: one in a language that's neither Chinese nor English (English is
+    read as it is), when there's no Chinese or English track at all; else None."""
+    base = [(library.sub_lang(x, stem).split("-")[0], x) for x in subs]
+    if any(l in ("zh", "en") for l, _ in base):
+        return None
+    return next((x for l, x in base if known_lang(l)), None)
+
+
+def known_lang(code):
+    """A language code (not a file without one, "Talk.srt", whose language nobody knows)."""
+    return bool(re.fullmatch(r"[a-z]{2}", code)) or code in LANG_NAMES
+
+
 def maybe_translate(task, path, subs_or_lang):
-    """English subtitles and no Chinese ones yet: translate them (off-peak, at half the price)."""
+    """Subtitles in another language (Japanese, Korean...) and no Chinese or English ones: translate them into Chinese
+    (off-peak, at half the price). English stays as it is."""
     langs = [subs_or_lang] if isinstance(subs_or_lang, str) else [library.sub_lang(x, path.stem) for x in subs_or_lang]
-    if any(l.split("-")[0] == "en" for l in langs) and not any(l.split("-")[0] == "zh" for l in langs) and LLM_API_KEY:
+    base = {l.split("-")[0] for l in langs}
+    if not base & {"zh", "en"} and any(map(known_lang, base)) and LLM_API_KEY:
         board.publish("translate", task["target"], task["priority"] - 2, parent=task["id"], not_before=llm.offpeak_from())
 
 
@@ -131,14 +152,16 @@ of well-known names. Reply with one JSON object: {{"lines": ["...", ...]}} with 
 
 @board.task("translate", "翻译字幕", "ai")
 def pi_translate(task, beat):
-    """Chinese subtitles for an English video: X.zh.srt next to it (Plex shows it as Chinese; the page also offers
-    both together), and the Chinese lines go into search (a Chinese search finds the English moment)."""
+    """Chinese subtitles for a video in another language (not English): X.zh.srt next to it (Plex shows it as
+    Chinese; the page also offers both together), and the Chinese lines go into search (a Chinese search finds the
+    moment)."""
     path, subs = board.task_media(task)
     jid, n = task["payload"]["job"], task["payload"]["part"]
-    en = sorted((x for x in subs if library.sub_lang(x, path.stem).split("-")[0] == "en"),
-                key=lambda x: library.sub_lang(x, path.stem) != "en")  # the uploader's own .en before the automatic -orig
-    if not en or any(library.sub_lang(x, path.stem).split("-")[0] == "zh" for x in subs):
-        return {"skipped": "no English subtitles, or Chinese ones already"}
+    src = translatable(subs, path.stem)
+    if not src:
+        return {"skipped": "Chinese or English subtitles already, or none in another language"}
+    lang = library.sub_lang(src, path.stem).split("-")[0]
+    en = [src]  # (the file translated from)
     cues = library.srt_cues(en[0])
     # carry on from what an earlier run (stopped by a restart) translated already
     prog = task["progress"] or {}
@@ -149,7 +172,7 @@ def pi_translate(task, beat):
         batch = cues[i:i + size]
         user = "\n".join(f"{k + 1}. {t}" for k, (_, _, t) in enumerate(batch))
         try:
-            got = llm.llm_json(TRANSLATE_SYSTEM.replace("{src}", "English"), user, {"lines": "array of strings"}, 12000,
+            got = llm.llm_json(TRANSLATE_SYSTEM.replace("{src}", LANG_NAMES.get(lang, f"the language with code '{lang}'")), user, {"lines": "array of strings"}, 12000,
                            usage, "translate", jid, think=False)["lines"]
         except Exception:
             got = None
@@ -157,7 +180,7 @@ def pi_translate(task, beat):
             if size > 8:  # the model merged or split lines: try smaller pieces
                 size //= 2
                 continue
-            got = [t for _, _, t in batch]  # give up on these few: keep the English
+            got = [t for _, _, t in batch]  # give up on these few: keep the original
         out += [[a, b, str(t).strip()] for (a, b, _), t in zip(batch, got)]
         i += len(batch)
         size = min(60, size * 2)
@@ -182,7 +205,8 @@ Reply with one JSON object: {"headline": "...", "uploaders": [{"sub": <id>, "ove
 def digest_videos(owner, start, end):
     """The followed uploaders' videos that came out from `start` to `end` (dates) and are downloaded: by their
     upload date, or when that isn't known, by when a weekly check (not the first look back) fetched them."""
-    subs = {r["id"]: r for r in q("SELECT * FROM subs WHERE owner=?", (owner,))}
+    # (adult sites' uploaders aren't in it: the AI's headline would speak of them whatever privacy mode hides)
+    subs = {r["id"]: r for r in q("SELECT * FROM subs WHERE owner=?", (owner,)) if r["platform"] not in channels.ADULT_PLATFORMS}
     t0 = time.mktime(time.strptime(start, "%Y-%m-%d"))
     t1 = time.mktime(time.strptime(end, "%Y-%m-%d")) + 86400
     out = {}

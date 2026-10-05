@@ -421,12 +421,14 @@ def media_info(job):
 
 
 def bilingual_pair(m):
-    """(Chinese, English) subtitle files of a media item, if it has both."""
+    """(Chinese, original) subtitle files of a media item, if it has both: English, else another language a Chinese
+    track was translated from."""
     stem = Path(m["path"]).stem
     by = {sub_lang(x, stem): x for x in m["subs"]}
     zh = next((by[k] for k in by if k.split("-")[0] == "zh"), None)
-    en = by.get("en") or next((by[k] for k in by if k.split("-")[0] == "en"), None)
-    return (zh, en) if zh and en else None
+    other = by.get("en") or next((by[k] for k in by if k.split("-")[0] == "en"), None) \
+        or next((by[k] for k in by if k.split("-")[0] not in ("zh", "und", "")), None)
+    return (zh, other) if zh and other else None
 
 
 def job_media(jid, n):

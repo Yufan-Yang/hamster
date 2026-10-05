@@ -398,6 +398,32 @@ def admin_home_only_and_password():
 
 check("admin only from home; password changed from home only", admin_home_only_and_password)
 
+
+def pornhub_follow():
+    ch = shiguang.channels.channel_of
+    assert ch("https://www.pornhub.com/model/Some_Model/videos?o=mr") == (
+        "pornhub", "model/some_model", "https://www.pornhub.com/model/some_model/videos")
+    assert ch("https://cn.pornhub.com/pornstar/a-b")[0] == "pornhub"
+    assert ch("https://www.pornhub.com/users/x")[2].endswith("/users/x/videos/public")
+    assert ch("https://www.pornhub.com/view_video.php?viewkey=abc") is None
+    sid, how = shiguang.channels.add_sub("https://www.pornhub.com/model/smoke_model", f"user:{user}")
+    assert how == "new" and G.q("SELECT name FROM subs WHERE id=?", (sid,), one=True)["name"] == "smoke_model"
+    G.q("UPDATE subs SET checked=? WHERE id=?", (time.time(), sid))  # (no fetching from here)
+    prefs = G.q("SELECT tags FROM privacy WHERE owner=?", (f"user:{user}",), one=True)
+    listed = [s["id"] for s in get("/api/jobs")["subs"]]
+    assert (sid not in listed) == bool(prefs and prefs["tags"] not in (None, "[]")), (sid, listed)
+    assert sid not in [u.get("sub") for d in get("/api/digests")["digests"] for u in d["uploaders"]]
+    G.q("DELETE FROM subs WHERE id=?", (sid,))
+
+
+check("Pornhub uploader pages are followed, and kept out of sight in privacy mode", pornhub_follow)
+check("subtitles translated: other languages, not English", lambda: (
+    shiguang.tasks.translatable(["/x/v.ja.srt"], "v") == "/x/v.ja.srt"
+    and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None
+    and shiguang.tasks.translatable(["/x/v.ja.srt", "/x/v.en.srt"], "v") is None
+    and shiguang.tasks.translatable(["/x/v.ko.srt", "/x/v.zh.srt"], "v") is None
+    and shiguang.tasks.translatable(["/x/v.srt"], "v") is None) or 1/0)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)
