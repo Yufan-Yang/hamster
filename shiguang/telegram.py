@@ -94,11 +94,9 @@ def tg_loop():
             msg = upd.get("message") or {}
             user = (msg.get("from") or {}).get("id")
             chat = (msg.get("chat") or {}).get("id")
-            owner = kv_get("tg_owner")
-            if owner is None and not allowed:
-                kv_set("tg_owner", chat)  # first person to message the bot owns it
-                owner = chat
-            if user not in allowed and chat != owner:
+            # only the ids in TELEGRAM_ALLOWED: with none set nobody can use the bot (it used to belong to
+            # whoever messaged it first, i.e. whoever found its name)
+            if user not in allowed and chat not in allowed:
                 tg("sendMessage", chat_id=chat, text="Sorry, this is a private bot.")
                 continue
             try:

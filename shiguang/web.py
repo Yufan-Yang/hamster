@@ -1,16 +1,20 @@
 """The web page and its API, accounts and privacy, the task board over HTTP."""
 import gzip
 import hmac
+import html
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
 import time
 import traceback
+import urllib.parse
 import zipfile
 
 from flask import Response
@@ -91,6 +95,12 @@ def locked_out(ip):
     return fails >= 10 and time.time() - since < 15 * 60
 
 
+def account_locked(name):
+    """From outside, an account also locks after 10 wrong passwords in 15 min, whatever the addresses they came
+    from (at home it still opens, so this can't lock the owner out of their own page)."""
+    return g.external and locked_out("account:" + name)
+
+
 def note_failure(ip):
     fails, since = login_failures.get(ip, (0, time.time()))
     recent = time.time() - since < 15 * 60
@@ -111,6 +121,11 @@ def client_ip():
 @app.before_request
 def identify():
     g.external = is_external()
+    # Browsers name the page a request comes from in Origin: another site posting here (a page at home making the
+    # browser send links or delete things) is refused. The shortcuts and the Mac worker send no Origin.
+    origin = request.headers.get("Origin")
+    if request.method not in ("GET", "HEAD", "OPTIONS") and origin and urllib.parse.urlsplit(origin).netloc != request.host:
+        return jsonify(error="cross-site request"), 403
     if request.path.startswith("/api/compute/"):  # the Mac worker: token, no cookie, not a browser
         g.device, g.new_device, g.user, g.admin, g.owner = "", False, None, False, None
         return
@@ -175,6 +190,9 @@ def identify():
 def remember(resp):
     if getattr(g, "new_device", False):
         resp.set_cookie(DEVICE_COOKIE, g.device, max_age=10 * 365 * 86400, httponly=True, samesite="Lax")
+    if getattr(g, "external", False):  # only ever sent back over https (outside is https only; home is plain http)
+        cookies = [c if "; Secure" in c else c + "; Secure" for c in resp.headers.getlist("Set-Cookie")]
+        resp.headers.setlist("Set-Cookie", cookies)
     return resp
 
 
@@ -312,8 +330,14 @@ def login():
     if locked_out(ip):
         return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
     name, pw = credentials()
+    if account_locked(name):
+        return jsonify(error="这个账号密码错太多次，请 15 分钟后再试（在家里的网络可以直接登录）"), 429
     row = q("SELECT pw FROM users WHERE name=?", (name,), one=True)
     if not row or not check_password_hash(row["pw"], pw):
+        if g.external:
+            fails, since = login_failures.get("account:" + name, (0, time.time()))
+            recent = time.time() - since < 15 * 60
+            login_failures["account:" + name] = (fails + 1 if recent else 1, since if recent else time.time())
         note_failure(ip)
         return jsonify(error="用户名或密码不对"), 403
     login_failures.pop(ip, None)
@@ -334,8 +358,8 @@ def register():
     name, pw = credentials()
     if not NAME_RE.fullmatch(name):
         return jsonify(error="用户名：1-32 个字母、数字、汉字或 . - _"), 400
-    if len(pw) < 4:
-        return jsonify(error="密码至少 4 位"), 400
+    if len(pw) < 8:  # the page can be reached from the internet
+        return jsonify(error="密码至少 8 位"), 400
     try:
         with db_lock:
             core.DB.execute("INSERT INTO users (name, pw, created) VALUES (?,?,?)",
@@ -431,17 +455,46 @@ def shortcut():
     return send_from_directory(HERE, "send-to-pi.shortcut", as_attachment=True, download_name="发送到拾光.shortcut")
 
 
-@app.get("/add")
+ADD_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
+<title>发送到拾光</title><body style="font:15px system-ui;margin:16px;word-break:break-all">{}</body>"""
+
+
+@app.route("/add", methods=["GET", "POST"])
 def add_get():
-    """Target for the bookmarklet: /add?url=..."""
-    url = request.args.get("url", "")
-    if URL_RE.match(url) and channels.channel_of(url):
+    """Target for the bookmarklet: /add?url=... asks first, the button (a POST from this page) adds it."""
+    url = (request.args.get("url") or request.form.get("url") or "").strip()
+    if not URL_RE.fullmatch(url):
+        return ADD_PAGE.format("没有链接"), 400
+    shown = html.escape(url)
+    if request.method == "GET":
+        return ADD_PAGE.format(f"<p>{shown}</p><form method=post><input type=hidden name=url value=\"{shown}\">"
+                               "<button style='font-size:17px;padding:6px 18px'>发送到拾光</button></form>"
+                               "<script>document.querySelector('button').focus()</script>")
+    if (bad := internal_link(url)):
+        return ADD_PAGE.format(html.escape(bad)), 400
+    if channels.channel_of(url):
         channels.add_sub(url, g.owner, g.device_label)
-        return f"<meta http-equiv=refresh content='1;url=/'>开始追更 – {url}"
-    if URL_RE.match(url):
-        jid = pipeline.add_job(url, source="web", owner=g.owner, device=g.device_label)
-        return f"<meta http-equiv=refresh content='1;url=/'>Queued #{jid} – {url}"
-    return "No URL", 400
+        return ADD_PAGE.format(f"开始追更 – {shown}<script>setTimeout(() => close(), 1200)</script>")
+    jid = pipeline.add_job(url, source="web", owner=g.owner, device=g.device_label)
+    return ADD_PAGE.format(f"已加入 #{jid} – {shown}<script>setTimeout(() => close(), 1200)</script>")
+
+
+def internal_link(url):
+    """Links into the home network (the router, the Pi's own services) aren't fetched: the Pi would be reaching
+    them for whoever sent the link. Returns why, or None for a normal link."""
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    host = urllib.parse.urlsplit(url).hostname or ""
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return None  # doesn't resolve: the download fails on its own
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split("%")[0])
+        # (198.18/15 is what a proxy's fake-IP DNS hands out for real sites)
+        if not ip.is_global and not (ip.version == 4 and ip in ipaddress.ip_network("198.18.0.0/15")):
+            return f"不下载家里网络内部的地址：{host}"
+    return None
 
 
 @app.post("/api/add")
@@ -464,7 +517,11 @@ def add_post():
         device = m.group(1) if m else ""
     source = f"shortcut:{device}" if device else "web"
     hows, subs, shelf = [], [], []
+    blocked = []
     for u in find_urls(text):
+        if (bad := internal_link(u)):
+            blocked.append(bad)
+            continue
         if channels.channel_of(u):  # an uploader's page: follow it instead of downloading the page
             sid, how = channels.add_sub(u, g.owner, g.device_label)
             subs.append({"id": sid, "how": how})
@@ -483,6 +540,9 @@ def add_post():
             return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",
                                                   f"{len(shelf)} 本电子书加到书架了" if shelf else "") if x), mimetype="text/plain")
         return jsonify(ids=[], duplicates=[], linked=[], subs=subs, books=shelf)
+    if blocked and not ids and not subs and not shelf:
+        return (Response(blocked[0], mimetype="text/plain", status=400) if not request.cookies
+                else (jsonify(error=blocked[0]), 400))
     if not ids and not request.cookies and text.strip():
         # the iOS / Android shortcut shared plain text (no link): keep it as a 随记
         now = time.time()

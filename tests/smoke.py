@@ -338,6 +338,22 @@ def shortcut_from_outside():
 
 check("iOS shortcut from outside needs its account's key", shortcut_from_outside)
 
+
+def web_hardening():
+    n = G.q("SELECT COUNT(*) n FROM jobs", one=True)["n"]
+    r = c.get("/add?url=" + __import__("urllib.parse").parse.quote("http://a.example/<img src=x onerror=alert(1)>"))
+    assert b"<img" not in r.data and r.status_code == 400, r.data  # not a URL as a whole: refused, never echoed raw
+    r = c.get("/add?url=" + __import__("urllib.parse").parse.quote("https://example.com/a?x=1&y='z'"))
+    assert b"x=1&amp;y=&#x27;z&#x27;" in r.data and b"<form" in r.data, r.data
+    assert G.q("SELECT COUNT(*) n FROM jobs", one=True)["n"] == n, "a bare GET queued a job"
+    assert post("/api/add", {"text": "http://192.168.3.1/x http://127.0.0.1:8088/"}, code=400)["error"]
+    r = c.post("/api/add", json={"text": "https://example.com/x"}, headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403, r.status_code
+    assert G.q("SELECT COUNT(*) n FROM jobs", one=True)["n"] == n
+
+
+check("/add escapes and asks first; no internal links; no cross-site posts", web_hardening)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)

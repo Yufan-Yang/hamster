@@ -1920,7 +1920,7 @@ function copyText(el) {
   toast(ok ? "已复制" : "复制失败，请长按选择");
 }
 function shareTips() {
-  const bm = `javascript:void(window.open('${location.origin}/add?url='+encodeURIComponent(location.href),'_blank','width=420,height=160'))`;
+  const bm = `javascript:void(window.open('${location.origin}/add?url='+encodeURIComponent(location.href),'_blank','width=460,height=220'))`;
   return `<div class="psec" style="margin-top:18px">发送到拾光</div>
     <div class="tips" style="margin-top:0">
       ▶ iPhone：在手机上打开本页，<a href="/shortcut">安装「发送到拾光」快捷指令</a>，安装时粘贴账号页里的「快捷指令密钥」，之后在任意 App 的分享菜单里点它（在外面也能用）<br>
@@ -3191,7 +3191,7 @@ function renderAuth(mode, keep = {}) {
         <span class="note" id="nameNote">${reg ? "字母、数字、汉字或 . - _，最多 32 个" : ""}</span>
       </label>
       <label class="field pw">
-        <input type="password" id="password" placeholder="${reg ? "设置密码（至少 4 位）" : "密码"}"
+        <input type="password" id="password" placeholder="${reg ? "设置密码（至少 8 位）" : "密码"}"
                autocomplete="${reg ? "new-password" : "current-password"}" value="${esc(keep.password || "")}">
         <button type="button" class="eye" onclick="togglePw()" aria-label="显示密码">显示</button>
       </label>
@@ -3235,7 +3235,7 @@ function renderAuth(mode, keep = {}) {
     const n = name.value.trim(), p = pw.value;
     if (!n) { err("请输入用户名"); name.focus(); return; }
     if (!p) { err("请输入密码"); pw.focus(); return; }
-    if (reg && p.length < 4) { err("密码至少 4 位"); pw.focus(); return; }
+    if (reg && p.length < 8) { err("密码至少 8 位"); pw.focus(); return; }
     if (reg && p !== pw2.value) { err("两次输入的密码不一样"); pw2.focus(); return; }
     const btn = $("#authBtn"); btn.disabled = true; btn.textContent = reg ? "注册中…" : "登录中…";
     try {
