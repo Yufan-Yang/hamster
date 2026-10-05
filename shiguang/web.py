@@ -481,6 +481,7 @@ def category_counts():
 def jobs():
     term = request.args.get("q", "").strip()
     term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
+    wanted_tags = tag_query(term)  # "#标签": only by tags
     scope, scope_args = scope_sql()
     scope += " AND status != 'cancelled'"  # cancelled jobs are hidden
     sub = request.args.get("sub", "")
@@ -497,7 +498,7 @@ def jobs():
     parsed = None
     # A sentence ("上个月小王讲伊朗、画面里有地图的片段"): an AI reads it into keywords, what's on screen, an
     # uploader and dates (the page asks for this once typing pauses; `exact` searches the words as typed)
-    if term and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
+    if term and not wanted_tags and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
         try:
             ups = "、".join(r["name"] for r in q("SELECT name FROM subs WHERE owner=? OR ?", (g.owner, int(g.admin))))
             parsed = llm.parse_query(term, ups, time.strftime("%Y-%m-%d"))
@@ -505,7 +506,11 @@ def jobs():
             traceback.print_exc()
         if parsed and not (parsed["keywords"] or parsed["visual"]) and not (parsed["uploader"] or parsed["since"]):
             parsed = None
-    if parsed:
+    if wanted_tags:
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {' AND '.join(['analysis LIKE ?'] * len(wanted_tags))} ORDER BY id DESC",
+                 (*scope_args, *(f"%{t}%" for t in wanted_tags)))
+        out = [d for d in map(job_dict, rows) if has_tags((d["analysis"] or {}).get("tags"), wanted_tags)]
+    elif parsed:
         out = search.smart_search(parsed, scope, scope_args, g.owner)
     elif term:
         # Searches titles, links, summaries, key points, tags, file paths and transcripts
@@ -605,14 +610,31 @@ def jobs():
                    notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
                    books=q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
                    # ... and books: by title / author and by what's written in them
-                   book_hits=book_hits(term) if term and not parsed else [],
+                   book_hits=book_hits(term) if term and not parsed and not wanted_tags else [],
                    reading=reading_now() if not term else [],
                    # a search also shows matching 随记 among the videos
-                   note_hits=[notes.note_dict(r, m, seen) for r, m, seen in
-                              search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
+                   note_hits=[notes.note_dict(r, [], []) for r in q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC",
+                                                                    (g.owner,)) if has_tags(json.loads(r["tags"] or "[]"), wanted_tags)][:50]
+                   if wanted_tags else
+                   [notes.note_dict(r, m, seen) for r, m, seen in
+                    search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
                    if term else [],
                    understood=search.understood(parsed) if parsed else None,
                    partial=bool(parsed and out and out[0].get("partial")), cats=category_counts())
+
+
+def tag_query(term):
+    """"#猫" or "#猫 #狗" (also ＃): the tags to search by, and nothing else; [] for an ordinary search."""
+    if not term.startswith(("#", "＃")):
+        return []
+    aliases = kv_get("tag_aliases", {})
+    return [aliases.get(t, t).lower() for t in re.findall(r"[#＃]([^\s#＃]+)", term)]
+
+
+def has_tags(tags, wanted):
+    """Every wanted tag is (part of) one of these tags: #成人 finds 成人视频, case doesn't matter."""
+    tags = [str(t).lower() for t in tags or []]
+    return bool(wanted) and all(any(w in t for t in tags) for w in wanted)
 
 
 def reading_now():

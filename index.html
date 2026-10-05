@@ -601,7 +601,7 @@
 <header>
   <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
   <form class="search" onsubmit="return false">
-    <input type="search" id="search" placeholder="搜索标题、简介、标签、字幕…" autocomplete="off">
+    <input type="search" id="search" placeholder="搜索标题、简介、字幕…  #标签 只搜标签" autocomplete="off">
   </form>
   <div class="right">
     <button class="btn plain" onclick="openAsk()" title="问拾光：用片库和随记回答问题">问</button>
@@ -1582,7 +1582,7 @@ function openWatch(id, part = 0, t = 0) {
     </div>` : "";
   $("#watchBody").innerHTML = `${stage}
     <div class="wtitle">${hl(titleOf(j))}</div>
-    ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify(t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
+    ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify("#" + t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
     <div class="wmeta">${meta.map(x => `<span>${x}</span>`).join("")}</div>
     ${parts}
     <div class="actions">
@@ -3268,7 +3268,7 @@ function searchFor(t) { closeWatch(); $("#search").value = t; query = t; refresh
 let searchTimer;
 // A sentence ("上个月小王讲伊朗、画面里有地图的片段") is read by the AI once typing pauses; words search right away
 let smartSearch = false, exactSearch = false;
-function looksLikeSentence(t) { return t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
+function looksLikeSentence(t) { return !/^[#＃]/.test(t) && t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
   const t = $("#search").value.trim();

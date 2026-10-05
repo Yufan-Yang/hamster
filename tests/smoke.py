@@ -269,6 +269,24 @@ def weekly_privacy():
         G.q("UPDATE privacy SET tags=? WHERE owner=?", (prev["tags"] if prev else "[]", owner))
 
 
+def tag_search():
+    """#标签 finds only videos that have that tag (a tag containing it), nothing matched by title or subtitles."""
+    import urllib.parse
+    owner = f"user:{user}"
+    prev = G.q("SELECT tags FROM privacy WHERE owner=?", (owner,), one=True)
+    hidden = {"tags": json.loads(prev["tags"]) if prev else []}
+    tag = next((a["tags"][0] for a in (json.loads(r["analysis"] or "{}") for r in G.q(
+        "SELECT analysis FROM jobs WHERE owner=? AND status='done' ORDER BY id DESC LIMIT 50", (owner,)))
+        if a.get("tags") and not shiguang.web.is_hidden({"analysis": a}, hidden)), None)
+    if not tag:
+        return
+    found = get("/api/jobs?q=" + urllib.parse.quote("#" + tag))
+    assert found["jobs"], tag
+    assert all(any(tag.lower() in t.lower() for t in j["analysis"].get("tags") or []) for j in found["jobs"]), tag
+    assert not found["book_hits"]
+
+
+check("#标签 searches only tags", tag_search)
 check("每周总结 leaves out videos hidden by privacy mode", weekly_privacy)
 check("每周总结 for last week (Monday 8:00)", lambda: G.make_reports() or 1)
 check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.epub?dl=1") and not G.is_book_url("https://youtu.be/x")
