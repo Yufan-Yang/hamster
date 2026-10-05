@@ -336,9 +336,13 @@ def pi_chapters(task, beat):
     user = f"{text}\n\n{CHAPTERS_TASK}" + "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
     out = llm.llm_json(llm.TRANSCRIPT_SYSTEM, user, {"chapters": "array", "points": "array"}, 4000, {}, "chapters", jid,
                        think=False)
-    chapters = sorted(({"t": float(c["t"]), "title": str(c.get("title") or "")[:24]} for c in out.get("chapters") or []
+    from opencc import OpenCC
+    cc = OpenCC("t2s")  # subtitles in traditional characters gave traditional chapter titles
+    chapters = sorted(({"t": float(c["t"]), "title": cc.convert(str(c.get("title") or ""))[:24]} for c in out.get("chapters") or []
                        if isinstance(c, dict) and isinstance(c.get("t"), (int, float)) and 0 <= c["t"] <= end + 60),
                       key=lambda c: c["t"])
+    if not chapters and lines >= 40:  # enough to talk about but nothing came back (happened once): ask again later
+        raise RuntimeError("no chapters in the answer")
     times = [float(t) if isinstance(t, (int, float)) and 0 <= t <= end + 60 else None for t in (out.get("points") or [])]
     a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
     a.setdefault("chapters", {})[str(n)] = chapters
