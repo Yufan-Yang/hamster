@@ -112,7 +112,7 @@ CLAUDE_VIA_MAC = os.environ.get("CLAUDE_VIA_MAC", "1") != "0"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
 CLAUDE_MODEL_LIGHT = os.environ.get("CLAUDE_MODEL_LIGHT", "haiku")  # short mechanical answers
 CLAUDE_LIGHT = {"classify", "tags", "failure", "notes"}
-CLAUDE_SKIP = {"search", "ask"}  # someone is looking at the screen: a few seconds matter, so DeepSeek
+CLAUDE_SKIP = {"search", "ask"}  # someone is looking at the screen: a few seconds matter, so DeepSeek first
 CLAUDE_CLAIM_WAIT = int(os.environ.get("CLAUDE_CLAIM_WAIT", "90"))
 CLAUDE_RUN_WAIT = 900  # once the Mac has it
 
@@ -182,6 +182,18 @@ def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, t
                 return out
         except Exception:
             traceback.print_exc()
+    try:
+        return deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think)
+    except Exception:
+        # the quick kinds (search, 问拾光) try DeepSeek first; when it can't answer (no balance left...), Claude does
+        if purpose in CLAUDE_SKIP and claude_ready():
+            out = claude_json(system, user, fields, purpose, job_id, usage, False)
+            if out is not None:
+                return out
+        raise
+
+
+def deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think):
     if not LLM_API_KEY:
         raise RuntimeError("Claude on the Mac didn't answer and there's no DeepSeek key")
     thinking = ({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}) if think else \

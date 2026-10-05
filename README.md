@@ -407,7 +407,7 @@
    - 模型：分类、合并标签、解释失败、整理随记用 Haiku（`CLAUDE_MODEL_LIGHT`），总结、章节、翻译、周报、回顾用 Sonnet（`CLAUDE_MODEL`）。原来"关思考"的请求用 `--effort low`。
    - `claude -p` 的参数：`--safe-mode`（不读 CLAUDE.md、插件、MCP）、`--tools ""`（没有工具）、`--no-session-persistence`、`--json-schema`（保证返回这些字段）。在一个空文件夹里跑，经 Mac 本机代理连 Anthropic。
 2. **DeepSeek 兜底**：Mac 不在线、Claude 工人暂停（订阅额度用完，到恢复时间前都报暂停）、90 秒内没人领（`CLAUDE_CLAIM_WAIT`）、或 Claude 出错，就照旧问 DeepSeek。
-3. **始终用 DeepSeek**：大白话搜索、问拾光——有人盯着屏幕等，`claude -p` 每次要多花几秒启动。
+3. **先用 DeepSeek**：大白话搜索、问拾光——有人盯着屏幕等，`claude -p` 每次要多花几秒启动。DeepSeek 答不了（比如余额用完）时再问 Claude。
 4. `CLAUDE_VIA_MAC=0` 关掉 Claude，全部回到 DeepSeek。
 
 每次调用都记录 token、缓存命中、耗时；DeepSeek 的还按价目表算费用，Claude 的记作「订阅」。资源使用里两者分开列。Claude 在时，"放到半价时段"的等待也取消了（没有价格可等）。
