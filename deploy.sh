@@ -31,6 +31,7 @@ sudo rm -rf $APP.prev && sudo mkdir -p $APP.prev
 for f in grabber.py index.html refresh_metadata.py shiguang tests; do [ -e $APP/\$f ] && sudo cp -a $APP/\$f $APP.prev/ || true; done
 for f in grabber.py index.html refresh_metadata.py shiguang tests; do sudo rm -rf $APP/\$f; sudo cp -a $APP.next/\$f $APP/; done
 sudo cp -a $APP.next/static/. $APP/static/
+[ -e $APP.next/send-to-pi.shortcut ] && sudo cp -a $APP.next/send-to-pi.shortcut $APP/ || true
 sudo systemctl restart grabber grabber-worker
 ok=0
 for i in \$(seq 1 20); do

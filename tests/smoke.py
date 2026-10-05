@@ -318,6 +318,26 @@ def claude_round_trip():
 
 check("AI request through the Mac's Claude, and the fallback when nobody takes it", claude_round_trip)
 
+
+def shortcut_from_outside():
+    key = get("/api/account")["shortcut_key"]
+    out = app.test_client(use_cookies=False)  # the iOS shortcut: no cookies, through the tunnel's port
+    env = {"SERVER_PORT": str(shiguang.core.EXTERNAL_PORT)}
+
+    def send(body):
+        return out.post("/api/add", json=body, environ_overrides=env)
+    assert send({"text": "smoke 随记", "device": "测试手机"}).status_code == 401
+    assert send({"text": "smoke 随记", "device": "测试手机", "key": "x" * 24}).status_code == 403
+    r = send({"text": "smoke 随记", "device": "测试手机", "key": key})
+    assert r.status_code == 200, r.data
+    assert G.q("SELECT owner FROM notes WHERE text='smoke 随记'", one=True)["owner"] == f"user:{user}"
+    assert post("/api/shortcut-key/new")["shortcut_key"] != key
+    assert send({"text": "smoke 随记", "key": key}).status_code == 403  # the old key stops working
+    shiguang.web.login_failures.clear()
+
+
+check("iOS shortcut from outside needs its account's key", shortcut_from_outside)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)

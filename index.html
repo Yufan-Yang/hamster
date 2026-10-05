@@ -1923,7 +1923,7 @@ function shareTips() {
   const bm = `javascript:void(window.open('${location.origin}/add?url='+encodeURIComponent(location.href),'_blank','width=420,height=160'))`;
   return `<div class="psec" style="margin-top:18px">发送到拾光</div>
     <div class="tips" style="margin-top:0">
-      ▶ iPhone：在手机上打开本页，<a href="/shortcut">安装「发送到拾光」快捷指令</a>，之后在任意 App 的分享菜单里点它<br>
+      ▶ iPhone：在手机上打开本页，<a href="/shortcut">安装「发送到拾光」快捷指令</a>，安装时粘贴账号页里的「快捷指令密钥」，之后在任意 App 的分享菜单里点它（在外面也能用）<br>
       ▶ 安卓：用免费的 HTTP Shortcuts 加一个分享入口，<a href="#" onclick="openAndroid(); return false">看设置步骤</a><br>
       ▶ 电脑：把 <a href="${esc(bm)}" onclick="event.preventDefault(); toast('把这个链接拖到浏览器书签栏使用')">发送到拾光</a> 拖到书签栏，在任何网页上点一下就会下载当前页面
     </div>`;
@@ -3165,8 +3165,17 @@ async function openAccount() {
     <p style="color:var(--muted);margin:0 0 12px;font-size:13px">已登录这个账号的设备（${acc.devices.length} 台）。在其他手机、电脑上登录同一账号即可加入；点设备只看它添加的内容。</p>
     <div class="devs">${rows || '<div class="sub">还没有设备</div>'}</div>
     <button class="btn plain wide" style="margin-top:14px" onclick="logout()">退出登录</button>
+    ${acc.shortcut_key ? `<div class="psec" style="margin-top:18px">快捷指令密钥</div>
+    <p class="hint" style="margin-top:0">安装 iPhone 快捷指令「发送到拾光」时粘贴这个密钥，分享的链接就会加到这个账号，在外面也能用。别发给别人；手机丢了就换一个，旧密钥立刻失效。</p>
+    <code class="copy block" id="shortcutKey" onclick="copyText(this)">${esc(acc.shortcut_key)}</code>
+    <button class="btn plain" style="margin-top:8px" onclick="newShortcutKey()">换一个</button>` : ""}
     ${shareTips()}`;
   $("#accountSheet").hidden = false;
+}
+async function newShortcutKey() {
+  if (!confirm("换成新密钥？用旧密钥的快捷指令都要重新安装。")) return;
+  const r = await (await fetch("/api/shortcut-key/new", {method: "POST"})).json();
+  if (r.shortcut_key) { $("#shortcutKey").textContent = r.shortcut_key; toast("已换新密钥，记得重新安装快捷指令"); }
 }
 /* login / register: one mode at a time with a single button, inline checks and errors */
 function renderAuth(mode, keep = {}) {

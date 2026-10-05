@@ -59,6 +59,7 @@ STEPS = [
     (14, lambda db: add(db, "vec", "model", "TEXT DEFAULT 'chinese-clip-vit-base-patch16-int8'")),
     (15, lambda db: add(db, "notes", "tags", "TEXT DEFAULT '[]'")),  # AI tags of a 随记
     (16, lambda db: add(db, "jobs", "advice", "TEXT DEFAULT ''")),  # why a download failed and what to do (AI)
+    (17, lambda db: add(db, "users", "shortcut_key", "TEXT")),  # the iOS shortcut's secret, so it works from outside too
 ]
 
 

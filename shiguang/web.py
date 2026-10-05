@@ -65,9 +65,37 @@ def phone_owner(name):
     return owner_of_device(row["device"])
 
 
+def shortcut_user(key):
+    """The account whose shortcut key this is (the iOS shortcut sends it, so it works from outside too)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", key):
+        return None
+    row = q("SELECT name FROM users WHERE shortcut_key=?", (key,), one=True)
+    return row["name"] if row else None
+
+
+def shortcut_key(name, new=False):
+    row = q("SELECT shortcut_key FROM users WHERE name=?", (name,), one=True)
+    if new or not row["shortcut_key"]:
+        q("UPDATE users SET shortcut_key=? WHERE name=?", (secrets.token_urlsafe(18), name))
+        row = q("SELECT shortcut_key FROM users WHERE name=?", (name,), one=True)
+    return row["shortcut_key"]
+
+
 # From outside, only these work without logging in (everything else needs an account)
 PUBLIC_PATHS = ("/", "/api/login", "/api/jobs", "/api/account", "/sw.js")
-login_failures = {}  # ip -> [failed attempts, first failure time]
+login_failures = {}  # ip -> [failed attempts, first failure time]; wrong passwords and wrong shortcut keys
+
+
+def locked_out(ip):
+    fails, since = login_failures.get(ip, (0, time.time()))
+    return fails >= 10 and time.time() - since < 15 * 60
+
+
+def note_failure(ip):
+    fails, since = login_failures.get(ip, (0, time.time()))
+    recent = time.time() - since < 15 * 60
+    login_failures[ip] = (fails + 1 if recent else 1, since if recent else time.time())
+    time.sleep(1)  # slow down guessing
 
 
 def is_external():
@@ -99,6 +127,27 @@ def identify():
         g.user = None
     g.admin = bool(g.user and q("SELECT admin FROM users WHERE name=?", (g.user,), one=True)["admin"])
     g.owner = f"user:{g.user}" if g.user else g.device
+    if request.path == "/api/add" and not request.cookies:  # the iOS / Android shortcut
+        body = request.get_json(silent=True) or {}
+
+        def field(k):  # also from a body that isn't valid JSON (see add_post)
+            m = re.search(rf'"{k}"\s*:\s*"([^"]{{1,64}})"', request.get_data(as_text=True))
+            return str(body.get(k, "")).strip() or (m.group(1) if m else "")
+        phone, key = field("device")[:60], field("key")
+        user = None
+        if key:
+            if locked_out(client_ip()):
+                return Response("尝试次数太多，请 15 分钟后再试", mimetype="text/plain", status=429)
+            user = shortcut_user(key)
+            if not user:
+                note_failure(client_ip())
+                return Response("快捷指令密钥不对：在拾光的账号页里复制新的密钥，重新安装快捷指令", mimetype="text/plain", status=403)
+        elif g.external:  # from outside, only a shortcut with its account's key
+            return Response("需要快捷指令密钥：在拾光的账号页里复制，重新安装快捷指令", mimetype="text/plain", status=401)
+        g.owner = f"user:{user}" if user else phone_owner(phone) if phone else "shortcut"
+        g.device_label = f"📱 {phone}" if phone else "快捷指令"
+        g.new_device = False
+        return
     if g.external and not g.user:
         # No anonymous device mode on the internet: show the page and the login form, nothing else
         if request.path == "/api/jobs":
@@ -108,15 +157,6 @@ def identify():
             return jsonify(user=None, devices=[])
         if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/subs/", "/thumb/")):
             return jsonify(error="login required", login_required=True), 401
-    if request.path == "/api/add" and not request.cookies:
-        phone = str((request.get_json(silent=True) or {}).get("device", "")).strip()[:60]
-        if not phone:  # body that isn't valid JSON (see add_post)
-            m = re.search(r'"device"\s*:\s*"([^"]{1,60})"', request.get_data(as_text=True))
-            phone = m.group(1) if m else ""
-        g.owner = phone_owner(phone) if phone else "shortcut"
-        g.device_label = f"📱 {phone}" if phone else "快捷指令"
-        g.new_device = False
-        return
     g.device_label = device_label(request.headers.get("User-Agent"))
     if request.path.startswith("/api/notes") and request.method == "POST":
         request.max_content_length = NOTE_MAX_UPLOAD
@@ -269,15 +309,12 @@ def credentials():
 @app.post("/api/login")
 def login():
     ip = client_ip()
-    fails, since = login_failures.get(ip, (0, time.time()))
-    if fails >= 10 and time.time() - since < 15 * 60:
+    if locked_out(ip):
         return jsonify(error="尝试次数太多，请 15 分钟后再试"), 429
     name, pw = credentials()
     row = q("SELECT pw FROM users WHERE name=?", (name,), one=True)
     if not row or not check_password_hash(row["pw"], pw):
-        time.sleep(1)  # slow down guessing
-        login_failures[ip] = (fails + 1 if time.time() - since < 15 * 60 else 1,
-                              since if time.time() - since < 15 * 60 else time.time())
+        note_failure(ip)
         return jsonify(error="用户名或密码不对"), 403
     login_failures.pop(ip, None)
     sign_in(name)
@@ -333,7 +370,15 @@ def account():
     # Jobs from before devices were recorded have no device; JSON keys must be strings
     counts = {r["device"] or "未知设备": r["n"] for r in q("SELECT device, COUNT(*) n FROM jobs WHERE owner=? GROUP BY device",
                                                        (f"user:{g.user}",))}
-    return jsonify(user=g.user, devices=devices, counts=counts)
+    return jsonify(user=g.user, devices=devices, counts=counts, shortcut_key=shortcut_key(g.user))
+
+
+@app.post("/api/shortcut-key/new")
+def new_shortcut_key():
+    """A new key for the iOS shortcut (a phone was lost): shortcuts with the old key stop working."""
+    if not g.user:
+        return jsonify(error="not logged in"), 403
+    return jsonify(shortcut_key=shortcut_key(g.user, new=True))
 
 
 @app.post("/api/devices/<device_id>/remove")
