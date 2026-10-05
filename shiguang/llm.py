@@ -526,6 +526,8 @@ def parse_query(text, uploaders, today):
                    {"keywords": "array", "visual": "string or null", "uploader": "string or null",
                     "since": "string or null", "until": "string or null"}, 400, {}, "search", think=False)
     day = re.compile(r"\d{4}-\d\d-\d\d")
+    # some models write "null" / "无" as a string where they mean nothing
+    out = {k: None if isinstance(v, str) and v.strip().lower() in ("", "null", "none", "无", "n/a") else v for k, v in out.items()}
     return {"keywords": [str(k).strip() for k in out.get("keywords") or [] if str(k).strip()][:4],
             "visual": str(out["visual"]).strip() if out.get("visual") else None,
             "uploader": str(out["uploader"]).strip() if out.get("uploader") else None,
