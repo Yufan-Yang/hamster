@@ -137,7 +137,40 @@ def identify():
     origin = request.headers.get("Origin")
     cross_site = (request.method not in ("GET", "HEAD", "OPTIONS") and bool(origin)
                   and urllib.parse.urlsplit(origin).netloc != request.host)
-    if cross_site and not (request.path == "/api/add" and not request.cookies):  # (a shortcut's key decides, below)
+    # The iOS / Android shortcut (not the page): a POST to /api/add with a key, or without cookies. (iOS keeps the
+    # cookies a response set, so a shortcut can come with one: those are ignored, and none are set for it.)
+    g.shortcut = False
+    if request.path == "/api/add" and request.method == "POST":
+        body = request.get_json(silent=True) or {}
+
+        def field(k):  # also from a body that isn't valid JSON (see add_post)
+            m = re.search(rf'"{k}"\s*:\s*"([^"]{{1,64}})"', request.get_data(as_text=True))
+            return str(body.get(k, "")).strip() or (m.group(1) if m else "")
+        phone, key = field("device")[:60], field("key")
+        g.shortcut = bool(key) or not request.cookies
+    if g.shortcut:
+        g.device, g.new_device, g.user, g.admin = "", False, None, False
+        user = None
+        if key:
+            if locked_out(client_ip()):
+                return Response("尝试次数太多，请 15 分钟后再试", mimetype="text/plain", status=429)
+            user = shortcut_user(key)
+            if user and g.external and is_admin(user):
+                return Response("管理员账号只能在家里用", mimetype="text/plain", status=403)
+            if not user:
+                note_failure(client_ip())
+                return Response("快捷指令密钥不对：在拾光的账号页里复制新的密钥，重新安装快捷指令", mimetype="text/plain", status=403)
+        elif cross_site:  # without a key only from home, and never a web page making a browser post here
+            return Response("cross-site request", mimetype="text/plain", status=403)
+        elif g.external:  # from outside, only a shortcut with its account's key
+            got = ", ".join(body) if body else f"{request.content_type or '?'} {request.content_length or 0} B"
+            app.logger.warning("shortcut from outside without a key: %s, %s", got, request.headers.get("User-Agent"))
+            return Response(f"没收到快捷指令密钥（收到：{got}）。请在账号页重新安装「发送到拾光（外网）」",
+                            mimetype="text/plain", status=401)
+        g.owner = f"user:{user}" if user else phone_owner(phone) if phone else "shortcut"
+        g.device_label = f"📱 {phone}" if phone else "快捷指令"
+        return
+    if cross_site:
         return jsonify(error="cross-site request"), 403
     if request.path.startswith("/api/compute/"):  # the Mac worker: token, no cookie, not a browser
         g.device, g.new_device, g.user, g.admin, g.owner = "", False, None, False, None
@@ -158,31 +191,6 @@ def identify():
         session.clear()
         g.user, g.admin = None, False
     g.owner = f"user:{g.user}" if g.user else g.device
-    if request.path == "/api/add" and not request.cookies:  # the iOS / Android shortcut
-        body = request.get_json(silent=True) or {}
-
-        def field(k):  # also from a body that isn't valid JSON (see add_post)
-            m = re.search(rf'"{k}"\s*:\s*"([^"]{{1,64}})"', request.get_data(as_text=True))
-            return str(body.get(k, "")).strip() or (m.group(1) if m else "")
-        phone, key = field("device")[:60], field("key")
-        user = None
-        if key:
-            if locked_out(client_ip()):
-                return Response("尝试次数太多，请 15 分钟后再试", mimetype="text/plain", status=429)
-            user = shortcut_user(key)
-            if user and g.external and is_admin(user):
-                return Response("管理员账号只能在家里用", mimetype="text/plain", status=403)
-            if not user:
-                note_failure(client_ip())
-                return Response("快捷指令密钥不对：在拾光的账号页里复制新的密钥，重新安装快捷指令", mimetype="text/plain", status=403)
-        elif cross_site:  # without a key only from home, and never a web page making a browser post here
-            return Response("cross-site request", mimetype="text/plain", status=403)
-        elif g.external:  # from outside, only a shortcut with its account's key
-            return Response("需要快捷指令密钥：在拾光的账号页里复制，重新安装快捷指令", mimetype="text/plain", status=401)
-        g.owner = f"user:{user}" if user else phone_owner(phone) if phone else "shortcut"
-        g.device_label = f"📱 {phone}" if phone else "快捷指令"
-        g.new_device = False
-        return
     if g.external and not g.user:
         # No anonymous device mode on the internet: show the page and the login form, nothing else
         if request.path == "/api/jobs":
@@ -620,26 +628,26 @@ def add_post():
         ids.append(jid)
         hows.append(how)
     if not ids and (subs or shelf):
-        if not request.cookies:
+        if g.shortcut:
             return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",
                                                   f"{len(shelf)} 本电子书加到书架了" if shelf else "") if x), mimetype="text/plain")
         return jsonify(ids=[], duplicates=[], linked=[], subs=subs, books=shelf)
     if blocked and not ids and not subs and not shelf:
-        return (Response(blocked[0], mimetype="text/plain", status=400) if not request.cookies
+        return (Response(blocked[0], mimetype="text/plain", status=400) if g.shortcut
                 else (jsonify(error=blocked[0]), 400))
-    if not ids and not request.cookies and text.strip():
+    if not ids and g.shortcut and text.strip():
         # the iOS / Android shortcut shared plain text (no link): keep it as a 随记
         now = time.time()
         q("INSERT INTO notes (owner, text, device, created, updated) VALUES (?,?,?,?,?)",
           (g.owner, text.strip()[:20000], g.device_label, now, now))
         return Response("没有链接，已经记到「随记」里", mimetype="text/plain")
     if not ids:
-        if not request.cookies:
+        if g.shortcut:
             return Response("没找到链接", mimetype="text/plain", status=400)
         return jsonify(error="No link found"), 400
     dupes = [i for i, h in zip(ids, hows) if h == "duplicate"]
     linked = [i for i, h in zip(ids, hows) if h == "linked"]
-    if not request.cookies:
+    if g.shortcut:
         # iOS shortcut / Android HTTP Shortcuts show the reply as a notification: keep it readable
         new = len(ids) - len(dupes) - len(linked)
         msg = "，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主" if subs else "", f"{len(shelf)} 本电子书加到书架了" if shelf else "",

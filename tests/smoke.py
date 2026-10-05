@@ -330,6 +330,10 @@ def shortcut_from_outside():
     assert send({"text": "smoke 随记", "device": "测试手机", "key": "x" * 24}).status_code == 403
     r = send({"text": "smoke 随记", "device": "测试手机", "key": key})
     assert r.status_code == 200, r.data
+    assert not r.headers.getlist("Set-Cookie"), r.headers  # a shortcut is given no cookies...
+    r = out.post("/api/add", json={"text": "smoke 随记 2", "key": key}, environ_overrides=env,
+                 headers={"Cookie": f"{G.DEVICE_COOKIE}={'a' * 32}"})
+    assert r.status_code == 200 and r.mimetype == "text/plain", r.data  # ...and one that kept some still works
     assert G.q("SELECT owner FROM notes WHERE text='smoke 随记'", one=True)["owner"] == f"user:{user}"
     assert post("/api/shortcut-key/new")["shortcut_key"] != key
     assert send({"text": "smoke 随记", "key": key}).status_code == 403  # the old key stops working
