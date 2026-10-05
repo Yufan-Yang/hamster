@@ -26,6 +26,10 @@ import shiguang  # noqa: E402
 
 G.init_db()
 G.setup_app()
+# the copy holds whatever the real board was doing (the Mac's tasks, requests for Claude): out of the way, so the
+# board tests see only their own tasks
+G.q("DELETE FROM tasks WHERE kind='llm'")
+G.q("UPDATE tasks SET state='done', worker=NULL, lease_until=NULL WHERE state IN ('queued', 'running')")
 app = shiguang.core.app
 app.config["TESTING"] = True
 failures = []
