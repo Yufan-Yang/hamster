@@ -3031,7 +3031,7 @@ function bytes(n) {
 }
 // money: enough digits that a single call (a fraction of a fen) doesn't show as ¥0.00
 function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 10 ? 2 : n >= 0.1 ? 3 : 4)); }
-function workerName(n) { return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）"}[n] || (/mac/i.test(n || "") ? "Mac mini" : n || ""); }
+function workerName(n) { return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n] || (/mac.*-claude/i.test(n || "") ? "Mac（Claude）" : /mac/i.test(n || "") ? "Mac mini" : n || ""); }
 function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
 async function openUsage(days) {
@@ -3048,8 +3048,8 @@ async function openUsage(days) {
       return `<div title="${d} 代理 ${bytes(p)} · 直连 ${bytes(x)}" style="height:${(p + x) / peak * 100}%;background:linear-gradient(to top, var(--green) ${x / Math.max(1, p + x) * 100}%, var(--blue) 0)"></div>`;
     }).join("")}</div><div class="ubar-l"><span>${daysList[0]}</span><span>蓝 = 走代理 · 绿 = 直连</span><span>${daysList[daysList.length - 1]}</span></div>` : "";
   const work = u.work || [];
-  const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => w.kind === "llm");
-  const proc = work.filter(w => !["download", "llm"].includes(w.kind));
+  const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => w.kind === "llm" || w.kind === "claude");
+  const proc = work.filter(w => !["download", "llm", "claude"].includes(w.kind));
   const dlBytes = dl.reduce((a, w) => a + w.amount, 0), dlCount = dl.reduce((a, w) => a + w.count, 0);
   const tokIn = llm.reduce((a, w) => a + w.tokens_in, 0), tokOut = llm.reduce((a, w) => a + w.tokens_out, 0);
   const cost = llm.reduce((a, w) => a + (w.cost || 0), 0);
@@ -3090,11 +3090,11 @@ async function openUsage(days) {
       ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
         w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
     </table></div>` : '<p class="hint">这段时间还没有。</p>'}
-    <div class="usec"><b>AI tokens 和花费</b><span class="sub">DeepSeek，按用量计费</span></div>
+    <div class="usec"><b>AI tokens 和花费</b><span class="sub">先用 Mac 上的 Claude（订阅），不在时用 DeepSeek（按量计费）</span></div>
     ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入<br>（缓存命中）</th><th>输出</th><th>花费</th></tr>
       ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td>
         <td>${num(w.tokens_in)}${w.cache_hit ? `<br>（${num(w.cache_hit)}）` : ""}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td>
-        <td>${w.cost == null ? "–" : yuan(w.cost) + (w.guessed ? "*" : "")}</td></tr>`).join("")}
+        <td>${w.kind === "claude" ? "订阅" : w.cost == null ? "–" : yuan(w.cost) + (w.guessed ? "*" : "")}</td></tr>`).join("")}
       <tr><td>合计</td><td>${num(llm.reduce((a, w) => a + (w.purpose === "earlier" ? w.amount : w.count), 0))}</td><td>${num(tokIn)}</td><td>${num(tokOut)}</td><td>${yuan(cost)}</td></tr>
     </table></div>
     <p class="hint">花费按 DeepSeek 标价算（工作日 9–12、14–18 点全价，其他时间半价）。${llm.some(w => w.guessed) ? "带 * 的含开始记花费前的调用，按没有缓存估算，偏高。" : ""}${

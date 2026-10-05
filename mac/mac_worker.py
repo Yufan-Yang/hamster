@@ -15,6 +15,11 @@ reached those wait in a local outbox.
 Speech-to-text: Whisper large-v3-turbo on the GPU (mlx-whisper), ~25x realtime on an M2 Pro. Pictures (covers,
 keyframes): the Pi's Chinese-CLIP model (same vectors as the Pi's own) ~30 ms each, text in them with macOS Vision.
 While a game is in front it takes no tasks (and gives back a long one it's in the middle of).
+
+AI requests (summaries, chapters, translations, sorting...): two more claim loops answer them with this Mac's Claude
+Code (`claude -p`, logged in with the Claude subscription), so they don't go to the paid DeepSeek API. They keep going
+while a game is in front (it's only waiting on the network). When the subscription's limits are used up they say
+they're paused until it resets, and the Pi asks DeepSeek meanwhile.
 """
 import json
 import re
@@ -46,6 +51,10 @@ CLIP_MODEL = "chinese-clip-vit-base-patch16-int8"  # its name on the Pi (search.
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the same shot (talk shows: a handful)
 GAME_APPS = HERE / "game-apps.txt"
+CLAUDE = Path(os.environ.get("CLAUDE_BIN") or Path.home() / ".local" / "bin" / "claude")
+CLAUDE_DIR = HERE / "claude-cwd"  # an empty folder to run it in: no project files for it to pick up
+CLAUDE_CAPS = ["llm", "claude"]
+CLAUDE_LOOPS = 2
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
 CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 / 书架 the drop folder fills
@@ -372,6 +381,94 @@ def unload():
         traceback.print_exc()
 
 
+# ---- AI requests from the Pi, answered by Claude Code on this Mac
+
+class ClaudeLimit(Exception):
+    def __init__(self, text, until):
+        super().__init__(text)
+        self.until = until
+
+
+def ask_claude(p, beat):
+    """One request (system prompt, user text, the JSON keys wanted) through `claude -p`: no tools, no project
+    context (--safe-mode), nothing kept; the answer validated against a schema with those keys."""
+    schema = {"type": "object", "properties": {k: {} for k in p["fields"]}, "required": list(p["fields"])}
+    cmd = [str(CLAUDE), "-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--output-format", "json",
+           "--model", p.get("model") or "sonnet", "--effort", p.get("effort") or "medium",
+           "--system-prompt", p["system"], "--json-schema", json.dumps(schema)]
+    config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    proxy = config.get("proxy", "")  # Anthropic isn't reachable directly from here
+    env = {**os.environ, **({"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy} if proxy else {})}
+    CLAUDE_DIR.mkdir(exist_ok=True)
+    started = time.time()
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          cwd=CLAUDE_DIR, env=env) as proc:
+        stop = threading.Event()
+        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
+        try:
+            stdout, stderr = proc.communicate(p["user"], timeout=600)
+        finally:
+            stop.set()
+    try:
+        out = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"claude said (exit {proc.returncode}): {(stderr or stdout).strip()[-300:]}")
+    if out.get("is_error") or out.get("subtype") != "success":
+        text = str(out.get("result") or out.get("subtype") or stderr)
+        if out.get("api_error_status") == 429 or re.search(r"limit", text, re.I):
+            m = re.search(r"\|(\d{10})", text)  # "...limit reached|<when it resets>"
+            raise ClaudeLimit(text[:200], int(m.group(1)) if m else time.time() + 1800)
+        raise RuntimeError(f"claude: {text[:300]}")
+    answer = out.get("structured_output")
+    if not isinstance(answer, dict):
+        answer = json.loads(re.sub(r"^```(json)?|```$", "", (out.get("result") or "").strip()))
+    u = out.get("usage") or {}
+    return {"out": answer, "model": next(iter(out.get("modelUsage") or {}), p.get("model")),
+            "tokens_in": (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
+            "cache_read": u.get("cache_read_input_tokens") or 0, "tokens_out": u.get("output_tokens") or 0,
+            "seconds": round(time.time() - started, 1)}
+
+
+def claude_loop(n):
+    name = f"{NAME}-claude-{n}"
+    limited_until = 0
+    while True:
+        if not CLAUDE.exists():
+            log("no Claude Code at", CLAUDE, ": AI requests stay with the Pi")
+            return
+        try:
+            if time.time() < limited_until:
+                call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS,
+                     paused=f"Claude 额度用完，{time.strftime('%H:%M', time.localtime(limited_until))} 恢复")
+                time.sleep(60)
+                continue
+            task = call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS, wait=25)["task"]
+        except requests.RequestException:
+            time.sleep(60)
+            continue
+        if not task:
+            continue
+        p, tid = task["payload"], task["id"]
+        try:
+            result = ask_claude(p, lambda: call(f"/api/tasks/{tid}/heartbeat", worker=name))
+            call(f"/api/tasks/{tid}/done", worker=name, result=result)
+            log("claude", tid, p.get("purpose"), result["model"], f"{result['seconds']}s",
+                f"{result['tokens_in']} in / {result['tokens_out']} out")
+        except ClaudeLimit as e:
+            limited_until = e.until
+            log("claude: limits used up until", time.strftime("%m-%d %H:%M", time.localtime(e.until)), e)
+            try:
+                call(f"/api/tasks/{tid}/fail", worker=name, error=f"limit: {e}", retry=False)
+            except requests.RequestException:
+                pass
+        except Exception as e:  # the Pi asks DeepSeek instead
+            traceback.print_exc()
+            try:
+                call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
+            except requests.RequestException:
+                pass
+
+
 # ---- the claim loop
 
 def work(task):
@@ -428,6 +525,8 @@ def drop_loop():
 def run():
     log("worker", NAME, CAPS, "->", PI, "model", WHISPER)
     threading.Thread(target=drop_loop, daemon=True).start()
+    for n in range(1, CLAUDE_LOOPS + 1):
+        threading.Thread(target=claude_loop, args=(n,), daemon=True).start()
     last_work, loaded, paused_for_game = time.time(), False, False
     while True:
         if gaming():  # playing: leave the Mac alone; tell the Pi we're only paused, so it doesn't start on our tasks

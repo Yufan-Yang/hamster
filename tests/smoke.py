@@ -243,6 +243,32 @@ check("e-book: removed with its files", book_remove)
 check("每周总结 for last week (Monday 8:00)", lambda: G.make_reports() or 1)
 check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.epub?dl=1") and not G.is_book_url("https://youtu.be/x")) or 1 / 0)
 
+
+
+def claude_round_trip():
+    """An AI request goes on the board for the Mac's Claude; a stand-in Mac answers it; nobody taking it means None."""
+    import threading
+
+    def mac():
+        for _ in range(100):
+            t = G.claim_task("test-claude", ["llm", "claude"])
+            if t:
+                assert t["payload"]["model"] == G.CLAUDE_MODEL_LIGHT and t["payload"]["effort"] == "low", t["payload"]
+                G.complete_task(t["id"], "test-claude", {"out": {"cause": "测试", "fix": "无"}, "tokens_in": 10, "tokens_out": 5})
+                return
+            time.sleep(0.2)
+    th = threading.Thread(target=mac)
+    th.start()
+    out = G.claude_json("sys", "user", {"cause": "string", "fix": "string"}, "failure", None, {}, False)
+    th.join()
+    assert out == {"cause": "测试", "fix": "无"}, out
+    shiguang.llm.CLAUDE_CLAIM_WAIT = 2
+    assert G.claude_json("sys", "user", {"x": "string"}, "failure", None, {}, False) is None
+    assert not G.q("SELECT 1 FROM tasks WHERE kind='llm'", one=True), "requests left on the board"
+
+
+check("AI request through the Mac's Claude, and the fallback when nobody takes it", claude_round_trip)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
 sys.exit(1 if failures else 0)

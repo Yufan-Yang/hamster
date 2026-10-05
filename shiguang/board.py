@@ -46,6 +46,7 @@ PREFER_WAIT = 3 * 86400  # e.g. a Mac that claims but never finishes
 LEASE = 300  # seconds a claim lasts without a heartbeat
 PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops counting as around
 # "now": CPU work someone is waiting for (a note just made): done right away, not only in idle time
+# ("mac": kinds only the Mac does, e.g. asking Claude; no Pi worker takes them)
 PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now"}
 
 
@@ -98,12 +99,13 @@ def task_payload(kind, target):
     return out
 
 
-def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_before=None):
+def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_before=None, payload=None):
     """Put a task on the board; one per kind and target (publishing it again is a no-op unless `force`, which runs
-    a finished one again). Returns its id."""
+    a finished one again). Returns its id. `payload`: what the worker needs, when it isn't worked out from the target
+    (a request to Claude carries its whole prompt)."""
     if kind not in TASK_KINDS:
         raise ValueError(f"unknown kind {kind}")
-    payload = json.dumps(task_payload(kind, target), ensure_ascii=False)
+    payload = json.dumps(payload if payload is not None else task_payload(kind, target), ensure_ascii=False)
     now = time.time()
     _write("INSERT OR IGNORE INTO tasks (kind, target, priority, payload, parent, published_by, not_before, created, "
            "updated) VALUES (?,?,?,?,?,?,?,?,?)", (kind, target, priority, payload, parent, by, not_before, now, now))

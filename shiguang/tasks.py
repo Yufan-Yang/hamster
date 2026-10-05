@@ -611,6 +611,12 @@ def pi_explain_failure(task, beat):
     return {"advice": advice}
 
 
+@board.task("llm", "AI（Mac 上的 Claude）", "mac")
+def pi_llm(task, beat):
+    """A request for Claude (llm.claude_json): only the Mac's claim loop does these; the asker falls back to DeepSeek."""
+    raise ValueError("only the Mac answers these")
+
+
 @board.task("book_import", "导入电子书", "now")
 def pi_book_import(task, beat):
     """A book just added (uploaded, a link, the Mac's drop folder): read it into chapters / pages, its text and the

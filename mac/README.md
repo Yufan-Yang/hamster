@@ -15,6 +15,7 @@ slowly. Files put in `~/拾光投递` become 随记 of the account in `config.js
 | Homebrew `iperf3` (only used to measure the Wi-Fi) | `/usr/local/Homebrew` | <1 MB |
 | Worker folder: Python venv (mlx-whisper, numpy, requests, opencc, onnxruntime, pillow, pyobjc Vision/Cocoa), `mac_worker.py`, `task` (one-line commands: `~/shiguang-compute/task publish transcribe job:446:0 --force`, `task board`), `token`, `config.json` (drop folder account), `models/clip/vision.onnx` (the Pi's image model, 88 MB), `worker.log`, `outbox.jsonl` (tasks waiting for the Pi, only while it's unreachable), optional `game-apps.txt` (more apps that count as games), `bench/` (two test sound clips) | `~/shiguang-compute` | ~1.3 GB |
 | Drop folder: files put here become 随记, then move to `已投递` | `~/拾光投递` | your files |
+| AI requests from the Pi (2026-10-05): two claim loops run the Claude Code already installed here (`~/.local/bin/claude -p`, logged in with the Claude subscription; nothing new installed), in an empty folder `claude-cwd/`, through the Mac's own proxy (`"proxy"` in `config.json`). Uses the subscription's limits; when they're used up the loops say they're paused and the Pi asks DeepSeek | `~/shiguang-compute/claude-cwd`, `config.json` | – |
 | Whisper large-v3-turbo model (MLX) | `~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo` (+ its files in `blobs/`) | ~1.5 GB |
 | Login item that keeps the worker running (`launchd`, Nice 10, restarts if it stops) | `~/Library/LaunchAgents/site.shiguang.compute.plist` | – |
 
