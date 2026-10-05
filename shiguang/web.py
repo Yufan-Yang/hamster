@@ -1255,7 +1255,7 @@ def key_point_times(jid):
         a = {**json.loads(q("SELECT analysis FROM jobs WHERE id=?", (row["ref"],), one=True)["analysis"] or "{}"), **a}
     times = [{"part": 0, "t": t} if t is not None else None for t in a["point_times"]] if a.get("point_times") \
         else search.point_times(jid)
-    return jsonify(times=times, chapters=a.get("chapters") or {})
+    return jsonify(times=times, chapters=a.get("chapters") or {}, markers=a.get("markers") or {}, heat=a.get("heat") or {})
 
 
 @app.get("/api/similar/<int:jid>")

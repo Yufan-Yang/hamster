@@ -182,12 +182,17 @@ def process(job_id):
             a = {**results[0], "season": guess.get("season") or results[0].get("season"),
                  "episode": ep if isinstance(ep, int) else (ep or [None])[0], "usage": {}}
         else:
+            site_line = meta.pop("_timeline", None) or {}  # (not for the classifier: long lists of numbers)
             staff = bili_staff(meta.get("webpage_url") or url)  # B站 joint videos list everyone who's in them
             a = llm.classify(job_id, m.name, {**meta, "file": m.name, "size": human(m.stat().st_size),
                                           "duration_s": float(ffprobe(m).get("format", {}).get("duration") or 0),
                                           **({"people_in_it": staff} if staff else {})},
                          guess)
             add_people_tags(a, staff)
+            if site_line.get("markers"):  # what the site shows along its progress bar (only one video per link)
+                a["markers"] = {"0": site_line["markers"]}
+            if site_line.get("heat"):
+                a["heat"] = {"0": site_line["heat"]}
             if re.fullmatch(r"\d{8}", str(meta.get("upload_date") or "")):  # when it came out (for 追更周报)
                 d = meta["upload_date"]
                 a["published"] = f"{d[:4]}-{d[4:6]}-{d[6:]}"

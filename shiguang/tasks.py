@@ -638,6 +638,24 @@ def pi_book_import(task, beat):
         raise
 
 
+@once("site_timelines", background=True)
+def backfill_site_timelines():
+    """Once: Pornhub's action tags and heat for the videos downloaded before they were kept."""
+    for r in q("SELECT id, url, analysis FROM jobs WHERE status='done' AND ref IS NULL AND url LIKE '%pornhub.%'"):
+        try:
+            line = download.pornhub_timeline(r["url"])
+        except Exception:
+            traceback.print_exc()
+            continue
+        a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (r["id"],), one=True)["analysis"] or "{}")
+        if line.get("markers"):
+            a["markers"] = {"0": line["markers"]}
+        if line.get("heat"):
+            a["heat"] = {"0": line["heat"]}
+        update(r["id"], analysis=a)
+        time.sleep(2)
+
+
 @once("notes_ai_backfilled", background=True)
 def backfill_note_ai():
     """Once: tags and tidied recordings for the notes written before there were any; and plain-words reasons for

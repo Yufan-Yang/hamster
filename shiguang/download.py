@@ -127,7 +127,58 @@ def _ytdlp_download(job_id, url, workdir, extra=None, drop_subs_on_error=True):
                                      "artist", "track", "album", "series", "season_number", "episode_number")}
     if meta.get("description") and len(meta["description"]) > 5000:
         meta["description"] = meta["description"][:5000] + " …[description cut at 5000 chars]"
+    meta["_timeline"] = timeline(info, url)
     return meta
+
+
+# ---------------------------------------------------------------- what the site shows along the progress bar
+
+def timeline(info, url):
+    """Marks and heat along the video as its site shows them: chapters (YouTube's from the description), the most
+    replayed parts (YouTube's heatmap), Pornhub's action tags ("Doggystyle" at 11:54) and how much each 5 seconds is
+    watched there. {"markers": [{"t", "title"}], "heat": {"step": seconds, "values": [0-100...]}}; parts missing
+    when the site has none."""
+    out = {}
+    chapters = [{"t": round(float(c.get("start_time") or 0), 1), "title": str(c.get("title") or "")[:40]}
+                for c in info.get("chapters") or [] if c.get("title")]
+    if chapters:
+        out["markers"] = chapters
+    heat = info.get("heatmap") or []
+    if heat and heat[0].get("end_time"):
+        step = float(heat[0]["end_time"]) - float(heat[0].get("start_time") or 0)
+        out["heat"] = {"step": round(step, 2), "values": _scale([float(h.get("value") or 0) for h in heat])}
+    if re.search(r"(^|\.)pornhub\.(com|org)", urllib.parse.urlsplit(url).netloc):
+        try:
+            out.update(pornhub_timeline(url))
+        except Exception as e:  # nice to have
+            print("pornhub timeline:", e, flush=True)
+    return out
+
+
+def _scale(values):
+    top = max(values) if values else 0
+    return [round(v / top * 100) for v in values] if top > 0 else []
+
+
+def pornhub_timeline(url):
+    """Pornhub's player data (flashvars): actionTags "Doggystyle:714,Cowgirl:300" (name:second) and hotspots (views
+    of each 5 seconds). yt-dlp doesn't read either."""
+    html = requests.get(url, timeout=30, headers={"User-Agent": UA},
+                        cookies={"accessAgeDisclaimerPH": "1", "age_verified": "1", "platform": "pc"}).text
+    out = {}
+    tags = re.search(r'"actionTags"\s*:\s*"([^"]*)"', html)
+    marks = []
+    for part in (tags.group(1).split(",") if tags else []):
+        name, _, sec = part.rpartition(":")
+        if name.strip() and sec.strip().isdigit():
+            marks.append({"t": float(sec), "title": name.strip()[:40]})
+    if marks:
+        out["markers"] = sorted(marks, key=lambda m: m["t"])
+    spots = re.search(r'"hotspots"\s*:\s*\[([0-9,\s"]*)\]', html)
+    values = [float(v.strip().strip('"')) for v in spots.group(1).split(",") if v.strip().strip('"')] if spots else []
+    if len(values) > 3:
+        out["heat"] = {"step": 5, "values": _scale(values)}
+    return out
 
 
 # ---------------------------------------------------------------- download: embedded player sniffing

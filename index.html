@@ -329,6 +329,13 @@
   .ntags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
   .ntags .chip { font-size: 12px; padding: 0 6px; }
   .places { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 14px; }
+  .heat { position: relative; display: flex; align-items: flex-end; gap: 1px; height: 40px; margin-top: 16px; cursor: pointer;
+          border-bottom: 2px solid var(--ink); }
+  .heat i { flex: 1; background: var(--faint); min-width: 1px; }
+  .heat:hover i { background: var(--muted); }
+  .heat .mk { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); }
+  .heat .mk span { position: absolute; top: -2px; left: 2px; background: var(--accent); color: #fff; padding: 0 4px; font-weight: normal;
+                   white-space: nowrap; font-size: 12px; line-height: 16px; }
   .similar { border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 8px 12px; margin-top: 14px; }
   .similar .psec { border-color: #1d1b26; }
   .similar > div + div { margin-top: 6px; }
@@ -1625,8 +1632,17 @@ async function loadPointTimes(id) {
   try { r = await (await fetch(`/api/points/${id}`)).json(); } catch (e) { return; }
   if (!watching || watching.id !== id) return;
   const ch = (r.chapters || {})[String(watching.part)] || [];
-  if (ch.length && $("#chapters")) $("#chapters").innerHTML = `<div class="hits"><div class="psec">章节</div>${ch.map(c =>
-    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`).join("")}</div>`;
+  // what the video's site shows along its progress bar: its own marks (Pornhub's action tags, YouTube's chapters)
+  // and how much each moment is watched there
+  const mk = (r.markers || {})[String(watching.part)] || [], heat = (r.heat || {})[String(watching.part)];
+  const len = (((state.jobs.find(j => j.id === id) || {}).media || [])[watching.part] || {}).duration
+    || (heat ? heat.step * heat.values.length : 0);
+  const peaks = heat ? heatPeaks(heat) : [];
+  const sec = (title, list) => list.length ? `<div class="psec">${title}</div>${list.map(c =>
+    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`).join("")}` : "";
+  if ((ch.length || mk.length || peaks.length) && $("#chapters"))
+    $("#chapters").innerHTML = (heat && len ? heatStrip(id, heat, mk, len) : "")
+      + `<div class="hits">${sec("网站标记", mk)}${sec("看的人最多", peaks)}${sec("章节", ch)}</div>`;
   const ul = $("#points");
   if (!ul) return;
   const multi = ((state.jobs.find(j => j.id === id) || {}).media || []).length > 1;
@@ -1637,6 +1653,23 @@ async function loadPointTimes(id) {
     li.insertAdjacentHTML("afterbegin", `<b class="at">${multi ? `P${at.part + 1} ` : ""}${dur(at.t) || "0:00"}</b> `);
     li.onclick = e => { e.stopPropagation(); seekTo(id, at.part, at.t); };
   });
+}
+// the site's watch counts as a strip of bars under the player, its marks as ticks on it; click to go there
+function heatStrip(id, heat, marks, len) {
+  const bars = heat.values.map(v => `<i style="height:${Math.max(4, v)}%"></i>`).join("");
+  const ticks = marks.map(m => `<b class="mk" style="left:${Math.min(100, m.t / len * 100).toFixed(2)}%" title="${esc(m.title)} ${dur(m.t)}"><span>${esc(m.title)}</span></b>`).join("");
+  return `<div class="heat" onclick="const r = this.getBoundingClientRect(); seekTo(${id}, watching.part, Math.max(0, (event.clientX - r.left) / r.width * ${len}))"
+    title="网站上每一段被看的多少，点一下跳过去">${bars}${ticks}</div>`;
+}
+// the three most watched moments (peaks at least a minute apart)
+function heatPeaks(heat) {
+  const v = heat.values, gap = Math.max(1, Math.round(60 / heat.step)), out = [];
+  const order = v.map((x, i) => i).filter(i => i > 0).sort((a, b) => v[b] - v[a]);  // the first bar is everyone starting
+  for (const i of order) {
+    if (out.length >= 3 || v[i] < 20) break;
+    if (out.every(j => Math.abs(j - i) >= gap)) out.push(i);
+  }
+  return out.sort((a, b) => a - b).map(i => ({t: i * heat.step, title: `热度 ${v[i]}`}));
 }
 // the same content elsewhere in the library: a re-upload, a clip of this, or what this is a clip of
 async function loadSimilar(id) {
