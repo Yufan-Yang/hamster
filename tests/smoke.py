@@ -295,28 +295,34 @@ check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.
 
 
 def claude_round_trip():
-    """An AI request goes on the board for the Mac's Claude; a stand-in Mac answers it; nobody taking it means None."""
+    """An AI request goes on the board for the Mac's Claude; a stand-in Mac answers it (Claude, then Codex standing in
+    for it, logged as such); nobody taking it means None."""
     import threading
 
-    def mac():
+    def mac(engine):
         for _ in range(100):
             t = G.claim_task("test-claude", ["llm", "claude"])
             if t:
                 assert t["payload"]["model"] == G.CLAUDE_MODEL_LIGHT and t["payload"]["effort"] == "low", t["payload"]
-                G.complete_task(t["id"], "test-claude", {"out": {"cause": "测试", "fix": "无"}, "tokens_in": 10, "tokens_out": 5})
+                G.complete_task(t["id"], "test-claude", {"out": {"cause": "测试", "fix": "无"}, "engine": engine,
+                                                          "tokens_in": 10, "tokens_out": 5})
                 return
             time.sleep(0.2)
-    th = threading.Thread(target=mac)
-    th.start()
-    out = G.claude_json("sys", "user", {"cause": "string", "fix": "string"}, "failure", None, {}, False)
-    th.join()
-    assert out == {"cause": "测试", "fix": "无"}, out
+    for engine in ("claude", "codex"):
+        th = threading.Thread(target=mac, args=(engine,))
+        th.start()
+        started, usage = time.time(), {}
+        out = G.claude_json("sys", "user", {"cause": "string", "fix": "string"}, "failure", None, usage, False)
+        th.join()
+        assert out == {"cause": "测试", "fix": "无"}, out
+        assert usage.get(engine) == 1, usage
+        assert G.q("SELECT 1 FROM usage WHERE kind=? AND purpose='failure' AND ts >= ?", (engine, started), one=True)
     shiguang.llm.CLAUDE_CLAIM_WAIT = 2
     assert G.claude_json("sys", "user", {"x": "string"}, "failure", None, {}, False) is None
     assert not G.q("SELECT 1 FROM tasks WHERE kind='llm'", one=True), "requests left on the board"
 
 
-check("AI request through the Mac's Claude, and the fallback when nobody takes it", claude_round_trip)
+check("AI request through the Mac's Claude / Codex, and the fallback when nobody takes it", claude_round_trip)
 
 
 def shortcut_from_outside():

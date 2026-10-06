@@ -3107,8 +3107,8 @@ async function openUsage(days) {
       return `<div title="${d} 代理 ${bytes(p)} · 直连 ${bytes(x)}" style="height:${(p + x) / peak * 100}%;background:linear-gradient(to top, var(--green) ${x / Math.max(1, p + x) * 100}%, var(--blue) 0)"></div>`;
     }).join("")}</div><div class="ubar-l"><span>${daysList[0]}</span><span>蓝 = 走代理 · 绿 = 直连</span><span>${daysList[daysList.length - 1]}</span></div>` : "";
   const work = u.work || [];
-  const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => w.kind === "llm" || w.kind === "claude");
-  const proc = work.filter(w => !["download", "llm", "claude"].includes(w.kind));
+  const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => ["llm", "claude", "codex"].includes(w.kind));
+  const proc = work.filter(w => !["download", "llm", "claude", "codex"].includes(w.kind));
   const dlBytes = dl.reduce((a, w) => a + w.amount, 0), dlCount = dl.reduce((a, w) => a + w.count, 0);
   const tokIn = llm.reduce((a, w) => a + w.tokens_in, 0), tokOut = llm.reduce((a, w) => a + w.tokens_out, 0);
   const cost = llm.reduce((a, w) => a + (w.cost || 0), 0);
@@ -3149,11 +3149,11 @@ async function openUsage(days) {
       ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
         w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
     </table></div>` : '<p class="hint">这段时间还没有。</p>'}
-    <div class="usec"><b>AI tokens 和花费</b><span class="sub">先用 Mac 上的 Claude（订阅），不在时用 DeepSeek（按量计费）</span></div>
+    <div class="usec"><b>AI tokens 和花费</b><span class="sub">先用 Mac 上的 Claude（订阅），不行再用 Codex（订阅），都不在时用 DeepSeek（按量计费）</span></div>
     ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入<br>（缓存命中）</th><th>输出</th><th>花费</th></tr>
       ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td>
         <td>${num(w.tokens_in)}${w.cache_hit ? `<br>（${num(w.cache_hit)}）` : ""}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td>
-        <td>${w.kind === "claude" ? "订阅" : w.cost == null ? "–" : yuan(w.cost) + (w.guessed ? "*" : "")}</td></tr>`).join("")}
+        <td>${w.kind === "claude" || w.kind === "codex" ? "订阅" : w.cost == null ? "–" : yuan(w.cost) + (w.guessed ? "*" : "")}</td></tr>`).join("")}
       <tr><td>合计</td><td>${num(llm.reduce((a, w) => a + (w.purpose === "earlier" ? w.amount : w.count), 0))}</td><td>${num(tokIn)}</td><td>${num(tokOut)}</td><td>${yuan(cost)}</td></tr>
     </table></div>
     <p class="hint">花费按 DeepSeek 标价算（工作日 9–12、14–18 点全价，其他时间半价）。${llm.some(w => w.guessed) ? "带 * 的含开始记花费前的调用，按没有缓存估算，偏高。" : ""}${

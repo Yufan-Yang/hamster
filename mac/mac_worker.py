@@ -18,8 +18,9 @@ While a game is in front it takes no tasks (and gives back a long one it's in th
 
 AI requests (summaries, chapters, translations, sorting...): two more claim loops answer them with this Mac's Claude
 Code (`claude -p`, logged in with the Claude subscription), so they don't go to the paid DeepSeek API. They keep going
-while a game is in front (it's only waiting on the network). When the subscription's limits are used up they say
-they're paused until it resets, and the Pi asks DeepSeek meanwhile.
+while a game is in front (it's only waiting on the network). When Claude fails or its limits are used up, Codex
+(`codex exec`, logged in with the ChatGPT subscription) answers instead; when both are used up the loops say they're
+paused until one resets, and the Pi asks DeepSeek meanwhile.
 """
 import base64
 import json
@@ -57,6 +58,8 @@ CLAUDE = Path(os.environ.get("CLAUDE_BIN") or Path.home() / ".local" / "bin" / "
 CLAUDE_DIR = HERE / "claude-cwd"  # an empty folder to run it in: no project files for it to pick up
 CLAUDE_CAPS = ["llm", "claude", "shortcut"]  # (and signing iOS shortcuts: quick, and keeps going while gaming)
 CLAUDE_LOOPS = 2
+CODEX = Path(os.environ.get("CODEX_BIN") or shutil.which("codex") or "/usr/local/Homebrew/bin/codex")
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-terra")  # empty: the account's default model
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
 CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 / 书架 the drop folder fills
@@ -385,10 +388,35 @@ def unload():
 
 # ---- AI requests from the Pi, answered by Claude Code on this Mac
 
-class ClaudeLimit(Exception):
+class UsageLimit(Exception):
     def __init__(self, text, until):
         super().__init__(text)
         self.until = until
+
+
+def proxy_env():
+    config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    proxy = config.get("proxy", "")  # Anthropic and OpenAI aren't reachable directly from here
+    return {**os.environ, **({"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy} if proxy else {})}
+
+
+def run_cli(cmd, text, beat, timeout=600):
+    """Run an AI command line in the empty folder with `text` on stdin, heartbeats to the Pi every minute meanwhile.
+    Killed when it takes longer than `timeout` (the Pi stops waiting at some point anyway)."""
+    CLAUDE_DIR.mkdir(exist_ok=True)
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          cwd=CLAUDE_DIR, env=proxy_env()) as proc:
+        stop = threading.Event()
+        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
+        try:
+            stdout, stderr = proc.communicate(text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError(f"{Path(cmd[0]).name}: no answer in {timeout}s")
+        finally:
+            stop.set()
+    return proc.returncode, stdout, stderr
 
 
 def ask_claude(p, beat):
@@ -398,37 +426,81 @@ def ask_claude(p, beat):
     cmd = [str(CLAUDE), "-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--output-format", "json",
            "--model", p.get("model") or "sonnet", "--effort", p.get("effort") or "medium",
            "--system-prompt", p["system"], "--json-schema", json.dumps(schema)]
-    config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
-    proxy = config.get("proxy", "")  # Anthropic isn't reachable directly from here
-    env = {**os.environ, **({"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy} if proxy else {})}
-    CLAUDE_DIR.mkdir(exist_ok=True)
     started = time.time()
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          cwd=CLAUDE_DIR, env=env) as proc:
-        stop = threading.Event()
-        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
-        try:
-            stdout, stderr = proc.communicate(p["user"], timeout=600)
-        finally:
-            stop.set()
+    code, stdout, stderr = run_cli(cmd, p["user"], beat)
     try:
         out = json.loads(stdout)
     except json.JSONDecodeError:
-        raise RuntimeError(f"claude said (exit {proc.returncode}): {(stderr or stdout).strip()[-300:]}")
+        raise RuntimeError(f"claude said (exit {code}): {(stderr or stdout).strip()[-300:]}")
     if out.get("is_error") or out.get("subtype") != "success":
         text = str(out.get("result") or out.get("subtype") or stderr)
         if out.get("api_error_status") == 429 or re.search(r"limit", text, re.I):
             m = re.search(r"\|(\d{10})", text)  # "...limit reached|<when it resets>"
-            raise ClaudeLimit(text[:200], int(m.group(1)) if m else time.time() + 1800)
+            raise UsageLimit(text[:200], int(m.group(1)) if m else time.time() + 1800)
         raise RuntimeError(f"claude: {text[:300]}")
     answer = out.get("structured_output")
     if not isinstance(answer, dict):
         answer = json.loads(re.sub(r"^```(json)?|```$", "", (out.get("result") or "").strip()))
     u = out.get("usage") or {}
-    return {"out": answer, "model": next(iter(out.get("modelUsage") or {}), p.get("model")),
+    return {"out": answer, "model": next(iter(out.get("modelUsage") or {}), p.get("model")), "engine": "claude",
             "tokens_in": (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
             "cache_read": u.get("cache_read_input_tokens") or 0, "tokens_out": u.get("output_tokens") or 0,
             "seconds": round(time.time() - started, 1)}
+
+
+def ask_codex(p, beat):
+    """The same request through `codex exec` (the ChatGPT subscription): read-only sandbox in the empty folder, no
+    user config or rules, nothing kept. The system prompt goes in as developer instructions. No --output-schema: its
+    strict mode wants a type for every key, and the prompts already ask for exactly these keys as JSON."""
+    cmd = [str(CODEX), "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+           "-s", "read-only", "--json", "--color", "never",
+           "-c", f"model_reasoning_effort={json.dumps(p.get('effort') or 'medium')}",
+           "-c", f"developer_instructions={json.dumps(p['system'], ensure_ascii=False)}",
+           *(["-m", CODEX_MODEL] if CODEX_MODEL else []), "-"]
+    started = time.time()
+    code, stdout, stderr = run_cli(cmd, p["user"], beat, timeout=300)
+    text, usage, error = None, {}, None
+    for line in stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
+            text = ev["item"].get("text")
+        elif ev.get("type") == "turn.completed":
+            usage = ev.get("usage") or {}
+        elif ev.get("type") in ("error", "turn.failed"):
+            error = str(ev.get("message") or (ev.get("error") or {}).get("message") or ev)
+    if text is None:
+        error = error or (stderr or stdout).strip()[-300:] or f"exit {code}"
+        if re.search(r"usage limit|rate limit|429|quota", error, re.I):
+            raise UsageLimit(f"codex: {error[:200]}", time.time() + 1800)
+        raise RuntimeError(f"codex: {error[:300]}")
+    answer = json.loads(re.sub(r"^```(json)?|```$", "", text.strip()))
+    if not isinstance(answer, dict):
+        raise RuntimeError(f"codex: not a JSON object: {text[:200]}")
+    return {"out": answer, "model": CODEX_MODEL or "codex", "engine": "codex",
+            "tokens_in": usage.get("input_tokens") or 0, "cache_read": usage.get("cached_input_tokens") or 0,
+            "tokens_out": (usage.get("output_tokens") or 0), "seconds": round(time.time() - started, 1)}
+
+
+def answer_llm(p, beat, limits):
+    """Claude first, then Codex; each skipped while its limits are used up (`limits`: name -> until when).
+    Raises when neither answered: the Pi asks DeepSeek then."""
+    errors = []
+    for name, ask, there in (("claude", ask_claude, CLAUDE.exists()), ("codex", ask_codex, CODEX.exists())):
+        if not there or time.time() < limits.get(name, 0):
+            continue
+        try:
+            return ask(p, beat)
+        except UsageLimit as e:
+            limits[name] = e.until
+            log(f"{name}: limits used up until", time.strftime("%m-%d %H:%M", time.localtime(e.until)), e)
+            errors.append(f"{name} limit: {e}")
+        except Exception as e:
+            traceback.print_exc()
+            errors.append(f"{name}: {e}")
+    raise RuntimeError("; ".join(errors) or "no Claude or Codex to ask")
 
 
 def text_value(text, attachments=None):
@@ -481,15 +553,18 @@ def sign_shortcut(p):
 
 def claude_loop(n):
     name = f"{NAME}-claude-{n}"
-    limited_until = 0
+    limits = {}  # "claude" / "codex" -> until when its limits are used up
     while True:
-        if not CLAUDE.exists():
-            log("no Claude Code at", CLAUDE, ": AI requests stay with the Pi")
+        if not CLAUDE.exists() and not CODEX.exists():
+            log("no Claude Code at", CLAUDE, "and no Codex at", CODEX, ": AI requests stay with the Pi")
             return
         try:
-            if time.time() < limited_until:
+            usable = [k for k, there in (("claude", CLAUDE.exists()), ("codex", CODEX.exists()))
+                      if there and time.time() >= limits.get(k, 0)]
+            if not usable:
+                until = min(limits.values())
                 call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS,
-                     paused=f"Claude 额度用完，{time.strftime('%H:%M', time.localtime(limited_until))} 恢复")
+                     paused=f"Claude 和 Codex 额度用完，{time.strftime('%H:%M', time.localtime(until))} 恢复")
                 time.sleep(60)
                 continue
             task = call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS, wait=25)["task"]
@@ -508,19 +583,12 @@ def claude_loop(n):
                 call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
             continue
         try:
-            result = ask_claude(p, lambda: call(f"/api/tasks/{tid}/heartbeat", worker=name))
+            result = answer_llm(p, lambda: call(f"/api/tasks/{tid}/heartbeat", worker=name), limits)
             call(f"/api/tasks/{tid}/done", worker=name, result=result)
-            log("claude", tid, p.get("purpose"), result["model"], f"{result['seconds']}s",
+            log(result["engine"], tid, p.get("purpose"), result["model"], f"{result['seconds']}s",
                 f"{result['tokens_in']} in / {result['tokens_out']} out")
-        except ClaudeLimit as e:
-            limited_until = e.until
-            log("claude: limits used up until", time.strftime("%m-%d %H:%M", time.localtime(e.until)), e)
-            try:
-                call(f"/api/tasks/{tid}/fail", worker=name, error=f"limit: {e}", retry=False)
-            except requests.RequestException:
-                pass
         except Exception as e:  # the Pi asks DeepSeek instead
-            traceback.print_exc()
+            log("AI request", tid, p.get("purpose"), "-> DeepSeek:", str(e)[:300])
             try:
                 call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
             except requests.RequestException:

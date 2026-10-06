@@ -42,7 +42,7 @@
                            ├─ 识别画面、封面（CLIP）
                            └─ 读图中文字（苹果文字识别）
 
- AI：先由 Mac 上的 Claude Code（Claude 订阅）回答；Mac 不在或额度用完时用 DeepSeek（按次付费）
+ AI：先由 Mac 上的 Claude Code（Claude 订阅）回答；Claude 出错或额度用完时由 Mac 上的 Codex（ChatGPT 订阅）回答；Mac 不在或两边额度都用完时用 DeepSeek（按次付费）
 ```
 
 **分工**
@@ -411,11 +411,12 @@
 1. **先问 Mac 上的 Claude**（`llm.claude_json`）。请求变成任务板上的一个 `llm` 任务（带完整的提示词），Mac 的两个 Claude 工人领走，用 `claude -p` 回答（Claude Code 登录的是 Claude 订阅，按次不花钱，占订阅的用量额度）。
    - 模型：分类、合并标签、解释失败、整理随记用 Haiku（`CLAUDE_MODEL_LIGHT`），总结、章节、翻译、周报、回顾用 Sonnet（`CLAUDE_MODEL`）。原来"关思考"的请求用 `--effort low`。
    - `claude -p` 的参数：`--safe-mode`（不读 CLAUDE.md、插件、MCP）、`--tools ""`（没有工具）、`--no-session-persistence`、`--json-schema`（保证返回这些字段）。在一个空文件夹里跑，经 Mac 本机代理连 Anthropic。
-2. **DeepSeek 兜底**：Mac 不在线、Claude 工人暂停（订阅额度用完，到恢复时间前都报暂停）、90 秒内没人领（`CLAUDE_CLAIM_WAIT`）、或 Claude 出错，就照旧问 DeepSeek。
-3. **大白话搜索、问拾光**也走 Claude（搜索用 Haiku，问答用 Sonnet），排在 Mac 队列最前面；20 秒没人领就改问 DeepSeek。比 DeepSeek 慢几秒（`claude -p` 每次要启动）。想让某几类先用 DeepSeek：`CLAUDE_SKIP=search,ask`。
-4. `CLAUDE_VIA_MAC=0` 关掉 Claude，全部回到 DeepSeek。
+2. **Codex 接手**：同一个工人里，Claude 出错、超时（10 分钟）或额度用完，就改用 `codex exec` 回答（Homebrew 装的 Codex CLI，登录 ChatGPT 订阅，按次不花钱）。参数：`--ephemeral`（不留会话）、`--ignore-user-config`、`--ignore-rules`、`-s read-only`，在同一个空文件夹里跑，系统提示作为 developer instructions，同样经本机代理。模型用 `gpt-5.6-terra`（`CODEX_MODEL` 可改，留空用账号默认），思考强度照搬（low / medium）。不用 `--output-schema`（严格模式要求每个字段写明类型），靠提示词要求返回 JSON。Claude 额度用完期间直接走 Codex，到恢复时间再先试 Claude。
+3. **DeepSeek 兜底**：Mac 不在线、工人暂停（Claude 和 Codex 额度都用完，到较早的恢复时间前都报暂停）、90 秒内没人领（`CLAUDE_CLAIM_WAIT`）、或 Claude 和 Codex 都出错，就照旧问 DeepSeek。
+4. **大白话搜索、问拾光**也走 Claude（搜索用 Haiku，问答用 Sonnet），排在 Mac 队列最前面；20 秒没人领就改问 DeepSeek。比 DeepSeek 慢几秒（`claude -p` 每次要启动）。想让某几类先用 DeepSeek：`CLAUDE_SKIP=search,ask`。
+5. `CLAUDE_VIA_MAC=0` 关掉 Mac（Claude 和 Codex），全部回到 DeepSeek。
 
-每次调用都记录 token、缓存命中、耗时；DeepSeek 的还按价目表算费用，Claude 的记作「订阅」。资源使用里两者分开列。Claude 在时，"放到半价时段"的等待也取消了（没有价格可等）。
+每次调用都记录 token、缓存命中、耗时；DeepSeek 的还按价目表算费用，Claude 和 Codex 的记作「订阅」。资源使用里三者分开列。Claude 在时，"放到半价时段"的等待也取消了（没有价格可等）。
 
 **DeepSeek 时的省钱做法**
 - **该关思考的关掉**：翻译、标签匹配、章节、搜索理解、随记整理、失败说明都是机械活，开着思考只会多花钱。比如翻译 60 行，开思考约 5800 个输出 token，关掉约 550。

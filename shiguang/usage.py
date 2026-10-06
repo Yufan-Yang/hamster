@@ -163,6 +163,8 @@ USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm",
 
 # the same requests answered by Claude on the Mac (the subscription: no price per call)
 USAGE_NAMES.update({("claude", p): n.replace("AI ", "Claude · ", 1) for (k, p), n in list(USAGE_NAMES.items()) if k == "llm"})
+# and by Codex on the Mac when Claude can't (the ChatGPT subscription: no price per call either)
+USAGE_NAMES.update({("codex", p): n.replace("AI ", "Codex · ", 1) for (k, p), n in list(USAGE_NAMES.items()) if k == "llm"})
 
 
 @app.get("/api/usage")

@@ -109,8 +109,9 @@ def record_balance():
 #
 # The Mac's Claude Code is logged in with the Claude subscription, so asking it costs nothing per call (it uses the
 # subscription's limits). A request becomes an `llm` task on the board; a claim loop on the Mac (mac_worker.py) runs
-# `claude -p` on it and hands back the JSON. When the Mac isn't there (off, asleep, its limits used up: it then says
-# it's paused) or doesn't take the request within CLAUDE_CLAIM_WAIT seconds, DeepSeek answers as before.
+# `claude -p` on it and hands back the JSON; when Claude fails or its limits are used up, the Mac's Codex
+# (`codex exec`, the ChatGPT subscription) answers instead. When the Mac isn't there (off, asleep, both limits used
+# up: it then says it's paused) or doesn't take the request within CLAUDE_CLAIM_WAIT seconds, DeepSeek answers.
 CLAUDE_VIA_MAC = os.environ.get("CLAUDE_VIA_MAC", "1") != "0"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
 CLAUDE_MODEL_LIGHT = os.environ.get("CLAUDE_MODEL_LIGHT", "haiku")  # short mechanical answers
@@ -119,7 +120,7 @@ CLAUDE_LIGHT = {"classify", "tags", "failure", "notes", "search"}
 CLAUDE_URGENT = {"search", "ask"}
 CLAUDE_SKIP = set(x for x in os.environ.get("CLAUDE_SKIP", "").split(",") if x)  # kinds that go to DeepSeek first
 CLAUDE_CLAIM_WAIT = int(os.environ.get("CLAUDE_CLAIM_WAIT", "90"))
-CLAUDE_RUN_WAIT = 900  # once the Mac has it
+CLAUDE_RUN_WAIT = 1200  # once the Mac has it (Claude up to 10 min, then Codex up to 5)
 
 
 def claude_ready():
@@ -131,7 +132,7 @@ def claude_ready():
 
 
 def claude_json(system, user, fields, purpose, job_id, usage, think):
-    """The request answered by Claude on the Mac, or None (it wasn't taken in time, or failed): DeepSeek then."""
+    """The request answered by Claude (or Codex) on the Mac, or None (it wasn't taken in time, or failed): DeepSeek then."""
     from . import board
     now = time.time()
     q("DELETE FROM tasks WHERE kind='llm' AND state != 'running' AND created < ?", (now - 3600,))  # askers that died
@@ -153,15 +154,16 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
                     return None
                 usage["calls"] = usage.get("calls", 0) + 1
                 usage["tokens"] = usage.get("tokens", 0) + int(res.get("tokens_in") or 0) + int(res.get("tokens_out") or 0)
-                usage["claude"] = usage.get("claude", 0) + 1
-                log_usage("claude", purpose, job_id, amount=1, tokens_in=int(res.get("tokens_in") or 0),
+                engine = "codex" if res.get("engine") == "codex" else "claude"
+                usage[engine] = usage.get(engine, 0) + 1
+                log_usage(engine, purpose, job_id, amount=1, tokens_in=int(res.get("tokens_in") or 0),
                           tokens_out=int(res.get("tokens_out") or 0), seconds=float(res.get("seconds") or 0),
                           cache_hit=int(res.get("cache_read") or 0))
                 # Claude sometimes writes "null" as text where the prompt allows null ("show": "null")
                 return {k: None if isinstance(out.get(k), str) and out[k].strip().lower() in ("null", "none") else out.get(k)
                         for k in fields}
             if row["state"] == "failed":
-                print(f"claude {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
+                print(f"Mac AI {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
                 return None
             late = time.time() - now
             if row["state"] == "queued" and (late > claim_wait or (time.time() - checked > 15 and not claude_ready())):
@@ -179,7 +181,7 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
 
 
 def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, think=True):
-    """One request with a JSON answer: Claude on the Mac when it's there (see claude_json), else DeepSeek.
+    """One request with a JSON answer: Claude on the Mac when it's there, then its Codex (see claude_json), else DeepSeek.
     max_tokens includes the model's reasoning tokens; only tokens actually used are billed.
     think=False: no reasoning at all, for mechanical work (translating lines, matching tags) where it only costs:
     thinking took ~5,000 of the ~6,000 output tokens of a 60-line subtitle batch."""
@@ -204,7 +206,7 @@ def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, t
 
 def deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think):
     if not LLM_API_KEY:
-        raise RuntimeError("Claude on the Mac didn't answer and there's no DeepSeek key")
+        raise RuntimeError("Claude / Codex on the Mac didn't answer and there's no DeepSeek key")
     thinking = ({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}) if think else \
         ({"thinking": {"type": "disabled"}} if "deepseek" in LLM_BASE_URL else {})
     r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
