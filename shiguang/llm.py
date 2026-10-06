@@ -35,8 +35,8 @@ CLASSIFY_FIELDS = {
     "artist": "string or null",
     "album": "string or null",
     "language": "language of the media",
-    "tags": "3-8 short strings describing the content (topic, genre, people, place); always give some",
     "brief": "1-2 sentences on what this is, from the metadata and what you know about it",
+    "tags": "3-8 short strings describing the content (topic, genre, people, place); always give some",
     "needs_transcript": "true only if what is said matters and the metadata doesn't already tell it "
                         "(talks, tutorials, news, interviews, vlogs, documentaries); "
                         "false for movies, TV episodes, music, music videos, short clips, gaming/sports footage",
@@ -51,6 +51,9 @@ Libraries:
 `folder` is only used for Videos; set it to "Other" otherwise.
 Write `brief` and `tags` in {lang}.
 When a tag means the same as one already in the library (listed in the request), use that exact spelling.
+Write `brief` first, then make `tags` match it: what kind of content the brief says this is (an adult video, a talk,
+a music video, a tutorial...) must also be a tag, in the library's spelling, since the library is browsed and filtered
+by tags. Check the tags against the brief before replying.
 Describe adult content plainly and factually like any other content; don't leave fields empty because of it.
 Reply with one JSON object with exactly these keys:
 {fields}"""
