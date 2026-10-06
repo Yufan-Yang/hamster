@@ -66,11 +66,17 @@ def read_health():
     except Exception:
         disks = []
     sd = shutil.disk_usage("/")
+    for d in disks:  # used as df counts it (blocks in use), not size minus what's still free to write
+        try:
+            u = shutil.disk_usage(d["mount"])
+            d["used"], d["total"] = u.used, u.total
+        except Exception:
+            pass
     return {"cpu_temp": (first("/sys/class/thermal/thermal_zone0/temp", int) or 0) / 1000 or None,
             "fan": first("/run/fan-level"), "load": os.getloadavg(), "cores": os.cpu_count(),
             "mem_available": mem_available_mb(), "mem_total": next((int(l.split()[1]) // 1024 for l in open("/proc/meminfo")
                                                                     if l.startswith("MemTotal")), None),
-            "uptime": first("/proc/uptime", lambda x: float(x.split()[0])), "sd_free": sd.free, "sd_total": sd.total,
+            "uptime": first("/proc/uptime", lambda x: float(x.split()[0])), "sd_free": sd.free, "sd_total": sd.total, "sd_used": sd.used,
             "disks": disks}
 
 
@@ -113,10 +119,30 @@ def health_summary():
     return h
 
 
+def record_space():
+    """Once an hour: how much each top-level folder of the library takes (du, a few seconds; the page reads the
+    last result instead of walking 20+ TB on every open)."""
+    if time.time() - (kv_get("space", {}).get("ts") or 0) < 3600:
+        return
+    dirs = {}
+    for p in sorted(MEDIA.iterdir()):
+        if p.name == "lost+found" or not p.is_dir():
+            continue
+        out = subprocess.run(["nice", "-n", "19", "ionice", "-c3", "du", "-sb", "--", str(p)], capture_output=True,
+                             text=True, timeout=600).stdout  # unreadable subfolders only make it a bit low
+        if out.split():
+            dirs[p.name] = int(out.split()[0])
+    kv_set("space", {"ts": time.time(), "dirs": dirs})
+
+
 def traffic_loop():
     while True:
         try:
             record_traffic()
+        except Exception:
+            traceback.print_exc()
+        try:
+            record_space()
         except Exception:
             traceback.print_exc()
         try:
@@ -194,7 +220,7 @@ def usage_summary():
                    board=board.board_summary(), health=health_summary(),
                    index={"lines": q("SELECT COUNT(*) n FROM seg", one=True)["n"],
                           "pictures": q("SELECT COUNT(*) n FROM vec", one=True)["n"]},
-                   disk={"free": shutil.disk_usage(MEDIA).free, "total": shutil.disk_usage(MEDIA).total})
+                   disk=dict(zip(("total", "used", "free"), shutil.disk_usage(MEDIA))), space=kv_get("space"))
 
 
 # The other modules, imported last: they import this one too, and are only used at run time

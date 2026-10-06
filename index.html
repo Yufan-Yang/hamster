@@ -3094,6 +3094,8 @@ function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 1
 function workerName(n) { return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n] || (/mac.*-claude/i.test(n || "") ? "Mac（Claude）" : /mac/i.test(n || "") ? "Mac mini" : n || ""); }
 function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
+const SPACE_NAMES = {Videos: "视频", Movies: "电影", TV: "剧集", Music: "音乐", Downloads: "下载（种子等）", ".books": "书架",
+                     ".notes": "随记", ".grabber": "拾光数据库", ".incomplete": "下载中 / 临时文件", ".cache": "缓存"};
 async function openUsage(days) {
   if (days) usageDays = days;
   $("#usageSheet").hidden = false;
@@ -3119,6 +3121,16 @@ async function openUsage(days) {
   const tab = [[1, "今天"], [7, "7 天"], [30, "30 天"], [3650, "全部"]].map(([d, n]) =>
     `<button class="${d === usageDays ? "on" : ""}" onclick="openUsage(${d})">${n}</button>`).join("");
   const h = u.health || {disks: [], warnings: []};
+  const sp = (u.space || {}).dirs || {}, disk = u.disk || {};
+  const spRows = Object.entries(sp).filter(([, b]) => b >= 1 << 20).sort((a, b) => b[1] - a[1]).map(([k, b]) => [SPACE_NAMES[k] || k, b]);
+  const spOther = (disk.used || 0) - Object.values(sp).reduce((a, b) => a + b, 0);
+  if (spRows.length && spOther >= 1 << 30) spRows.push(["其他（文件系统自身等）", spOther]);
+  const space = `<div class="ugrid">
+      ${stat(bytes(disk.used), `已用 · 共 ${bytes(disk.total)}（${disk.total ? (disk.used / disk.total * 100).toFixed(disk.used / disk.total < 0.1 ? 1 : 0) : 0}%）`)}
+      ${stat(bytes(disk.free), "剩余")}</div>
+    ${spRows.length ? `<div class="uscroll"><table class="ut"><tr><th>文件夹</th><th>大小</th><th>占已用</th></tr>
+      ${spRows.map(([n, b]) => `<tr><td>${esc(n)}</td><td>${bytes(b)}</td><td>${(b / Math.max(1, disk.used) * 100).toFixed(1)}%</td></tr>`).join("")}</table></div>
+      <p class="hint">各文件夹大小每小时统计一次，上次 ${esc(ago(u.space.ts))}。</p>` : '<p class="hint">各文件夹大小正在统计，几分钟后再打开就有。</p>'}`;
   const hours2 = x => x == null ? "–" : x >= 24 * 365 ? (x / 24 / 365).toFixed(1) + " 年" : Math.round(x / 24) + " 天";
   $("#usageBody").innerHTML = `
     <h2>资源使用</h2>
@@ -3127,14 +3139,16 @@ async function openUsage(days) {
     <div class="ugrid">
       ${stat(h.cpu_temp ? h.cpu_temp.toFixed(0) + "°C" : "–", `CPU 温度 · 今天最高 ${h.cpu_max ? h.cpu_max.toFixed(0) + "°C" : "–"}${h.fan ? " · 风扇 " + esc(h.fan) : ""}`)}
       ${stat((h.load || [0])[0].toFixed(1), `负载（${h.cores || 4} 核）· 可用内存 ${num(h.mem_available)} MB`)}
-      ${stat(bytes(h.sd_free), `SD 卡剩余 · 已开机 ${hours2((h.uptime || 0) / 3600)}`)}
+      ${stat(bytes(h.sd_used), `SD 卡已用（共 ${bytes(h.sd_total)}）· 已开机 ${hours2((h.uptime || 0) / 3600)}`)}
     </div>
-    ${h.disks.length ? `<div class="uscroll"><table class="ut"><tr><th>硬盘</th><th>温度</th><th>今天最高</th><th>健康</th><th>坏扇区</th><th>通电</th><th>剩余</th></tr>
+    ${h.disks.length ? `<div class="uscroll"><table class="ut"><tr><th>硬盘</th><th>温度</th><th>今天最高</th><th>健康</th><th>坏扇区</th><th>通电</th><th>已用</th><th>剩余</th></tr>
       ${h.disks.map(d => `<tr><td title="${esc(d.model || "")}">${esc(d.mount || d.dev)}<br><span class="sub">${Math.round((d.size || 0) / 1e12)} TB</span></td>
         <td>${d.asleep ? "休眠中" : (d.temp ?? "–") + "°C"}</td><td>${d.temp_max ? d.temp_max + "°C" : "–"}</td>
         <td>${d.passed === false ? '<b style="color:var(--accent)">不通过</b>' : d.passed ? "通过" : "–"}</td>
         <td>${(d.reallocated || 0) + (d.pending || 0) + (d.uncorrectable || 0)}</td><td>${hours2(d.hours)}</td>
-        <td>${bytes(d.free)}</td></tr>`).join("")}</table></div>` : ""}
+        <td>${d.used == null ? "–" : bytes(d.used)}</td><td>${bytes(d.free)}</td></tr>`).join("")}</table></div>` : ""}
+    <div class="usec"><b>硬盘空间</b><span class="sub">两块盘合起来的媒体库</span></div>
+    ${space}
     <div class="utab" style="margin-top:14px">${tab}</div>
     <div class="usec"><b>流量</b><span class="sub">所有经过 Pi 的设备</span></div>
     <div class="ugrid">${stat(bytes(get("proxy_down")), `走代理下载 · 上传 ${bytes(get("proxy_up"))}`)}
@@ -3167,7 +3181,7 @@ async function openUsage(days) {
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
       ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
     ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 60))}`).join("；")}</p>` : ""}
-    <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。硬盘剩余 ${bytes(u.disk.free)}。</p>
+    <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。</p>
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
 }
 
