@@ -64,6 +64,14 @@ SUMMARY_FIELDS = {
     "key_points": "3-6 short strings",
     "tags": "3-6 short tags for what is actually discussed: topics, people, places, events",
 }
+# With timed subtitles one call also splits the video into chapters and says where each key point is made: the page
+# shows them as one list (key points under the chapter they fall in), so two calls picked two sets of moments
+CHAPTER_FIELDS = {
+    "chapters": "4-12 chapters covering the whole video in order: [{\"t\": <seconds, taken from a block's time>, "
+                "\"title\": \"short Chinese title, at most 16 characters, naming the topic, not 第一部分\"}]",
+    "point_times": "for each key point, in the same order: the time (seconds) where it is said or argued most "
+                   "directly, or null",
+}
 SUMMARY_SYSTEM = """You summarise a video for its owner from its transcript.
 Write in {lang}, even when the video is in another language.
 Reply with one JSON object with exactly these keys:
@@ -457,18 +465,41 @@ Write in {lang}, even when the video is in another language. Reply with one JSON
 {fields}"""
 
 
-def summarize_timed(job_id, a, transcript):
-    """The summary from timed_transcript() text: same result as summarize(), cache-friendly for chapters after it."""
+def summarize_timed(job_id, a, transcript, end):
+    """The summary from timed_transcript() text (`end`: its last line's time), with the chapters of part 0 and where
+    each key point is said in the same call. True when the chapters came back too."""
     update(job_id, stage="summarizing")
+    fields = SUMMARY_FIELDS | CHAPTER_FIELDS
     task = SUMMARY_TASK.format(title=a.get("title") or "", brief=a.get("summary") or "", lang=SUMMARY_LANG,
-                               fields=json.dumps(SUMMARY_FIELDS, ensure_ascii=False, indent=1))
+                               fields=json.dumps(fields, ensure_ascii=False, indent=1))
     try:
-        out = llm_json(TRANSCRIPT_SYSTEM, f"{transcript}\n\n{task}", SUMMARY_FIELDS, 8000, a.setdefault("usage", {}),
+        out = llm_json(TRANSCRIPT_SYSTEM, f"{transcript}\n\n{task}", fields, 8000, a.setdefault("usage", {}),
                        "summarize", job_id)
         apply_summary(a, out)
     except Exception as e:
         a["note"] = f"AI summary failed: {e}"
-    return a
+        return False
+    chapters, times = clean_chapters(out.get("chapters"), out.get("point_times"), end)
+    if not chapters:
+        return False
+    a.setdefault("chapters", {})["0"] = chapters
+    if len(times) == len(a.get("key_points") or []):
+        a["point_times"] = times
+    else:
+        a.pop("point_times", None)  # (the page then finds them by searching the subtitles)
+    return True
+
+
+def clean_chapters(chapters, times, end):
+    """Chapters [{t, title}] in order and key point times from an AI reply, anything outside the video dropped."""
+    from opencc import OpenCC
+    cc = OpenCC("t2s")  # subtitles in traditional characters gave traditional chapter titles
+    chapters = sorted(({"t": float(c["t"]), "title": cc.convert(str(c.get("title") or ""))[:24]} for c in chapters or []
+                       if isinstance(c, dict) and isinstance(c.get("t"), (int, float)) and 0 <= c["t"] <= end + 60),
+                      key=lambda c: c["t"]) if isinstance(chapters, list) else []
+    times = [float(t) if isinstance(t, (int, float)) and 0 <= t <= end + 60 else None
+             for t in (times if isinstance(times, list) else [])]
+    return chapters, times
 
 
 def summarize(job_id, a, transcript, transcript_note):

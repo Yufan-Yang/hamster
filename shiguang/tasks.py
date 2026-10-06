@@ -61,7 +61,7 @@ def pi_save_subs(task, beat):
         if n == 0:
             update(jid, transcript="\n".join(t for _, _, t in segs)[:200_000])
             if a.get("needs_transcript") and not a.get("key_points") and LLM_API_KEY:
-                # chapters come after it (they need its key points, and read the subtitles from DeepSeek's cache)
+                # it makes the chapters too (with where each key point is said)
                 board.publish("summarize", f"job:{jid}", task["priority"], parent=task["id"], force=True, not_before=when)
                 summary = True
         library.plex_refresh()  # Plex picks up the new subtitle file
@@ -97,17 +97,19 @@ def pi_summarize(task, beat):
     if not row["transcript"]:
         return {"skipped": "no transcript"}
     a.pop("note", None)
-    text, lines, _ = llm.timed_transcript(jid, 0)
-    if lines >= 20:  # the same text chapters will send, so it reads it from the cache
-        a = llm.summarize_timed(jid, a, text)
+    text, lines, end = llm.timed_transcript(jid, 0)
+    with_chapters = False
+    if lines >= 20:  # chapters and where each key point is said come in the same answer
+        with_chapters = llm.summarize_timed(jid, a, text, end)
     else:
         a = llm.summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
     update(jid, analysis=a, stage="")
     llm.merge_tags_if_new()  # tags it brought that mean the same as ones in the library: folded in
-    # chapters next (the key points changed). DeepSeek takes a few seconds to keep a request's opening for reuse;
-    # asked at once, the subtitles were paid in full twice (measured: 0 of 17k tokens from the cache; 20 s later, 16.5k)
-    board.publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True,
-                  not_before=max(ai_when(task["priority"]) or 0, time.time() + 20))
+    if not with_chapters and lines >= 20:  # they didn't come back: asked on their own (the key points changed)
+        # DeepSeek takes a few seconds to keep a request's opening for reuse; asked at once, the subtitles were paid
+        # in full twice (measured: 0 of 17k tokens from the cache; 20 s later, 16.5k)
+        board.publish("chapters", f"job:{jid}:0", task["priority"], parent=task["id"], force=True,
+                      not_before=max(ai_when(task["priority"]) or 0, time.time() + 20))
     vids = [f for f in json.loads(row["files"] or "[]") if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
     if vids:
         threading.Thread(target=library.plex_set_metadata, args=([(vids[0], a)],), daemon=True).start()
@@ -361,14 +363,9 @@ def pi_chapters(task, beat):
     user = f"{text}\n\n{CHAPTERS_TASK}" + "\n".join(f"{i + 1}. {p}" for i, p in enumerate(points))
     out = llm.llm_json(llm.TRANSCRIPT_SYSTEM, user, {"chapters": "array", "points": "array"}, 4000, {}, "chapters", jid,
                        think=False)
-    from opencc import OpenCC
-    cc = OpenCC("t2s")  # subtitles in traditional characters gave traditional chapter titles
-    chapters = sorted(({"t": float(c["t"]), "title": cc.convert(str(c.get("title") or ""))[:24]} for c in out.get("chapters") or []
-                       if isinstance(c, dict) and isinstance(c.get("t"), (int, float)) and 0 <= c["t"] <= end + 60),
-                      key=lambda c: c["t"])
+    chapters, times = llm.clean_chapters(out.get("chapters"), out.get("points"), end)
     if not chapters and lines >= 40:  # enough to talk about but nothing came back (happened once): ask again later
         raise RuntimeError("no chapters in the answer")
-    times = [float(t) if isinstance(t, (int, float)) and 0 <= t <= end + 60 else None for t in (out.get("points") or [])]
     a = json.loads(q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"] or "{}")
     a.setdefault("chapters", {})[str(n)] = chapters
     if n == 0 and len(times) == len(points):

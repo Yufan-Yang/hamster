@@ -288,10 +288,12 @@
   .hit .at, .hits .at { font-weight: normal; background: var(--ink); color: var(--bg); padding: 0 4px; margin-right: 4px;
                         font-variant-numeric: tabular-nums; }
   .hits { border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); padding: 10px 14px; margin-top: 20px;
-          max-height: 320px; overflow-y: auto; }
+          max-height: 420px; overflow-y: auto; }
   .hits button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 2px dashed var(--soft); background: none;
                  padding: 6px 0; overflow-wrap: anywhere; }
   .hits button:hover { background: var(--bg); }
+  .hits button.pt { color: var(--muted); padding: 2px 0 6px 22px; border-bottom-style: dotted; }
+  .hits button.pt::before { content: "▪"; color: var(--accent); margin-right: 6px; }
   .hits .hitrow { padding: 6px 0; border-bottom: 2px dashed var(--soft); overflow-wrap: anywhere; }
   .nimgs .ph.seen { border-color: var(--accent); box-shadow: 0 0 0 2px var(--yellow); }
   .wide-sheet { width: min(720px, 100%); max-height: 90vh; overflow-y: auto; }
@@ -1625,17 +1627,29 @@ async function loadPointTimes(id) {
   const len = (((state.jobs.find(j => j.id === id) || {}).media || [])[watching.part] || {}).duration
     || (heat ? heat.step * heat.values.length : 0);
   const peaks = heat ? heatPeaks(heat) : [];
-  const sec = (title, list) => list.length ? `<div class="psec">${title}</div>${list.map(c =>
-    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`).join("")}` : "";
+  const ul = $("#points"), lis = ul ? [...ul.children] : [];
+  // key points said in this part go under the chapter they fall in: one list, not two (the rest stay in the summary)
+  const under = ch.map(() => []), moved = new Set();
+  lis.forEach((li, i) => {
+    const at = (r.times || [])[i];
+    if (!ch.length || !at || at.part !== watching.part) return;
+    const k = Math.max(0, ch.findLastIndex(c => c.t <= at.t + 1));
+    under[k].push(`<button class="pt" onclick="seekTo(${id}, ${watching.part}, ${at.t})">${li.innerHTML}</button>`);
+    moved.add(i);
+  });
+  const sec = (title, list, subs) => list.length ? `<div class="psec">${title}</div>${list.map((c, k) =>
+    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`
+    + (subs ? subs[k].join("") : "")).join("")}` : "";
   if ((ch.length || mk.length || peaks.length) && $("#chapters"))
     $("#chapters").innerHTML = (heat && len ? heatStrip(id, heat, mk, len) : "")
-      + `<div class="hits">${sec("网站标记", mk)}${sec("看的人最多", peaks)}${sec("章节", ch)}</div>`;
-  const ul = $("#points");
+      + `<div class="hits">${sec("网站标记", mk)}${sec("看的人最多", peaks)}${sec(moved.size ? "章节和要点" : "章节", ch, under)}</div>`;
   if (!ul) return;
+  lis.forEach((li, i) => moved.has(i) && li.remove());
+  if (!ul.children.length) ul.remove();
   const multi = ((state.jobs.find(j => j.id === id) || {}).media || []).length > 1;
-  [...ul.children].forEach((li, i) => {
+  lis.forEach((li, i) => {
     const at = (r.times || [])[i];
-    if (!at) return;
+    if (!at || moved.has(i)) return;
     li.classList.add("jump");
     li.insertAdjacentHTML("afterbegin", `<b class="at">${multi ? `P${at.part + 1} ` : ""}${dur(at.t) || "0:00"}</b> `);
     li.onclick = e => { e.stopPropagation(); seekTo(id, at.part, at.t); };
@@ -3091,7 +3105,13 @@ function bytes(n) {
 }
 // money: enough digits that a single call (a fraction of a fen) doesn't show as ¥0.00
 function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 10 ? 2 : n >= 0.1 ? 3 : 4)); }
-function workerName(n) { return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n] || (/mac.*-claude/i.test(n || "") ? "Mac（Claude）" : /mac/i.test(n || "") ? "Mac mini" : n || ""); }
+function workerName(n) {
+  const c = /^mac.*-claude-(\d+)$/i.exec(n || "");
+  return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n]
+    || (c ? `Mac（Claude ${c[1]}）` : /^mac.*-pic$/i.test(n || "") ? "Mac（闲时·图片）" : /mac/i.test(n || "") ? "Mac mini" : n || "");
+}
+// The Mac's on-demand loops: the picture one while nobody uses the Mac, Claude 3+ while AI requests pile up
+function workerOnDemand(n) { const c = /^mac.*-claude-(\d+)$/i.exec(n || ""); return /^mac.*-pic$/i.test(n || "") || (c && +c[1] > 2); }
 function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
 const SPACE_NAMES = {Videos: "视频", Movies: "电影", TV: "剧集", Music: "音乐", Downloads: "下载（种子等）", ".books": "书架",
@@ -3183,8 +3203,10 @@ async function openUsage(days) {
     <p class="hint">花费按 DeepSeek 标价算（工作日 9–12、14–18 点全价，其他时间半价）。${llm.some(w => w.guessed) ? "带 * 的含开始记花费前的调用，按没有缓存估算，偏高。" : ""}${
       u.balance ? ` 账户余额 ${yuan(u.balance.total, 2)}，这段时间余额实际减少 ${yuan(u.balance.charged)}（从 ${esc(new Date(u.balance.since * 1000).toLocaleDateString("zh-CN"))} 开始记，包括这个 key 的所有用途）。` : ""}</p>` : '<p class="hint">这段时间没有调用。</p>'}
     <div class="usec"><b>后台任务</b><span class="sub">任务板：谁能做谁领，Mac 在就交给 Mac。排队、进行中是现在的，完成、失败按所选时间</span></div>
-    ${board.workers.length ? `<div class="workers">${board.workers.map(w => `<span class="wk ${w.online ? "on" : ""}">${esc(workerName(w.name))} ${
-      w.online ? (w.paused ? "暂停（" + esc(w.paused) + "）" : "在线") : "离线 · " + esc(ago(w.seen))}</span>`).join("")}</div>` : ""}
+    ${board.workers.length ? `<div class="workers">${board.workers.map(w => {
+      const standby = !w.online && workerOnDemand(w.name) && board.workers.some(m => m.online && /^mac/i.test(m.name) && !workerOnDemand(m.name));
+      return `<span class="wk ${w.online ? "on" : ""}">${esc(workerName(w.name))} ${
+        w.online ? (w.paused ? "暂停（" + esc(w.paused) + "）" : "在线") : standby ? "待命" : "离线 · " + esc(ago(w.seen))}</span>`; }).join("")}</div>` : ""}
     ${board.running.length ? board.running.map(t => `<p style="margin:6px 0">${esc(workerName(t.worker))}正在${esc(t.label)}：${esc(t.title || "")}${t.pct != null ? `（${t.pct}%）` : ""}</p>`).join("")
       : `<p style="margin:6px 0">${board.busy ? "有下载在处理，Pi 先让它" : "现在没有任务在跑"}</p>`}
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
