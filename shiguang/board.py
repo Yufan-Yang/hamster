@@ -348,12 +348,14 @@ def run_task_process(tid, worker):
         run_claimed(task_dict(row), worker)
 
 
-def board_summary():
-    """The board for 资源使用: per kind how many wait / run / are done / failed, who's working on what."""
+def board_summary(since=0):
+    """The board for 资源使用: per kind how many wait / run now, how many were done / failed since `since`, who's
+    working on what."""
     kinds = {k: {"label": v["label"], "queued": 0, "running": 0, "done": 0, "failed": 0, "hours": 0.0}
              for k, v in TASK_KINDS.items()}
     for r in q("SELECT kind, state, COUNT(*) n, SUM(CASE WHEN state IN ('queued','running') "
-               "THEN json_extract(payload, '$.duration') ELSE 0 END) secs FROM tasks GROUP BY kind, state"):
+               "THEN json_extract(payload, '$.duration') ELSE 0 END) secs FROM tasks "
+               "WHERE state IN ('queued','running') OR updated >= ? GROUP BY kind, state", (since,)):
         if r["kind"] in kinds:
             kinds[r["kind"]][r["state"]] = r["n"]
             kinds[r["kind"]]["hours"] += (r["secs"] or 0) / 3600
@@ -365,7 +367,7 @@ def board_summary():
                for r in q("SELECT * FROM tasks WHERE state='running' ORDER BY updated DESC")]
     failed = [{"id": r["id"], "label": TASK_KINDS.get(r["kind"], {}).get("label", r["kind"]),
                "title": json.loads(r["payload"]).get("title"), "error": (r["error"] or "")[:200]}
-              for r in q("SELECT * FROM tasks WHERE state='failed' ORDER BY updated DESC LIMIT 5")]
+              for r in q("SELECT * FROM tasks WHERE state='failed' AND updated >= ? ORDER BY updated DESC LIMIT 5", (since,))]
     workers = [{"name": r["name"], "caps": json.loads(r["caps"]), "seen": r["seen"],
                 "online": time.time() - r["seen"] < WORKER_FRESH, "task": r["task"],
                 "paused": json.loads(r["paused"])["why"] if r["paused"] else None}

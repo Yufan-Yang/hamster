@@ -195,14 +195,18 @@ USAGE_NAMES.update({("codex", p): n.replace("AI ", "Codex · ", 1) for (k, p), n
 
 @app.get("/api/usage")
 def usage_summary():
-    days = int(request.args.get("days", "30")) if request.args.get("days", "").isdigit() else 30
-    since = time.time() - days * 86400
+    days = max(1, int(request.args.get("days", "30")) if request.args.get("days", "").isdigit() else 30)
+    # whole calendar days, today included ("今天" = since midnight, "7 天" = today and the 6 before), so the daily
+    # traffic rows and the timestamped ones cover the same stretch
+    t = time.localtime()
+    since = time.mktime((t.tm_year, t.tm_mon, t.tm_mday - (days - 1), 0, 0, 0, 0, 0, -1))
     day0 = time.strftime("%Y-%m-%d", time.localtime(since))
     traffic = {}
     for r in q("SELECT day, name, bytes FROM traffic WHERE day >= ? ORDER BY day", (day0,)):
         traffic.setdefault(r["day"], {})[r["name"]] = r["bytes"]
     total = {r["name"]: r["b"] for r in q("SELECT name, SUM(bytes) b FROM traffic WHERE day >= ? GROUP BY name", (day0,))}
-    jobs = {r["status"]: r["n"] for r in q("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
+    jobs = {r["status"]: r["n"] for r in q("SELECT status, COUNT(*) n FROM jobs WHERE status IN ('queued','downloading','processing') "
+                                          "OR (status='failed' AND updated >= ?) GROUP BY status", (since,))}
     work = []
     for r in q("SELECT kind, purpose, COUNT(*) n, SUM(amount) amount, SUM(tokens_in) tin, SUM(tokens_out) tout, "
                "SUM(seconds) secs, SUM(cost) cost, SUM(MAX(cache_hit, 0)) hit, SUM(cache_hit < 0) guessed, COUNT(cost) priced "
@@ -217,7 +221,7 @@ def usage_summary():
     return jsonify(days=days, traffic=traffic, traffic_total=total, jobs=jobs, finished=finished, work=work,
                    balance={"total": bal[-1]["total"], "currency": bal[-1]["currency"], "since": bal[0]["ts"],
                             "charged": round(charged, 4)} if bal else None,
-                   board=board.board_summary(), health=health_summary(),
+                   board=board.board_summary(since), health=health_summary(),
                    index={"lines": q("SELECT COUNT(*) n FROM seg", one=True)["n"],
                           "pictures": q("SELECT COUNT(*) n FROM vec", one=True)["n"]},
                    disk=dict(zip(("total", "used", "free"), shutil.disk_usage(MEDIA))), space=kv_get("space"))

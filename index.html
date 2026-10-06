@@ -3103,12 +3103,20 @@ async function openUsage(days) {
   let u;
   try { u = await (await fetch(`/api/usage?days=${usageDays}`)).json(); } catch (e) { toast("连不上 Pi"); return; }
   const tt = u.traffic_total || {}, get = k => tt[k] || 0;
-  const daysList = Object.keys(u.traffic || {}).sort().slice(-30);
-  const peak = Math.max(1, ...daysList.map(d => (u.traffic[d].proxy_down || 0) + (u.traffic[d].direct_down || 0)));
-  const bars = daysList.length ? `<div class="ubars">${daysList.map(d => {
-      const t = u.traffic[d], p = t.proxy_down || 0, x = t.direct_down || 0;
-      return `<div title="${d} 代理 ${bytes(p)} · 直连 ${bytes(x)}" style="height:${(p + x) / peak * 100}%;background:linear-gradient(to top, var(--green) ${x / Math.max(1, p + x) * 100}%, var(--blue) 0)"></div>`;
-    }).join("")}</div><div class="ubar-l"><span>${daysList[0]}</span><span>蓝 = 走代理 · 绿 = 直连</span><span>${daysList[daysList.length - 1]}</span></div>` : "";
+  // one bar a day; over two months (全部) one a week, so the bars stay wide enough to read
+  const daysList = Object.keys(u.traffic || {}).sort(), week = daysList.length > 62;
+  const bins = [];
+  daysList.forEach((d, i) => {
+    const t = u.traffic[d];
+    if (!week || (daysList.length - 1 - i) % 7 === 6 || !bins.length) bins.push({from: d, to: d, p: 0, x: 0});
+    const b = bins[bins.length - 1];
+    b.to = d; b.p += t.proxy_down || 0; b.x += t.direct_down || 0;
+  });
+  const peak = Math.max(1, ...bins.map(b => b.p + b.x));
+  const bars = bins.length > 1 ? `<div class="ubars">${bins.map(b => {
+      const when = b.from === b.to ? b.from : `${b.from} – ${b.to}`;
+      return `<div title="${when} 代理 ${bytes(b.p)} · 直连 ${bytes(b.x)}" style="height:${(b.p + b.x) / peak * 100}%;background:linear-gradient(to top, var(--green) ${b.x / Math.max(1, b.p + b.x) * 100}%, var(--blue) 0)"></div>`;
+    }).join("")}</div><div class="ubar-l"><span>${daysList[0]}</span><span>蓝 = 走代理 · 绿 = 直连${week ? " · 每根一周" : ""}</span><span>${daysList[daysList.length - 1]}</span></div>` : "";
   const work = u.work || [];
   const dl = work.filter(w => w.kind === "download"), llm = work.filter(w => ["llm", "claude", "codex"].includes(w.kind));
   const proc = work.filter(w => !["download", "llm", "claude", "codex"].includes(w.kind));
@@ -3137,11 +3145,11 @@ async function openUsage(days) {
     <div class="usec"><b>设备状态</b><span class="sub">Pi 和两块硬盘</span></div>
     ${h.warnings.length ? `<div class="form-err" style="margin:8px 0">${h.warnings.map(esc).join("<br>")}</div>` : `<p class="hint" style="margin:6px 0">一切正常</p>`}
     <div class="ugrid">
-      ${stat(h.cpu_temp ? h.cpu_temp.toFixed(0) + "°C" : "–", `CPU 温度 · 今天最高 ${h.cpu_max ? h.cpu_max.toFixed(0) + "°C" : "–"}${h.fan ? " · 风扇 " + esc(h.fan) : ""}`)}
+      ${stat(h.cpu_temp ? h.cpu_temp.toFixed(0) + "°C" : "–", `CPU 温度 · 24 小时内最高 ${h.cpu_max ? h.cpu_max.toFixed(0) + "°C" : "–"}${h.fan ? " · 风扇 " + esc(h.fan) : ""}`)}
       ${stat((h.load || [0])[0].toFixed(1), `负载（${h.cores || 4} 核）· 可用内存 ${num(h.mem_available)} MB`)}
       ${stat(bytes(h.sd_used), `SD 卡已用（共 ${bytes(h.sd_total)}）· 已开机 ${hours2((h.uptime || 0) / 3600)}`)}
     </div>
-    ${h.disks.length ? `<div class="uscroll"><table class="ut"><tr><th>硬盘</th><th>温度</th><th>今天最高</th><th>健康</th><th>坏扇区</th><th>通电</th><th>已用</th><th>剩余</th></tr>
+    ${h.disks.length ? `<div class="uscroll"><table class="ut"><tr><th>硬盘</th><th>温度</th><th>24 小时最高</th><th>健康</th><th>坏扇区</th><th>通电</th><th>已用</th><th>剩余</th></tr>
       ${h.disks.map(d => `<tr><td title="${esc(d.model || "")}">${esc(d.mount || d.dev)}<br><span class="sub">${Math.round((d.size || 0) / 1e12)} TB</span></td>
         <td>${d.asleep ? "休眠中" : (d.temp ?? "–") + "°C"}</td><td>${d.temp_max ? d.temp_max + "°C" : "–"}</td>
         <td>${d.passed === false ? '<b style="color:var(--accent)">不通过</b>' : d.passed ? "通过" : "–"}</td>
@@ -3149,6 +3157,7 @@ async function openUsage(days) {
         <td>${d.used == null ? "–" : bytes(d.used)}</td><td>${bytes(d.free)}</td></tr>`).join("")}</table></div>` : ""}
     <div class="usec"><b>硬盘空间</b><span class="sub">两块盘合起来的媒体库</span></div>
     ${space}
+    <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。</p>
     <div class="utab" style="margin-top:14px">${tab}</div>
     <div class="usec"><b>流量</b><span class="sub">所有经过 Pi 的设备</span></div>
     <div class="ugrid">${stat(bytes(get("proxy_down")), `走代理下载 · 上传 ${bytes(get("proxy_up"))}`)}
@@ -3157,9 +3166,9 @@ async function openUsage(days) {
     ${bars || '<p class="hint">流量从现在开始统计，过几分钟就有数了。</p>'}
     <div class="usec"><b>下载任务</b><span class="sub">拾光自己</span></div>
     <div class="ugrid">${stat(num(dlCount), `完成 · 共 ${bytes(dlBytes)}`)}
-      ${stat(num((j.queued || 0) + (j.downloading || 0) + (j.processing || 0)), "排队 / 进行中")}
-      ${stat(num(j.failed || 0), "失败（全部时间）")}${stat(num(j.done || 0), "已完成（全部时间）")}</div>
-    <div class="usec"><b>处理</b><span class="sub">在 Pi 上跑的，不花钱</span></div>
+      ${stat(num(j.failed || 0), "失败（还没重试成功的）")}
+      ${stat(num((j.queued || 0) + (j.downloading || 0) + (j.processing || 0)), "排队 / 进行中（现在）")}</div>
+    <div class="usec"><b>处理</b><span class="sub">在 Pi 和 Mac 上跑的，不花钱</span></div>
     ${proc.length ? `<div class="uscroll"><table class="ut"><tr><th>做了什么</th><th>次数</th><th>处理了多少</th><th>用时</th></tr>
       ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
         w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
@@ -3173,7 +3182,7 @@ async function openUsage(days) {
     </table></div>
     <p class="hint">花费按 DeepSeek 标价算（工作日 9–12、14–18 点全价，其他时间半价）。${llm.some(w => w.guessed) ? "带 * 的含开始记花费前的调用，按没有缓存估算，偏高。" : ""}${
       u.balance ? ` 账户余额 ${yuan(u.balance.total, 2)}，这段时间余额实际减少 ${yuan(u.balance.charged)}（从 ${esc(new Date(u.balance.since * 1000).toLocaleDateString("zh-CN"))} 开始记，包括这个 key 的所有用途）。` : ""}</p>` : '<p class="hint">这段时间没有调用。</p>'}
-    <div class="usec"><b>后台任务</b><span class="sub">任务板：谁能做谁领，Mac 在就交给 Mac</span></div>
+    <div class="usec"><b>后台任务</b><span class="sub">任务板：谁能做谁领，Mac 在就交给 Mac。排队、进行中是现在的，完成、失败按所选时间</span></div>
     ${board.workers.length ? `<div class="workers">${board.workers.map(w => `<span class="wk ${w.online ? "on" : ""}">${esc(workerName(w.name))} ${
       w.online ? (w.paused ? "暂停（" + esc(w.paused) + "）" : "在线") : "离线 · " + esc(ago(w.seen))}</span>`).join("")}</div>` : ""}
     ${board.running.length ? board.running.map(t => `<p style="margin:6px 0">${esc(workerName(t.worker))}正在${esc(t.label)}：${esc(t.title || "")}${t.pct != null ? `（${t.pct}%）` : ""}</p>`).join("")
@@ -3181,7 +3190,6 @@ async function openUsage(days) {
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
       ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
     ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 60))}`).join("；")}</p>` : ""}
-    <p class="hint">搜索索引：${num(u.index.lines)} 行字幕和图中文字，${num(u.index.pictures)} 张封面、照片和画面。</p>
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
 }
 
