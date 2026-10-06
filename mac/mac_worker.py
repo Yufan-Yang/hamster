@@ -16,11 +16,16 @@ Speech-to-text: Whisper large-v3-turbo on the GPU (mlx-whisper), ~25x realtime o
 keyframes): the Pi's Chinese-CLIP model (same vectors as the Pi's own) ~30 ms each, text in them with macOS Vision.
 While a game is in front it takes no tasks (and gives back a long one it's in the middle of).
 
+When nobody has touched the Mac for a while (IDLE_AFTER) a second loop takes the picture tasks (covers, keyframes:
+CLIP on the CPU) while the first keeps Whisper busy on the GPU; one more would only make the Pi cut keyframes for two
+videos at once. Back to one loop as soon as someone uses the Mac (the picture task in hand is finished first).
+
 AI requests (summaries, chapters, translations, sorting...): two more claim loops answer them with this Mac's Claude
 Code (`claude -p`, logged in with the Claude subscription), so they don't go to the paid DeepSeek API. They keep going
 while a game is in front (it's only waiting on the network). When Claude fails or its limits are used up, Codex
 (`codex exec`, logged in with the ChatGPT subscription) answers instead; when both are used up the loops say they're
-paused until one resets, and the Pi asks DeepSeek meanwhile.
+paused until one resets, and the Pi asks DeepSeek meanwhile. When AI requests pile up (LLM_BACKLOG waiting), two more
+loops join in until the pile is gone (it's only waiting on the network; the subscription's limits are what's spent).
 """
 import base64
 import json
@@ -49,6 +54,8 @@ OUTBOX = HERE / "outbox.jsonl"
 UNLOAD_AFTER = 600  # free the model's ~2 GB of memory after this long without work
 NAME = "mac-" + socket.gethostname().split(".")[0]
 CAPS = ["transcribe", "cover", "frames", "note_media", "gpu"]  # the task kinds this does, and that it has a GPU
+PIC_CAPS = ["cover", "frames", "gpu"]  # the second loop's, while the Mac is idle (CPU: runs beside Whisper)
+IDLE_AFTER = 600  # seconds without keyboard / mouse before the Mac counts as idle
 CLIP = HERE / "models" / "clip" / "vision.onnx"  # the Pi's image model (same file: same vectors), copied over
 CLIP_MODEL = "chinese-clip-vit-base-patch16-int8"  # its name on the Pi (search.CLIP_MODEL): sent with every vector
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
@@ -58,6 +65,8 @@ CLAUDE = Path(os.environ.get("CLAUDE_BIN") or Path.home() / ".local" / "bin" / "
 CLAUDE_DIR = HERE / "claude-cwd"  # an empty folder to run it in: no project files for it to pick up
 CLAUDE_CAPS = ["llm", "claude", "shortcut"]  # (and signing iOS shortcuts: quick, and keeps going while gaming)
 CLAUDE_LOOPS = 2
+CLAUDE_EXTRA = 2  # more loops, only while LLM_BACKLOG or more AI requests are waiting
+LLM_BACKLOG = 6
 CODEX = Path(os.environ.get("CODEX_BIN") or shutil.which("codex") or "/usr/local/Homebrew/bin/codex")
 CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-terra")  # empty: the account's default model
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
@@ -78,8 +87,15 @@ def log(*args):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), *args, flush=True)
 
 
+me = threading.local()  # which of this Mac's workers the current thread is (each loop claims under its own name)
+
+
+def whoami():
+    return getattr(me, "name", NAME)
+
+
 def call(path, **body):
-    r = http.post(PI + path, json={"worker": NAME, **body}, timeout=60)
+    r = http.post(PI + path, json={"worker": whoami(), **body}, timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -211,7 +227,7 @@ def transcribe(audio, lang=None):
 
 def do_transcribe(task):
     with tempfile.NamedTemporaryFile(suffix=".mka") as f:
-        with http.get(f"{PI}/api/tasks/{task['id']}/audio", params={"worker": NAME}, stream=True, timeout=(10, 300)) as r:
+        with http.get(f"{PI}/api/tasks/{task['id']}/audio", params={"worker": whoami()}, stream=True, timeout=(10, 300)) as r:
             r.raise_for_status()
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
@@ -223,7 +239,7 @@ def do_transcribe(task):
             "seconds": round(time.time() - started, 1)}
 
 
-_clip = None
+_clip, _clip_lock = None, threading.Lock()
 
 
 def clip_vectors(images):
@@ -231,10 +247,11 @@ def clip_vectors(images):
     global _clip
     import onnxruntime as ort
     from PIL import Image
-    if _clip is None:
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = 6
-        _clip = ort.InferenceSession(str(CLIP), so, providers=["CPUExecutionProvider"])
+    with _clip_lock:  # (two loops may want it first at once; running it is thread-safe)
+        if _clip is None:
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 6
+            _clip = ort.InferenceSession(str(CLIP), so, providers=["CPUExecutionProvider"])
     px = np.stack([((np.asarray(im.convert("RGB").resize((224, 224), Image.BICUBIC), np.float32) / 255
                      - np.array(CLIP_MEAN, np.float32)) / np.array(CLIP_STD, np.float32)).transpose(2, 0, 1) for im in images])
     v = np.concatenate([_clip.run(None, {"pixel_values": px[i:i + 16]})[0] for i in range(0, len(px), 16)])
@@ -265,7 +282,7 @@ def read_text(path):
 
 def fetch(task, what, suffix):
     f = tempfile.NamedTemporaryFile(suffix=suffix)
-    with http.get(f"{PI}/api/tasks/{task['id']}/{what}", params={"worker": NAME}, stream=True, timeout=(10, 600)) as r:
+    with http.get(f"{PI}/api/tasks/{task['id']}/{what}", params={"worker": whoami()}, stream=True, timeout=(10, 600)) as r:
         r.raise_for_status()
         for chunk in r.iter_content(1 << 20):
             f.write(chunk)
@@ -373,6 +390,29 @@ def gaming():
         return "games" in category or "/steamapps/" in path or "PlayCover" in path or name in listed or bundle_id in listed
     except Exception:
         return False
+
+
+def idle():
+    """Nobody at the Mac: no keyboard / mouse for IDLE_AFTER, and no game in front."""
+    try:
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem", "-d", "4"], capture_output=True, text=True, timeout=5).stdout
+        ns = int(re.search(r'"HIDIdleTime" = (\d+)', out).group(1))
+    except Exception:
+        return False
+    return ns / 1e9 >= IDLE_AFTER and not gaming()
+
+
+_backlog = [0, 0.0]  # AI requests waiting, when last asked
+
+
+def llm_backlog():
+    if time.time() - _backlog[1] > 30:
+        try:
+            _backlog[0] = http.get(PI + "/api/tasks", timeout=30).json()["kinds"].get("llm", {}).get("queued", 0)
+        except (requests.RequestException, ValueError, KeyError):
+            _backlog[0] = 0
+        _backlog[1] = time.time()
+    return _backlog[0]
 
 
 def unload():
@@ -551,10 +591,13 @@ def sign_shortcut(p):
         raise RuntimeError(f"shortcuts sign: {(r.stderr or r.stdout).strip()[-300:]}")
 
 
-def claude_loop(n):
-    name = f"{NAME}-claude-{n}"
+def claude_loop(n, extra=False):
+    name = me.name = f"{NAME}-claude-{n}"
     limits = {}  # "claude" / "codex" -> until when its limits are used up
     while True:
+        if extra and llm_backlog() < LLM_BACKLOG:
+            time.sleep(30)
+            continue
         if not CLAUDE.exists() and not CODEX.exists():
             log("no Claude Code at", CLAUDE, "and no Codex at", CODEX, ": AI requests stay with the Pi")
             return
@@ -599,9 +642,10 @@ def claude_loop(n):
 
 def work(task):
     """Do one claimed task, keeping the claim alive meanwhile; report done or failed."""
-    stop = threading.Event()
+    stop, name = threading.Event(), whoami()
 
     def beat():
+        me.name = name  # (its own thread: claims under the same worker as the loop it's for)
         while not stop.wait(60):
             try:
                 if not call(f"/api/tasks/{task['id']}/heartbeat")["ok"]:
@@ -637,6 +681,26 @@ def work(task):
     log("done", task["id"], task["kind"], f"{time.time() - started:.0f}s", extra)
 
 
+def pic_loop():
+    """Its own thread: picture tasks beside Whisper while nobody uses the Mac."""
+    me.name = f"{NAME}-pic"
+    while True:
+        if not idle():
+            time.sleep(30)
+            continue
+        try:
+            task = call("/api/tasks/claim", caps=PIC_CAPS, wait=25)["task"]
+        except requests.RequestException:
+            time.sleep(60)
+            continue
+        if task:
+            try:
+                work(task)
+            except Exception:
+                traceback.print_exc()
+                time.sleep(30)
+
+
 def drop_loop():
     """Its own thread: a dropped file goes out within ~20 s even while a long task runs."""
     while True:
@@ -651,8 +715,9 @@ def drop_loop():
 def run():
     log("worker", NAME, CAPS, "->", PI, "model", WHISPER)
     threading.Thread(target=drop_loop, daemon=True).start()
-    for n in range(1, CLAUDE_LOOPS + 1):
-        threading.Thread(target=claude_loop, args=(n,), daemon=True).start()
+    threading.Thread(target=pic_loop, daemon=True).start()
+    for n in range(1, CLAUDE_LOOPS + CLAUDE_EXTRA + 1):
+        threading.Thread(target=claude_loop, args=(n, n > CLAUDE_LOOPS), daemon=True).start()
     last_work, loaded, paused_for_game = time.time(), False, False
     while True:
         if gaming():  # playing: leave the Mac alone; tell the Pi we're only paused, so it doesn't start on our tasks
@@ -672,7 +737,9 @@ def run():
         try:
             flush_outbox()
             # waits on the Pi up to 25 s for a task to come in, so new work starts right away
-            task = call("/api/tasks/claim", caps=CAPS, wait=25)["task"]
+            # idle: pictures are the second loop's, so this one doesn't cut keyframes on the Pi beside it
+            task = call("/api/tasks/claim", caps=[c for c in CAPS if c not in PIC_CAPS or c == "gpu"] if idle() else CAPS,
+                        wait=25)["task"]
         except requests.RequestException as e:
             log("Pi unreachable:", e)
             time.sleep(60)
