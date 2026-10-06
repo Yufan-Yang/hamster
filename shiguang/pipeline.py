@@ -267,7 +267,7 @@ def run_job(job_id):
         # automatically a few times (1, 5, then 15 minutes later); errors that won't fix themselves aren't.
         attempts = (q("SELECT attempts FROM jobs WHERE id=?", (job_id,), one=True)["attempts"] or 0) + 1
         permanent = re.search(r"No video found|Unsupported URL|no longer supported|produced no files|404|"
-                              r"Private video|removed|not available", str(e), re.I)
+                              r"Private video|removed|not available|Cloudflare 人机验证", str(e), re.I)
         # Being taken for a bot passes after a while: wait longer and try more often
         delays = (1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600) if download.BOT_CHECK.search(str(e)) or "机器人" in str(e) else (60, 300, 900)
         if attempts <= len(delays) and not permanent:

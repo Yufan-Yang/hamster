@@ -234,12 +234,20 @@ def write_cookie_file(path, cookies):
                                c["name"], c["value"] or ""]) + "\n")
 
 
+CF_BLOCKED = ("这个网站开了 Cloudflare 人机验证，拾光的下载器和浏览器都过不去（自己的浏览器里能打开，是因为验证认得真人）。"
+              "这个网站暂时下不了，重试也没用。")
+CF_TITLE = re.compile(r"^(Just a moment|Attention Required|请稍候|請稍候)", re.I)
+
+
 def sniff_page(job_id, url):
     """Find the video on a page yt-dlp doesn't know. Fast path: the player config in the page's HTML
-    (no browser). Otherwise open it in headless Chromium, start playback and catch the media requests."""
+    (no browser). Otherwise open it in headless Chromium, start playback and catch the media requests.
+    A page stuck behind Cloudflare's bot challenge raises CF_BLOCKED instead of finding nothing."""
     update(job_id, stage="looking for the video on the page")
+    challenged = False
     try:
         r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+        challenged = r.headers.get("cf-mitigated") == "challenge"
         players, _ = media_in_page(r.text, r.url)
         media = dedupe_media(players)
         if media:
@@ -327,6 +335,7 @@ def sniff_page(job_id, url):
             except Exception:
                 pass
         title = page.title()
+        challenged = bool(CF_TITLE.match(title.strip())) or (challenged and not found)
         cookies = ctx.cookies()
         browser.close()
 
@@ -338,6 +347,8 @@ def sniff_page(job_id, url):
         manifests = [u for u in in_page if re.search(r"\.(m3u8|mpd)(\?|$)", u)]
         media = dedupe_media(ranked[:1] or manifests or in_page)
     if not media:
+        if challenged:
+            raise RuntimeError(CF_BLOCKED)
         return None
     cookie_file = STATE / f"cookies-{job_id}.txt"
     write_cookie_file(cookie_file, cookies)
