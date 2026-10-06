@@ -24,6 +24,16 @@ def ytdlp_opts(job_id, workdir, extra=None):
             spd = d.get("speed") or 0
             update(job_id, progress=round(pct, 1), speed=f"{human(spd)}/s" if spd else "")
 
+    def pp_hook(d):
+        # After 100% yt-dlp may still spend minutes in ffmpeg (a big HLS video: many minutes on the Pi):
+        # show that it's merging / repairing the file instead of sitting at 100%
+        if d["status"] != "started":
+            return
+        name = d.get("postprocessor") or ""
+        stage = "merging video and audio" if name == "Merger" else "fixing up the file" if name.startswith("Fixup") else None
+        if stage:
+            update(job_id, stage=stage, progress=0, speed="")
+
     opts = {
         "outtmpl": str(workdir / "%(title).150B [%(id)s].%(ext)s"),
         "format_sort": FORMAT_SORT.split(","),
@@ -38,6 +48,7 @@ def ytdlp_opts(job_id, workdir, extra=None):
         "noplaylist": True,
         "quiet": True, "no_warnings": True, "noprogress": True,
         "progress_hooks": [hook],
+        "postprocessor_hooks": [pp_hook],
         "sleep_interval_subtitles": 2,  # many subtitle requests in a row trip YouTube's 429
         "retries": 10, "fragment_retries": 20, "file_access_retries": 5, "socket_timeout": 30,
         "concurrent_fragment_downloads": 4,
