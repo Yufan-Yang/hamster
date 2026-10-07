@@ -419,13 +419,15 @@
 
 1. **先问 Mac 上的 Claude**（`llm.claude_json`）。请求变成任务板上的一个 `llm` 任务（带完整的提示词），Mac 的两个 Claude 工人领走，用 `claude -p` 回答（Claude Code 登录的是 Claude 订阅，按次不花钱，占订阅的用量额度）。
    - 模型：分类、合并标签、解释失败、整理随记用 Haiku（`CLAUDE_MODEL_LIGHT`），总结、章节、翻译、周报、回顾用 Sonnet（`CLAUDE_MODEL`）。原来"关思考"的请求用 `--effort low`。
-   - `claude -p` 的参数：`--safe-mode`（不读 CLAUDE.md、插件、MCP）、`--tools ""`（没有工具）、`--no-session-persistence`、`--json-schema`（保证返回这些字段）。在一个空文件夹里跑，经 Mac 本机代理连 Anthropic。
-2. **Codex 接手**：同一个工人里，Claude 出错、超时（10 分钟）或额度用完，就改用 `codex exec` 回答（Homebrew 装的 Codex CLI，登录 ChatGPT 订阅，按次不花钱）。参数：`--ephemeral`（不留会话）、`--ignore-user-config`、`--ignore-rules`、`-s read-only`，在同一个空文件夹里跑，系统提示作为 developer instructions，同样经本机代理。模型用 `gpt-5.6-terra`（`CODEX_MODEL` 可改，留空用账号默认），思考强度照搬（low / medium）。不用 `--output-schema`（严格模式要求每个字段写明类型），靠提示词要求返回 JSON。Claude 额度用完期间直接走 Codex，到恢复时间再先试 Claude。
+   - `claude -p` 的参数：`--safe-mode`（不读 CLAUDE.md、插件、MCP）、`--tools ""`（没有工具）、`--no-session-persistence`、`--json-schema`（保证返回这些字段）。在一个空文件夹里跑，默认通过路由器透明代理连 Anthropic。Mac 的 `config.json` 中 `proxy` 留空时会清除子进程继承的 HTTP/HTTPS/ALL 代理变量；需要显式代理时再填写地址，每次 AI 调用前重读配置。
+2. **Codex 接手**：同一个工人里，Claude 出错、超时（10 分钟）或额度用完，就改用 `codex exec` 回答（Homebrew 装的 Codex CLI，登录 ChatGPT 订阅，按次不花钱）。参数：`--ephemeral`（不留会话）、`--ignore-user-config`、`--ignore-rules`、`-s read-only`，在同一个空文件夹里跑，系统提示作为 developer instructions，与 Claude 使用相同的代理配置。模型用 `gpt-5.6-terra`（`CODEX_MODEL` 可改，留空用账号默认），思考强度照搬（low / medium）。不用 `--output-schema`（严格模式要求每个字段写明类型），靠提示词要求返回 JSON。Claude 额度用完期间直接走 Codex，到恢复时间再先试 Claude。
 3. **DeepSeek 兜底**：Mac 不在线、工人暂停（Claude 和 Codex 额度都用完，到较早的恢复时间前都报暂停）、90 秒内没人领（`CLAUDE_CLAIM_WAIT`）、或 Claude 和 Codex 都出错，就照旧问 DeepSeek。
 4. **大白话搜索、问拾光**也走 Claude（搜索用 Haiku，问答用 Sonnet），排在 Mac 队列最前面；20 秒没人领就改问 DeepSeek。比 DeepSeek 慢几秒（`claude -p` 每次要启动）。想让某几类先用 DeepSeek：`CLAUDE_SKIP=search,ask`。
 5. `CLAUDE_VIA_MAC=0` 关掉 Mac（Claude 和 Codex），全部回到 DeepSeek。
 
 每次调用都记录 token、缓存命中、耗时；DeepSeek 的还按价目表算费用，Claude 和 Codex 的记作「订阅」。资源使用里三者分开列。Claude 在时，"放到半价时段"的等待也取消了（没有价格可等）。
+
+分类结果会校验标签必须为 3–8 个不同的非空字符串；摘要明确判定为成人影片时，标签必须包含「成人视频」。不合格时带错误原因重试一次；仍不完整则保留已识别的信息、补回明确的类别标签并记录需要复核，避免只留下人名却默认为分类成功。不会仅凭演员名或「教师」等标题词推断成人类别。
 
 **DeepSeek 时的省钱做法**
 - **该关思考的关掉**：翻译、标签匹配、章节、搜索理解、随记整理、失败说明都是机械活，开着思考只会多花钱。比如翻译 60 行，开思考约 5800 个输出 token，关掉约 550。
@@ -517,6 +519,8 @@ deploy.sh             部署脚本
 **配置**：Pi 上的 `/etc/grabber.env`，模板见 `grabber.env.example`（密钥不进仓库）。
 
 **投屏**：播放页在 Safari 中有 AirPlay 按钮；「投屏到电视」搜索并控制同一局域网里的 DLNA 电视（包括开启了 DLNA 投屏的华为智慧屏）。电视直接向 Pi 取带签名的媒体地址。平时不用额外配置；如果手机通过 VPN 或外网地址打开页面、电视却在家里，给 `/etc/grabber.env` 设置 `CAST_URL=http://pi-gateway.local:8088` 这类电视能访问的 Pi 局域网地址。
+
+DLNA 投屏中，章节、要点和热度条的跳转都控制电视，不会启动手机播放。同一页面会话里，返回列表后选择其他视频或分集，会继续投到已选电视；列表页和播放页显示设备、连接或暂停状态。点击「停止投屏」才退出这个模式，本机播放器恢复为暂停状态。刷新网页后需重新选择设备；AirPlay 仍由 Safari 管理。
 
 **依赖**（基础之外）：`faster-whisper`、`onnxruntime`、`onnx`、`tokenizers`、`rapidocr_onnxruntime`、`pypinyin`、`opencc-python-reimplemented`、`pymupdf`（PDF）、`mobi`（MOBI/AZW3）。系统里要有 `ffmpeg`、`aria2`、`chromium`、`deno`、`smartmontools`。
 

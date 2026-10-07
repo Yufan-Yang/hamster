@@ -711,6 +711,17 @@ def jobs():
     term = request.args.get("q", "").strip()
     term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
     wanted_tags = tag_query(term)  # "#标签": only by tags
+    # Sort before the finished-item page is cut off. The page repeats this for
+    # its mixed cards (unfinished and resume items).
+    sort = request.args.get("sort", "added")
+    order = {
+        "published": "json_extract(analysis, '$.published') DESC, id DESC",
+        "added": "created DESC, id DESC",
+        "title": "COALESCE(json_extract(analysis, '$.title'), title, '') COLLATE NOCASE, id DESC",
+        "author": "(COALESCE(json_extract(analysis, '$.creator'), '') = ''), "
+                  "COALESCE(json_extract(analysis, '$.creator'), '') COLLATE NOCASE, "
+                  "COALESCE(json_extract(analysis, '$.title'), title, '') COLLATE NOCASE, id DESC",
+    }.get(sort, "created DESC, id DESC")
     scope, scope_args = scope_sql()
     scope += " AND status != 'cancelled'"  # cancelled jobs are hidden
     sub = request.args.get("sub", "")
@@ -736,7 +747,7 @@ def jobs():
         if parsed and not (parsed["keywords"] or parsed["visual"]) and not (parsed["uploader"] or parsed["since"]):
             parsed = None
     if wanted_tags:
-        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {' AND '.join(['analysis LIKE ?'] * len(wanted_tags))} ORDER BY id DESC",
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {' AND '.join(['analysis LIKE ?'] * len(wanted_tags))} ORDER BY {order}",
                  (*scope_args, *(f"%{t}%" for t in wanted_tags)))
         out = [d for d in map(job_dict, rows) if has_tags((d["analysis"] or {}).get("tags"), wanted_tags)]
     elif parsed:
@@ -745,7 +756,7 @@ def jobs():
         # Searches titles, links, summaries, key points, tags, file paths and transcripts
         like = f"%{term}%"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ? OR url LIKE ? OR analysis LIKE ? OR files LIKE ? "
-                 "OR transcript LIKE ?) ORDER BY id DESC LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
+                 f"OR transcript LIKE ?) ORDER BY {order} LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
         # The idle-time index belongs to the job that downloaded the files; entries linked to it share it
         by_source = {}
         for r in q(f"SELECT id, ref FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args):
@@ -790,7 +801,7 @@ def jobs():
     else:
         unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
-        finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY id DESC LIMIT ?", (*scope_args, limit + 1))
+        finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order} LIMIT ?", (*scope_args, limit + 1))
         more = len(finished) > limit
         if request.args.get("ids"):  # particular videos (opened from a digest, a note...), wherever they are
             wanted = [int(x) for x in request.args["ids"].split(",") if x.isdigit()][:50]
@@ -1735,6 +1746,15 @@ def save_watch(jid):
       # once seen to the end it stays 已看完, even when it's watched again
       (g.owner, jid, part, pos, dur, int(done or bool(prev and prev["done"])), time.time()))
     return jsonify(ok=True, done=done)
+
+
+@app.delete("/api/watch/<int:jid>")
+def clear_watch(jid):
+    """Forget this account's playback position without touching the video or activity totals."""
+    if not visible(jid):
+        return jsonify(error="not found"), 404
+    q("DELETE FROM watch WHERE owner=? AND job_id=?", (g.owner, jid))
+    return jsonify(ok=True)
 
 
 @app.post("/api/jobs/<int:jid>/<action>")

@@ -15,7 +15,7 @@ slowly. Files put in `~/拾光投递` become 随记 of the account in `config.js
 | Homebrew `iperf3` (only used to measure the Wi-Fi) | `/usr/local/Homebrew` | <1 MB |
 | Worker folder: Python venv (mlx-whisper, numpy, requests, opencc, onnxruntime, pillow, pyobjc Vision/Cocoa), `mac_worker.py`, `task` (one-line commands: `~/shiguang-compute/task publish transcribe job:446:0 --force`, `task board`), `token`, `config.json` (drop folder account), `models/clip/vision.onnx` (the Pi's image model, 88 MB), `worker.log`, `outbox.jsonl` (tasks waiting for the Pi, only while it's unreachable), optional `game-apps.txt` (more apps that count as games), `bench/` (two test sound clips) | `~/shiguang-compute` | ~1.3 GB |
 | Drop folder: files put here become 随记, then move to `已投递` | `~/拾光投递` | your files |
-| AI requests from the Pi (2026-10-05): two claim loops run the Claude Code already installed here (`~/.local/bin/claude -p`, logged in with the Claude subscription; nothing new installed), in an empty folder `claude-cwd/`, through the Mac's own proxy (`"proxy"` in `config.json`). Uses the subscription's limits; when they're used up the loops say they're paused and the Pi asks DeepSeek. Two extra loops join while 6+ AI requests wait. While nobody has used the Mac for 10 min, a second `-pic` loop takes covers/keyframes (CPU) beside Whisper (2026-10-06) | `~/shiguang-compute/claude-cwd`, `config.json` | – |
+| AI requests from the Pi (2026-10-05): two claim loops run the Claude Code already installed here (`~/.local/bin/claude -p`, logged in with the Claude subscription; nothing new installed), in an empty folder `claude-cwd/`, through the router's transparent proxy by default (since 2026-10-07; optional explicit `"proxy"` in `config.json`). Uses the subscription's limits; when they're used up the loops say they're paused and the Pi asks DeepSeek. Two extra loops join while 6+ AI requests wait. While nobody has used the Mac for 10 min, a second `-pic` loop takes covers/keyframes (CPU) beside Whisper (2026-10-06) | `~/shiguang-compute/claude-cwd`, `config.json` | – |
 | Codex CLI (2026-10-06): `brew install --cask codex`, logged in with the ChatGPT subscription. The same loops use `codex exec` when Claude fails or its limits are used up; paused only when both are | `/usr/local/Homebrew/bin/codex`, `~/.codex` | – |
 | Whisper large-v3-turbo model (MLX) | `~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo` (+ its files in `blobs/`) | ~1.5 GB |
 | Login item that keeps the worker running (`launchd`, Nice 10, restarts if it stops) | `~/Library/LaunchAgents/site.shiguang.compute.plist` | – |
@@ -26,6 +26,18 @@ If macOS asked whether Python may "find devices on the local network", that answ
 Privacy & Security → Local Network.
 
 On the Pi, for the Mac: `COMPUTE_TOKEN=` in `/etc/grabber.env` (same value as `~/shiguang-compute/token`).
+
+## AI network path
+
+`config.json` is read before each Claude/Codex invocation. A missing, null, or blank `proxy` means use the
+normal network route (the home's transparent proxy); inherited HTTP/HTTPS/ALL proxy variables are stripped
+from the child environment. A nonempty `proxy` sets both uppercase and lowercase HTTP/HTTPS variables,
+so a stale lowercase variable cannot override it. Other variables, including `NO_PROXY`, are preserved.
+Requests to the Pi already ignore environment proxies (`http.trust_env = False`).
+
+The worker is launched by launchd, so changing `.zshrc` does not reconfigure it. Config changes affect the
+next AI invocation without a restart; Python code changes take effect when the worker restarts. Allow current
+tasks to finish before restarting. Existing CLI children retain the environment they started with.
 
 ## Undo
 

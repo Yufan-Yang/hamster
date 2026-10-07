@@ -6,6 +6,7 @@ therefore belong on the Pi: browsers cannot send SSDP multicast packets.
 import hashlib
 import html
 import socket
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -17,6 +18,8 @@ SSDP = ("239.255.255.250", 1900)
 AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
 RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _devices = {}  # opaque id -> descriptor; a short cache also prevents forged control URLs
+_refresh_lock = threading.Lock()
+_last_refresh = -float("inf")
 
 
 def _tag(node, name):
@@ -79,9 +82,19 @@ def discover(timeout=2.0):
 
 
 def _device(did):
+    global _last_refresh
     d = _devices.get(did)
     if not d or d["until"] <= time.time():
-        raise ValueError("电视列表已过期，请重新搜索")
+        # Keep a selected TV usable across long playback / suspended browser tabs.
+        # Only rediscovered LAN descriptors are accepted, never client-supplied URLs.
+        with _refresh_lock:
+            d = _devices.get(did)
+            if (not d or d["until"] <= time.time()) and time.monotonic() - _last_refresh >= 10:
+                _last_refresh = time.monotonic()
+                discover()
+            d = _devices.get(did)
+        if not d or d["until"] <= time.time():
+            raise ValueError("找不到投屏电视，请确认电视在线或重新搜索")
     return d
 
 
@@ -99,6 +112,7 @@ def _soap(did, action, service=AV_TRANSPORT, **args):
             "Content-Type": 'text/xml; charset="utf-8"', "SOAPACTION": f'"{service}#{action}"'})
         if not r.ok:
             raise RuntimeError(f"电视返回 HTTP {r.status_code}")
+        d["until"] = time.time() + 300
         return r.content
     except requests.RequestException as e:
         raise RuntimeError(f"连不上 {d['name']}：{e}") from e

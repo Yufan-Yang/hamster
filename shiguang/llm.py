@@ -271,6 +271,32 @@ def heuristic_analysis(name, meta, guess):
     return a
 
 
+def required_classification_tags(a):
+    """A narrow safety net for an explicit adult-film classification, not title keywords.
+
+    Teachers, actors' names, and videos discussing the industry do not establish this category.
+    Keep its existing library spelling: privacy filters depend on that tag.
+    """
+    brief = str(a.get("brief") or "")
+    first = re.split(r"[。！？\n]", brief, maxsplit=1)[0]
+    if re.search(r"纪录|新闻|科普|讲解|讨论|分析|非成人|不是|并非|documentary|news|discuss|analysis|\bnot\b", first, re.I):
+        return []
+    return ["成人视频"] if re.search(r"成人(?:剧情)?(?:影片|视频|电影)|\badult (?:film|video|movie)\b", first, re.I) else []
+
+
+def validate_classification_tags(a):
+    if not isinstance(a, dict):
+        raise ValueError("Classification must be a JSON object")
+    tags = a.get("tags")
+    if not isinstance(tags, list) or any(not isinstance(t, str) or not t.strip() for t in tags):
+        raise ValueError("tags must be an array of nonempty strings")
+    if not 3 <= len(set(t.strip() for t in tags)) <= 8:
+        raise ValueError("tags must contain 3-8 distinct factual tags, including the content category, not only a person")
+    missing = [t for t in required_classification_tags(a) if t not in tags]
+    if missing:
+        raise ValueError("brief identifies the content category but tags omit: " + ", ".join(missing))
+
+
 def classify(job_id, name, meta, guess):
     if not LLM_API_KEY:
         return heuristic_analysis(name, meta, guess)
@@ -285,20 +311,29 @@ def classify(job_id, name, meta, guess):
     parts += [f"Name: {name}", "Metadata:\n" + json.dumps(meta, ensure_ascii=False, indent=1)]
     if guess:
         parts.append("Filename parser guess:\n" + json.dumps({k: str(v) for k, v in guess.items()}, ensure_ascii=False))
-    usage = {}
+    usage, correction, candidate = {}, "", None
     for attempt in range(2):
         try:
-            a = llm_json(CLASSIFY_SYSTEM, "\n\n".join(parts), CLASSIFY_FIELDS, 4000, usage, "classify", job_id)
+            candidate = llm_json(CLASSIFY_SYSTEM, "\n\n".join(parts) + correction, CLASSIFY_FIELDS, 4000, usage, "classify", job_id)
+            validate_classification_tags(candidate)
+            a = candidate
             break
         except Exception as e:
+            correction = "\n\nPrevious classification was invalid: " + str(e)[:300] + ". Return a corrected complete JSON object."
             if attempt:
-                a = heuristic_analysis(name, meta, guess)
-                a["note"] = f"AI classification failed: {e}"
-                return a
+                if not isinstance(candidate, dict):
+                    a = heuristic_analysis(name, meta, guess)
+                    a["note"] = f"AI classification failed: {e}"
+                    return a
+                # Keep the useful classification, but don't silently claim its tags passed validation.
+                a = {**heuristic_analysis(name, meta, guess), **candidate}
+                a.setdefault("brief", a.get("summary") or "")
+                a["note"] = f"AI tags need review after retry: {e}"
     a["title"] = str(a["title"] or meta.get("title") or name)
-    a["tags"] = [str(x).strip() for x in a["tags"] if str(x).strip()] if isinstance(a["tags"], list) else []
+    a["tags"] = [x.strip() for x in a["tags"] if isinstance(x, str) and x.strip()] if isinstance(a["tags"], list) else []
     if not a["tags"]:  # the model left them out: fall back to the site's own tags
         a["tags"] = [str(t) for t in (meta.get("tags") or [])][:6]
+    a["tags"] = list(dict.fromkeys(a["tags"] + required_classification_tags(a)))
     a["creator"] = str(a.get("creator") or meta.get("uploader") or meta.get("channel") or meta.get("artist") or "").strip() or None
     if a["creator"] and a["creator"] not in a["tags"]:
         a["tags"].insert(0, a["creator"])  # the creator is always a tag, so you can browse/search by it

@@ -49,8 +49,9 @@
   .btn:disabled { opacity: .5; cursor: default; }
   .link { border: 0; background: none; color: var(--blue); padding: 4px 0; text-decoration: underline; text-underline-offset: 3px; }
 
-  /* top bar */
-  header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 2px solid var(--ink);
+  /* top bar: the filters live with it, so both stay visible while browsing a long library */
+  .topbar { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 2px solid var(--ink); }
+  header { background: var(--bg);
            display: flex; align-items: center; gap: 16px; padding: 10px 24px; padding-top: max(10px, env(safe-area-inset-top)); }
   .logo { display: flex; align-items: center; gap: 10px; flex: none; }
   .logo b { font-size: 24px; line-height: 1; font-weight: normal; color: var(--bg); background: var(--accent);
@@ -67,11 +68,13 @@
   .avatar:active { transform: translate(3px, 3px); box-shadow: none; }
 
   /* filter chips */
-  .chips { display: flex; gap: 10px; overflow-x: auto; padding: 14px 24px 10px; scrollbar-width: none; }
+  .chips { display: flex; gap: 10px; overflow-x: auto; padding: 14px 24px 10px; background: var(--bg); scrollbar-width: none; }
   .chips::-webkit-scrollbar { display: none; }
   .chip { flex: none; height: 30px; padding: 0 10px; border: 2px solid var(--ink); background: var(--panel); white-space: nowrap; }
   .chip.on { background: var(--ink); color: var(--bg); }
   .chip.dim:not(.on) { color: var(--faint); border-color: var(--faint); }
+  .sort-chip { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+  .sort-chip select { height: 26px; max-width: 132px; border: 0; background: transparent; color: var(--ink); font: inherit; padding: 0; }
 
   main { padding: 0 24px 60px; }
   .toolbar { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; }
@@ -184,6 +187,9 @@
                  background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.45); border-radius: 4px;
                  padding: 8px 12px; text-shadow: 0 1px 2px #000; }
   .castOverlay[hidden] { display: none; }
+  .castNotice { background: var(--yellow); color: var(--ink); padding: 8px 12px; font-size: 13px; }
+  .castNotice[hidden] { display: none; }
+  .castNotice button { margin-left: 8px; text-decoration: underline; background: transparent; border: 0; color: inherit; }
   .castHead { display: flex; align-items: center; gap: 10px; font-size: 13px; }
   .castHead span { color: rgba(255,255,255,.82); font-variant-numeric: tabular-nums; }
   .castOverlay input[type=range] { accent-color: var(--yellow); }
@@ -349,6 +355,8 @@
   .contitle { font-size: 24px; line-height: 1.3; margin-bottom: 10px; }
   .controw { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 240px); gap: 16px; overflow-x: auto;
              padding: 0 8px 10px 0; scrollbar-width: thin; }
+  .clear-watch { position: absolute; z-index: 3; top: 6px; right: 6px; width: 26px; height: 26px; padding: 0;
+                 border: 2px solid var(--ink); background: var(--panel); color: var(--accent); font: inherit; line-height: 1; }
   .otd { padding: 10px 14px; margin-bottom: 18px; background: var(--panel); }
   .otdh { font-size: 24px; line-height: 1.3; color: var(--accent); }
   .otd .note { box-shadow: none; }
@@ -624,6 +632,7 @@
 </style>
 </head>
 <body>
+<div class="topbar">
 <header>
   <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
   <form class="search" onsubmit="return false">
@@ -637,6 +646,8 @@
 </header>
 
 <div class="chips" id="chips"></div>
+<div class="castNotice" id="castNotice" hidden></div>
+</div>
 <main>
   <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
   <div class="understood" id="understood" hidden></div>
@@ -765,6 +776,7 @@
 <!-- watch -->
 <div id="watch" hidden>
   <div class="wbar"><button onclick="closeWatch()" aria-label="返回">◀ 返回</button><b>拾光</b></div>
+  <div class="castNotice" id="watchCastNotice" hidden></div>
   <div class="wrap" id="watchBody"></div>
 </div>
 
@@ -838,7 +850,9 @@ const STAGES = {"starting": "准备中", "downloading video": "下载中", "down
 const ACTIVE = ["queued", "downloading", "processing"];
 
 let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null, castTimer = null, casting = null, castVolumeTimer = null;
+let castQueue = Promise.resolve();
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
+let videoSort = lsGet("videoSort", "added");
 
 // Close a sheet / the watch page with a short exit animation instead of vanishing
 function hide(el, after) {
@@ -900,7 +914,10 @@ function renderChips() {
   all.sort((a, b) => (counts[b] || 0) - (counts[a] || 0)).forEach(c => list.push([c, catName(c)]));
   if (failed) list.push(["failed", `失败 ${failed}`]);
   if (!list.some(([k]) => k === chip)) chip = "all";
-  const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${counts[k] === undefined && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("");
+  const sort = !["notes", "books", "subs"].includes(chip) ? `<label class="chip sort-chip">排序
+    <select onchange="setVideoSort(this.value)">${[["published", "网页创建时间"], ["added", "添加时间"], ["title", "标题"], ["author", "作者"]]
+      .map(([k, n]) => `<option value="${k}"${k === videoSort ? " selected" : ""}>${n}</option>`).join("")}</select></label>` : "";
+  const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${counts[k] === undefined && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("") + sort;
   if ($("#chips").innerHTML !== chipsHtml) $("#chips").innerHTML = chipsHtml;
 }
 function setChip(k) {
@@ -915,7 +932,7 @@ function setChip(k) {
   if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
 }
 
-function card(j) {
+function card(j, clearableWatch = false) {
   const a = j.analysis || {}, m = (j.media || [])[0];
   let over = "";
   if (ACTIVE.includes(j.status)) over = `<div class="state">${j.status === "queued" ? "排队中" : esc(STAGES[j.stage] || j.stage || "处理中")}${j.progress ? " " + j.progress.toFixed(0) + "%" : ""}${j.speed ? "<br>" + esc(j.speed) : ""}</div>
@@ -941,7 +958,9 @@ function card(j) {
   const w = j.watch;
   if (w && w.done) over += `<span class="badge tr">已看完</span>`;
   else if (w && w.dur && w.pos > 15) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
+  const clear = clearableWatch ? `<button class="clear-watch" title="清除观看记录" aria-label="清除观看记录" onclick="event.stopPropagation(); clearWatch(${j.id})">×</button>` : "";
   return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
+    ${clear}
     ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
     <div class="info"><div class="title">${hl(titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
   </div>`;
@@ -995,11 +1014,21 @@ function render() {
     chip === "active" ? ACTIVE.includes(j.status) :
     chip === "failed" ? j.status === "failed" :
     chip === "device" ? phone(j) === deviceFilter : category(j) === chip);
+  const videoSorts = {
+    published: (a, b) => String((b.analysis || {}).published || "").localeCompare(String((a.analysis || {}).published || ""), "zh-CN") || b.id - a.id,
+    added: (a, b) => b.created - a.created || b.id - a.id,
+    title: (a, b) => String(titleOf(a)).localeCompare(String(titleOf(b)), "zh-CN") || b.id - a.id,
+    author: (a, b) => {
+      const ay = String((a.analysis || {}).creator || ""), by = String((b.analysis || {}).creator || "");
+      return (!ay - !by) || ay.localeCompare(by, "zh-CN") || String(titleOf(a)).localeCompare(String(titleOf(b)), "zh-CN") || b.id - a.id;
+    },
+  };
+  if (!query || videoSort !== "added") jobs.sort(videoSorts[videoSort] || videoSorts.added);
   shown = jobs;
   const resume = chip === "all" && !query && !selecting
     ? state.jobs.filter(j => j.watch && !j.watch.done && j.watch.pos > 15 && j.status === "done").sort((a, b) => b.watch.at - a.watch.at).slice(0, 8) : [];
   $("#continue").hidden = !resume.length;
-  const contHtml = resume.map(card).join("");
+  const contHtml = resume.map(j => card(j, true)).join("");
   if ($("#controw").dataset.html !== contHtml) { $("#controw").innerHTML = contHtml; $("#controw").dataset.html = contHtml; }
   // 继续阅读: books you're in the middle of
   const reading = chip === "all" && !query && !selecting ? state.reading || [] : [];
@@ -1049,6 +1078,7 @@ async function refresh() {
     if (query && chip !== "books") params.set("q", query);  // on 书架 the search is in the books (loadBooks)
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
     if (FOLDERS[chip] || LIBS[chip]) params.set("cat", chip);  // the whole category, not a page of the newest
+    if (videoSort !== "added") params.set("sort", videoSort);
     if (query && smartSearch && !exactSearch) params.set("nl", "1");
     if (pageLimit > 100) params.set("limit", pageLimit);
     if (chip === "notes") loadNotes();
@@ -1076,6 +1106,13 @@ let wentOffline = false;
 // Finished items come 100 at a time (unfinished ones are always all there); 加载更多 asks for the next 100
 let pageLimit = 100;
 function loadMore() { pageLimit += 100; $("#more").disabled = true; refresh().finally(() => $("#more").disabled = false); }
+function setVideoSort(sort) {
+  videoSort = ["published", "added", "title", "author"].includes(sort) ? sort : "added";
+  lsSet("videoSort", videoSort);
+  pageLimit = 100;
+  lastBody = "";
+  refresh();
+}
 // Lazy polling: every 5 s while something is downloading, every 60 s otherwise,
 // paused while the tab is hidden and refreshed right away when you come back to it.
 let pollTimer;
@@ -1672,11 +1709,13 @@ async function deleteNote(id) {
 
 /* ---------- watch page ---------- */
 function openWatch(id, part = 0, t = 0) {
+  const explicitTime = arguments.length >= 3;
   const j = state.jobs.find(x => x.id === id); if (!j) return;
   stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
   // opened from the list (not from a search hit or a part button): carry on where you left off, on any device
   const w = j.watch, resumed = arguments.length < 2 && w && !w.done && w.pos > 15 && (j.media || [])[w.part];
   if (resumed) { part = w.part; t = w.pos; toast(`从 ${dur(w.pos)} 接着播放`); }
+  if (arguments.length < 2 && casting && casting.id === id) { part = casting.part; t = casting.position; }
   watching = {id, part};
   const a = j.analysis || {}, media = j.media || [], m = media[part];
   let stage;
@@ -1684,8 +1723,8 @@ function openWatch(id, part = 0, t = 0) {
     // Audio: cover (or a note) fills the frame, controls sit along its bottom edge like a video player
     stage = m.audio
       ? `<div class="stage audio" id="stage">${j.thumb ? `<img src="/thumb/${id}" alt="">` : `<div class="note-big">♪</div>`}
-           <audio controls autoplay src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio><div class="castOverlay" id="castOverlay"></div></div>`
-      : `<div class="stage" id="stage">${videoTag(j, m, t)}<div class="castOverlay" id="castOverlay"></div></div>`;
+           <audio ${casting ? 'preload="none"' : 'controls autoplay'} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio><div class="castOverlay" id="castOverlay" hidden></div></div>`
+      : `<div class="stage" id="stage">${videoTag(j, m, t)}<div class="castOverlay" id="castOverlay" hidden></div></div>`;
     if (!m.audio && ["vp9", "av1"].includes(m.vcodec) && /iPhone|iPad/.test(navigator.userAgent))
       stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用电脑或 Plex 看。</div>`;
   } else {
@@ -1719,7 +1758,7 @@ function openWatch(id, part = 0, t = 0) {
     ${parts}
     <div class="actions">
       ${m && airplayAvailable() ? `<button onclick="showAirPlay()">AirPlay</button>` : ""}
-      ${m ? `<button onclick="findCast(${id},${part})">投屏到电视</button>` : ""}
+      ${m ? `<button onclick="findCast(${id},${part})">${casting ? '更换投屏设备' : '投屏到电视'}</button>` : ""}
       ${active ? `<button onclick="act(${id},'cancel')">取消下载</button>` : ""}
       ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
       ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
@@ -1740,6 +1779,8 @@ function openWatch(id, part = 0, t = 0) {
   loadPointTimes(id);
   const el = $("#watchBody video, #watchBody audio");
   if (el) {
+    for (const track of el.textTracks) track.mode = "disabled";
+    el.addEventListener("play", () => { if (casting) el.pause(); });
     // the volume you set carries over to the next video (this browser; iPhones have only the hardware buttons)
     try {
       const vol = JSON.parse(localStorage.getItem("playerVolume") || "null");
@@ -1760,6 +1801,13 @@ function openWatch(id, part = 0, t = 0) {
     el.addEventListener("pause", () => saveWatch());
     el.addEventListener("ended", () => saveWatch(true));
   }
+  if (m && casting) {
+    if (casting.id === id && casting.part === part) {
+      showCastControls(casting.device, casting.name);
+      if (explicitTime) castSeek(casting.device, t);
+    } else startCast(id, part, casting.device, t);
+  }
+  renderCastNotice();
 }
 // the summary's key points, each with the moment it's talked about: click to jump there
 async function loadPointTimes(id) {
@@ -1832,6 +1880,7 @@ async function loadSimilar(id) {
 // where playback is, for 继续观看 on every device (also sent when the page is left)
 let watchSecs = 0;
 function saveWatch(ended) {
+  if (casting) { saveCastWatch(casting); return; }
   const el = $("#watchBody video, #watchBody audio");
   if (!el || !watching || !isFinite(el.duration) || (!ended && el.currentTime < 5)) return;
   const pos = ended ? el.duration : el.currentTime, secs = Math.round(watchSecs);
@@ -1841,6 +1890,15 @@ function saveWatch(ended) {
   const j = state.jobs.find(x => x.id === watching.id);
   if (j) j.watch = {part: watching.part, pos, dur: el.duration, at: Date.now() / 1000,
                     done: !!ended || !!(j.watch && j.watch.done) || pos > el.duration - 30};
+}
+async function clearWatch(id) {
+  try {
+    const r = await fetch(`/api/watch/${id}`, {method: "DELETE"});
+    if (!r.ok) throw new Error();
+    const j = state.jobs.find(x => x.id === id);
+    if (j) delete j.watch;
+    render();
+  } catch (e) { toast("清除观看记录失败"); }
 }
 document.addEventListener("visibilitychange", () => { if (document.hidden) saveWatch(); });
 
@@ -1859,7 +1917,8 @@ function hitList(j) {
 }
 function seekTo(id, part, t) {
   const v = $("#watchBody video, #watchBody audio");
-  if (!v || !watching || watching.part !== part) { openWatch(id, part, t); return; }
+  if (!v || !watching || watching.id !== id || watching.part !== part) { openWatch(id, part, t); return; }
+  if (casting) { castSeek(casting.device, t); return; }
   v.currentTime = t; v.play().catch(() => {});
   $("#watch").scrollTo({top: 0, behavior: "smooth"});
 }
@@ -1867,7 +1926,6 @@ function seekTo(id, part, t) {
 /* ---------- player ----------
    Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
 function stopMedia() {
-  clearInterval(castTimer); castTimer = null;
   saveWatch();
   document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
 }
@@ -1879,11 +1937,11 @@ function setupMediaSession(j) {
 }
 const SUB_NAMES = {"zh": "中文", "en": "English", "en-orig": "English（自动）", "ja": "日本語", "ko": "한국어", "yue": "粤语"};
 function videoTag(j, m, t = 0) {
-  // English videos with translated subtitles: both languages together, shown by default
-  const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="双语" srclang="zh" default>` : "";
+  // Subtitles, including bilingual tracks, are available but off until selected.
+  const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="双语" srclang="zh">` : "";
   const tracks = bi + m.subs.map((label, k) =>
-    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}"${k === 0 && !bi ? " default" : ""}>`).join("");
-  return `<video controls autoplay playsinline preload="metadata" x-webkit-airplay="allow" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
+    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}">`).join("");
+  return `<video ${casting ? 'preload="none"' : 'controls autoplay preload="metadata"'} playsinline x-webkit-airplay="allow" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
 }
 function airplayAvailable() {
   const p = window.HTMLMediaElement && HTMLMediaElement.prototype;
@@ -1905,87 +1963,169 @@ async function findCast(id, part) {
       : `<p class="hint">没找到 DLNA 电视。确认电视和树莓派在同一局域网，并在电视设置中打开投屏。</p>`;
   } catch (e) { box.innerHTML = `<p class="err">寻找电视失败</p>`; }
 }
-async function startCast(id, part, device) {
+// Serialize transport commands: a slow start must finish before a chapter seek or the next video.
+function castRequest(session, path, body) {
+  const run = castQueue.catch(() => {}).then(async () => {
+    if (casting !== session) return null;
+    const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const r = await response.json();
+    if (!response.ok || r.error) throw new Error(r.error || "电视连接失败");
+    return r;
+  });
+  castQueue = run.catch(() => {});
+  return run;
+}
+function castError(session, error) {
+  if (casting !== session) return;
+  session.error = error.message || "电视连接失败";
+  renderCastNotice();
+  toast(session.error + "；手机仍保持暂停");
+}
+function renderCastNotice() {
+  const c = casting;
+  const label = c ? `${c.error ? '投屏连接异常' : c.pending ? '正在连接电视' : c.state === 'PAUSED_PLAYBACK' ? '投屏已暂停' : c.state === 'STOPPED' || c.state === 'NO_MEDIA_PRESENT' ? '投屏已停止' : '投屏中'} · ${c.name || '电视'}` : "";
+  for (const selector of ["#castNotice", "#watchCastNotice"]) {
+    const el = $(selector); if (!el) continue;
+    el.hidden = !c;
+    el.innerHTML = c ? `${esc(label)} · 下个视频继续投到此设备
+      <button onclick="openJob(casting.id)">投屏控制</button>
+      ${c.error ? '<button onclick="startCast(casting.id,casting.part,casting.device,casting.position)">重试连接</button>' : ''}
+      <button onclick="castControl(casting.device,'stop')">停止投屏</button>` : "";
+  }
+  const labelEl = $("#castTime");
+  if (labelEl && c) labelEl.textContent = c.error ? c.error : `${label} · ${dur(c.position || 0) || '0:00'} / ${dur(c.duration || 0) || '0:00'}`;
+}
+function saveCastWatch(c) {
+  if (!c.ready || !c.duration || c.position < 5) return;
+  const secs = Math.floor(c.secs || 0); c.secs = (c.secs || 0) - secs;
+  fetch(`/api/watch/${c.id}`, {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
+    body: JSON.stringify({part: c.part, pos: c.position, dur: c.duration, ended: false, secs})}).catch(() => {});
+  const j = state.jobs.find(x => x.id === c.id);
+  if (j) j.watch = {part: c.part, pos: c.position, dur: c.duration, at: Date.now() / 1000,
+    done: !!(j.watch && j.watch.done) || c.position > c.duration - 30};
+  c.savedAt = Date.now();
+}
+async function startCast(id, part, device, position = null) {
   const el = $("#watchBody video, #watchBody audio");
-  const position = el && isFinite(el.currentTime) ? el.currentTime : 0;
-  const r = await (await fetch("/api/cast/start", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id, part, device, position})})).json();
-  if (r.error) return toast(r.error);
-  if (el) { el.pause(); el.controls = false; }
-  casting = {device, position};
-  showCastControls(device, r.name);
-  toast(`正在投到 ${r.name}`);
+  const old = casting;
+  if (position === null) position = old && old.id === id && old.part === part ? old.position : el && isFinite(el.currentTime) ? el.currentTime : 0;
+  saveWatch();
+  const c = casting = {id, part, device, name: old && old.device === device ? old.name : '电视', position, pending: true, revision: 0};
+  clearTimeout(castVolumeTimer);
+  if (el) { el.pause(); el.autoplay = false; el.controls = false; }
+  showCastControls(device, c.name);
+  renderCastNotice();
+  clearInterval(castTimer);
+  castTimer = setInterval(() => { if (casting) castStatus(casting.device); }, 2000);
+  try {
+    const r = await castRequest(c, "/api/cast/start", {id, part, device, position});
+    if (casting !== c || !r) return;
+    c.name = r.name; c.pending = false; c.ready = true; c.state = 'PLAYING';
+    renderCastNotice();
+    toast(`投屏中 · ${r.name}，切换视频将继续投到电视`);
+    castStatus(device);
+  } catch (e) { c.pending = false; castError(c, e); }
 }
 function showCastControls(device, name) {
   const box = $("#castBox"), overlay = $("#castOverlay"); if (!overlay) return;
-  clearInterval(castTimer);
   if (box) box.innerHTML = "";
-  overlay.innerHTML = `<div class="castHead"><b>投到 ${esc(name)}</b> <span id="castTime">连接中…</span></div>
+  overlay.innerHTML = `<div class="castHead"><b>电视遥控</b> <span id="castTime">投屏中 · ${esc(name)}</span></div>
     <input id="castSeek" type="range" min="0" max="1" value="0" step="1" style="width:100%;margin:10px 0" oninput="castSeekPreview(this.value)" onchange="castSeek(${esc(JSON.stringify(device))},this.value)">
     <div class="castVolume" id="castVolume"></div>
     <div class="castActions"><button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'pause')">暂停</button>
-    <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div></div>`;
+    <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div>`;
   overlay.hidden = false;
-  castStatus(device); castTimer = setInterval(() => castStatus(device), 2000);
+  renderCastNotice();
 }
 async function castStatus(device) {
+  const c = casting;
+  if (!c || c.device !== device || c.pending || !c.ready || c.polling) return;
+  c.polling = true;
+  const revision = c.revision;
   try {
     const r = await (await fetch(`/api/cast/status?device=${encodeURIComponent(device)}`)).json();
-    if (r.error) { clearInterval(castTimer); return toast(r.error); }
-    const seek = $("#castSeek"), label = $("#castTime");
+    if (casting !== c || revision !== c.revision) return;
+    if (r.error) throw new Error(r.error);
+    c.error = null;
+    const seek = $("#castSeek");
+    if (c.seeking && (Math.abs((r.position || 0) - c.seekTarget) <= 3 || Date.now() > c.seekDeadline)) c.seeking = false;
     if (seek && r.duration) {
       seek.max = r.duration;
-      if (casting && casting.seeking) {
-        seek.value = Math.min(casting.seekTarget, r.duration);
-        if (Math.abs((r.position || 0) - casting.seekTarget) <= 3 || Date.now() > casting.seekDeadline)
-          casting.seeking = false;
-      }
-      if (!(casting && casting.seeking)) seek.value = Math.min(r.position || 0, r.duration);
+      seek.value = Math.min(c.seeking ? c.seekTarget : r.position || 0, r.duration);
     }
-    if (label) label.textContent = `${r.state === 'PLAYING' ? '播放中' : r.state === 'PAUSED_PLAYBACK' ? '已暂停' : r.state || '投屏中'} · ${dur(r.position || 0)} / ${dur(r.duration || 0)}`;
-    if (casting) casting.position = r.position || 0;
+    const delta = (r.position || 0) - c.position;
+    if (!c.seeking && c.state === 'PLAYING' && r.state === 'PLAYING' && delta > 0 && delta < 5) c.secs = (c.secs || 0) + delta;
+    if (!c.seeking) c.position = r.position || 0;
+    c.duration = r.duration || 0; c.state = r.state;
+    renderCastNotice();
+    if (!c.savedAt || Date.now() - c.savedAt > 10000) saveCastWatch(c);
     const volume = $("#castVolume");
     if (volume && r.volume !== null && r.volume !== undefined && !(casting && casting.adjustingVolume))
       volume.innerHTML = `音量 <input id="castVolumeRange" type="range" min="0" max="100" value="${r.volume}" style="vertical-align:middle" oninput="castVolume(${esc(JSON.stringify(device))},this.value)"> <span id="castVolumeValue">${r.volume}%</span>`;
-  } catch (e) {}
+  } catch (e) {
+    if (casting === c && revision === c.revision) { c.error = e.message || "无法读取电视状态"; renderCastNotice(); }
+  } finally { c.polling = false; }
 }
 function castSeekPreview(position) {
   const label = $("#castTime"); if (!label) return;
   const old = label.textContent.split(" · ")[0]; label.textContent = `${old} · ${dur(+position)} / ${dur(+$("#castSeek").max || 0)}`;
 }
 async function castSeek(device, position) {
-  if (casting) { casting.seeking = true; casting.seekTarget = +position; casting.seekDeadline = Date.now() + 5000; }
-  await castControl(device, "seek", +position);
-  setTimeout(() => castStatus(device), 800);
+  const c = casting; if (!c || c.device !== device) return;
+  c.seeking = true; c.seekTarget = +position; c.position = +position; c.seekDeadline = Date.now() + 30000;
+  renderCastNotice();
+  const ok = await castControl(device, "seek", +position);
+  if (casting !== c) return;
+  c.seekDeadline = Date.now() + 5000;
+  if (!ok) c.seeking = false;
+  else toast(`已跳转电视到 ${dur(+position) || '0:00'}`);
+  setTimeout(() => { if (casting === c) castStatus(device); }, 800);
 }
 function castVolume(device, volume) {
+  const c = casting; if (!c || c.device !== device) return;
   const value = $("#castVolumeValue"); if (value) value.textContent = Math.round(volume) + "%";
   if (casting) casting.adjustingVolume = true;
   clearTimeout(castVolumeTimer);
   castVolumeTimer = setTimeout(async () => {
+    if (casting !== c) return;
     await castControl(device, "volume", null, +volume);
-    if (casting) casting.adjustingVolume = false;
+    c.adjustingVolume = false;
   }, 150);
 }
 function finishCast() {
+  const c = casting;
+  if (c) saveCastWatch(c);
   clearInterval(castTimer); castTimer = null; clearTimeout(castVolumeTimer);
   const el = $("#watchBody video, #watchBody audio");
   if (el) {
     el.style.display = el.dataset.castDisplay || "";
     delete el.dataset.castDisplay;
     el.controls = true;
-    if (casting && isFinite(casting.position)) el.currentTime = casting.position;
+    if (c && watching && c.id === watching.id && c.part === watching.part && isFinite(c.position)) el.currentTime = c.position;
   }
   casting = null;
   const box = $("#castBox"); if (box) box.innerHTML = "";
   const overlay = $("#castOverlay"); if (overlay) { overlay.innerHTML = ""; overlay.hidden = true; }
+  renderCastNotice();
+  toast("已停止投屏，可在本机点播放");
 }
 async function castControl(device, action, position = null, volume = null) {
-  const r = await (await fetch("/api/cast/control", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({device, action, position, volume})})).json();
-  if (r.error) toast(r.error);
-  else if (action === "stop") finishCast();
+  const c = casting; if (!c || c.device !== device) return false;
+  c.revision++;
+  try {
+    const r = await castRequest(c, "/api/cast/control", {device, action, position, volume});
+    if (casting !== c || !r) return false;
+    c.revision++;
+    c.error = null;
+    if (action === "stop") finishCast();
+    else {
+      if (action === "pause") c.state = 'PAUSED_PLAYBACK';
+      if (action === "play") c.state = 'PLAYING';
+      renderCastNotice();
+    }
+    return true;
+  } catch (e) { castError(c, e); return false; }
 }
 function updateWatchStatus() {
   const el = $("#wstatus"); if (!el || !watching) return;

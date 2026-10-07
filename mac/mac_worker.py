@@ -435,9 +435,13 @@ class UsageLimit(Exception):
 
 
 def proxy_env():
+    """Use the router unless config.json explicitly selects an application proxy."""
     config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
-    proxy = config.get("proxy", "")  # Anthropic and OpenAI aren't reachable directly from here
-    return {**os.environ, **({"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy} if proxy else {})}
+    env = {k: v for k, v in os.environ.items() if k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+    proxy = (config.get("proxy") or "").strip()
+    if proxy:
+        env.update({k: proxy for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")})
+    return env
 
 
 def run_cli(cmd, text, beat, timeout=600):

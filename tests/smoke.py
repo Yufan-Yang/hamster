@@ -83,6 +83,7 @@ def jobs_list():
 
 check("page", lambda: get("/"))
 check("jobs list", jobs_list)
+check("video sort choices", lambda: [get(f"/api/jobs?sort={sort}") for sort in ("published", "added", "title", "author")])
 check("search text", lambda: get("/api/jobs?q=%E4%BC%8A%E6%9C%97"))  # 伊朗
 check("search pinyin note", lambda: get("/api/notes?q=yanan"))
 check("notes", lambda: get("/api/notes"))
@@ -112,6 +113,15 @@ check("watch page extras", lambda: (get(f"/api/points/{some_job['id']}"), get(f"
 check("play (range)", lambda: c.get(some_job["media"][0]["src"], headers={"Range": "bytes=0-99"}).status_code in (200, 206) or 1 / 0)
 check("thumb", lambda: get(f"/thumb/{some_job['id']}", code=200))
 check("save position", lambda: post(f"/api/watch/{some_job['id']}", {"part": 0, "pos": 30, "dur": 100}))
+
+
+def clear_position():
+    r = c.delete(f"/api/watch/{some_job['id']}")
+    assert r.status_code == 200 and r.get_json()["ok"], r.data
+    assert not G.q("SELECT 1 FROM watch WHERE owner=? AND job_id=?", (f"user:{user}", some_job["id"]), one=True)
+
+
+check("clear watch position", clear_position)
 check("board over HTTP refuses without token", lambda: post("/api/tasks/claim", {"worker": "x", "caps": []}, code=403))
 
 
@@ -126,11 +136,14 @@ def cast_api():
         cast.status = lambda did: {"position": 30, "duration": 100, "state": "PLAYING", "volume": 50}
         shiguang.web.CAST_URL = "http://pi.test:8088"
         assert get("/api/cast/devices")["devices"][0]["id"] == "tv"
-        got = post("/api/cast/start", {"id": some_job["id"], "part": 0, "device": "tv"})
+        got = post("/api/cast/start", {"id": some_job["id"], "part": 0, "device": "tv", "position": 42})
+        assert seen["start_position"] == 42
         assert got["name"] == "测试电视" and seen["did"] == "tv" and seen["url"].startswith("http://pi.test:8088/castplay/")
         assert seen["thumb"].startswith("http://pi.test:8088/thumb/") and seen["mime"] == ("audio/mpeg" if some_job["media"][0]["audio"] else "video/mp4")
         post("/api/cast/control", {"device": "tv", "action": "pause"})
         assert seen["control"] == ("tv", "pause", None, None)
+        post("/api/cast/control", {"device": "tv", "action": "seek", "position": 123})
+        assert seen["control"] == ("tv", "seek", 123, None)
         post("/api/cast/control", {"device": "tv", "action": "volume", "volume": 42})
         assert seen["control"] == ("tv", "volume", None, 42)
         assert get("/api/cast/status?device=tv")["position"] == 30
@@ -139,6 +152,31 @@ def cast_api():
 
 
 check("DLNA cast discovery, signed media URL and controls", cast_api)
+
+
+def cast_cache_refresh():
+    import shiguang.cast as cast
+    from unittest.mock import patch
+    expired = {"id": "tv", "name": "测试电视", "until": 0}
+    fresh = dict(expired, until=time.time() + 300)
+    def discover():
+        cast._devices["tv"] = fresh
+        return [{"id": "tv", "name": "测试电视"}]
+    with patch.object(cast, "_devices", {"tv": expired}), patch.object(cast, "_last_refresh", -float("inf")), patch.object(cast, "discover", side_effect=discover) as scan:
+        assert cast._device("tv") is fresh
+        assert cast._device("tv") is fresh
+        assert scan.call_count == 1
+        for _ in range(2):
+            try:
+                cast._device("missing")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unknown TV accepted")
+        assert scan.call_count == 1  # failed polling cannot flood the LAN with discovery
+
+
+check("DLNA retained device refresh and bounded rediscovery", cast_cache_refresh)
 
 
 def board_roundtrip():
@@ -172,7 +210,6 @@ check("forgiving note match", lambda: G.note_marks({"text": "Yannan San 结婚",
 check("place names", lambda: G.place_name(31.23, 121.47) == "上海" or 1 / 0)
 
 # ---- 书架: a small EPUB (with things that must not get through) and a GBK TXT, imported, read, searched, removed
-import io  # noqa: E402
 import json  # noqa: E402
 import zipfile  # noqa: E402
 
@@ -592,6 +629,9 @@ check("subtitles translated: other languages, not English", lambda: (
     and shiguang.tasks.translatable(["/x/v.ja.srt", "/x/v.en.srt"], "v") is None
     and shiguang.tasks.translatable(["/x/v.ko.srt", "/x/v.zh.srt"], "v") is None
     and shiguang.tasks.translatable(["/x/v.srt"], "v") is None) or 1/0)
+
+import runpy  # noqa: E402
+runpy.run_path(str(APP / "tests" / "classification_tags.py"))["run"](check)
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")
