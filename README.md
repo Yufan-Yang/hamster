@@ -479,6 +479,7 @@ shiguang/
   channels.py         追更
   llm.py              DeepSeek 调用、价格、分类、总结、标签、搜索理解
   search.py           字幕索引、OCR、CLIP、随记搜索、大白话搜索、查重
+  cast.py             DLNA 电视发现、投送和播放控制；AirPlay 由 Safari 原生播放器处理
   ask.py              问拾光
   board.py            任务板：发布、招领、心跳、重试、Pi 的工人
   tasks.py            每种任务做什么（@board.task 登记）
@@ -514,6 +515,8 @@ deploy.sh             部署脚本
 6. 如果 `mac/mac_worker.py` 改了，顺便更新 Mac 端。
 
 **配置**：Pi 上的 `/etc/grabber.env`，模板见 `grabber.env.example`（密钥不进仓库）。
+
+**投屏**：播放页在 Safari 中有 AirPlay 按钮；「投屏到电视」搜索并控制同一局域网里的 DLNA 电视（包括开启了 DLNA 投屏的华为智慧屏）。电视直接向 Pi 取带签名的媒体地址。平时不用额外配置；如果手机通过 VPN 或外网地址打开页面、电视却在家里，给 `/etc/grabber.env` 设置 `CAST_URL=http://pi-gateway.local:8088` 这类电视能访问的 Pi 局域网地址。
 
 **依赖**（基础之外）：`faster-whisper`、`onnxruntime`、`onnx`、`tokenizers`、`rapidocr_onnxruntime`、`pypinyin`、`opencc-python-reimplemented`、`pymupdf`（PDF）、`mobi`（MOBI/AZW3）。系统里要有 `ffmpeg`、`aria2`、`chromium`、`deno`、`smartmontools`。
 

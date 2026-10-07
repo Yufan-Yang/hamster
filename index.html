@@ -1666,10 +1666,13 @@ function openWatch(id, part = 0, t = 0) {
     <div class="wmeta">${meta.map(x => `<span>${x}</span>`).join("")}</div>
     ${parts}
     <div class="actions">
+      ${m && airplayAvailable() ? `<button onclick="showAirPlay()">AirPlay</button>` : ""}
+      ${m ? `<button onclick="findCast(${id},${part})">投屏到电视</button>` : ""}
       ${active ? `<button onclick="act(${id},'cancel')">取消下载</button>` : ""}
       ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
       ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
     </div>
+    <div id="castBox"></div>
     ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
     <div id="similarBox"></div>
     <div id="chapters"></div>
@@ -1827,7 +1830,45 @@ function videoTag(j, m, t = 0) {
   const bi = m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="双语" srclang="zh" default>` : "";
   const tracks = bi + m.subs.map((label, k) =>
     `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}"${k === 0 && !bi ? " default" : ""}>`).join("");
-  return `<video controls autoplay playsinline preload="metadata" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
+  return `<video controls autoplay playsinline preload="metadata" x-webkit-airplay="allow" ${j.thumb ? `poster="/thumb/${j.id}"` : ""} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}">${tracks}</video>`;
+}
+function airplayAvailable() {
+  const p = window.HTMLMediaElement && HTMLMediaElement.prototype;
+  return !!(p && typeof p.webkitShowPlaybackTargetPicker === "function");
+}
+function showAirPlay() {
+  const el = $("#watchBody video, #watchBody audio");
+  if (!el || !airplayAvailable()) return toast("请用 Safari 播放后，从播放器里选择 AirPlay");
+  try { el.webkitShowPlaybackTargetPicker(); } catch (e) { toast("没有找到可用的 AirPlay 设备"); }
+}
+async function findCast(id, part) {
+  const box = $("#castBox"); if (!box) return;
+  box.innerHTML = `<p class="hint">正在寻找同一局域网里的电视…</p>`;
+  try {
+    const r = await (await fetch("/api/cast/devices")).json();
+    box.innerHTML = r.devices && r.devices.length
+      ? `<div class="answer"><b>选择电视</b><div class="actions">${r.devices.map(d =>
+          `<button onclick="startCast(${id},${part},${esc(JSON.stringify(d.id))})">${esc(d.name)}</button>`).join("")}</div></div>`
+      : `<p class="hint">没找到 DLNA 电视。确认电视和树莓派在同一局域网，并在电视设置中打开投屏。</p>`;
+  } catch (e) { box.innerHTML = `<p class="err">寻找电视失败</p>`; }
+}
+async function startCast(id, part, device) {
+  const r = await (await fetch("/api/cast/start", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id, part, device})})).json();
+  if (r.error) return toast(r.error);
+  const el = $("#watchBody video, #watchBody audio"); if (el) el.pause();
+  const box = $("#castBox");
+  if (box) box.innerHTML = `<div class="answer"><b>正在投到 ${esc(r.name)}</b><div class="actions">
+    <button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
+    <button onclick="castControl(${esc(JSON.stringify(device))},'pause')">暂停</button>
+    <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div></div>`;
+  toast(`正在投到 ${r.name}`);
+}
+async function castControl(device, action) {
+  const r = await (await fetch("/api/cast/control", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({device, action})})).json();
+  if (r.error) toast(r.error);
+  else if (action === "stop") { const box = $("#castBox"); if (box) box.innerHTML = ""; }
 }
 function updateWatchStatus() {
   const el = $("#wstatus"); if (!el || !watching) return;

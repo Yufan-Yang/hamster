@@ -34,6 +34,8 @@ PORT = int(os.environ.get("PORT", "8088"))
 # Access from outside the home arrives through a reverse tunnel from the VPS to this loopback-only port
 # (nothing on the LAN can reach it), so requests on it are known to be from the internet.
 EXTERNAL_PORT = int(os.environ.get("EXTERNAL_PORT", "8090"))
+# Address DLNA televisions use to fetch /play URLs.  Empty means the address opened in the browser.
+CAST_URL = os.environ.get("CAST_URL", "").rstrip("/")
 ADMIN_PASSWORD = os.environ.get("GRABBER_PASSWORD", "")  # password of the "admin" account, which sees everything
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "").strip()

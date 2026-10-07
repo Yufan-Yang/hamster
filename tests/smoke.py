@@ -113,6 +113,28 @@ check("save position", lambda: post(f"/api/watch/{some_job['id']}", {"part": 0, 
 check("board over HTTP refuses without token", lambda: post("/api/tasks/claim", {"worker": "x", "caps": []}, code=403))
 
 
+def cast_api():
+    import shiguang.cast as cast
+    old_discover, old_start, old_control, old_url = cast.discover, cast.start, cast.control, shiguang.web.CAST_URL
+    seen = {}
+    try:
+        cast.discover = lambda: [{"id": "tv", "name": "测试电视"}]
+        cast.start = lambda did, url, title, thumb, mime: seen.update(did=did, url=url, title=title, thumb=thumb, mime=mime) or "测试电视"
+        cast.control = lambda did, action, pos: seen.update(control=(did, action, pos))
+        shiguang.web.CAST_URL = "http://pi.test:8088"
+        assert get("/api/cast/devices")["devices"][0]["id"] == "tv"
+        got = post("/api/cast/start", {"id": some_job["id"], "part": 0, "device": "tv"})
+        assert got["name"] == "测试电视" and seen["did"] == "tv" and seen["url"].startswith("http://pi.test:8088/play/")
+        assert seen["thumb"].startswith("http://pi.test:8088/thumb/") and seen["mime"] == ("audio/mpeg" if some_job["media"][0]["audio"] else "video/mp4")
+        post("/api/cast/control", {"device": "tv", "action": "pause"})
+        assert seen["control"] == ("tv", "pause", None)
+    finally:
+        cast.discover, cast.start, cast.control, shiguang.web.CAST_URL = old_discover, old_start, old_control, old_url
+
+
+check("DLNA cast discovery, signed media URL and controls", cast_api)
+
+
 def board_roundtrip():
     tok = {"X-Compute-Token": "test-token"}
     tid = G.publish("cover", f"job:{some_job['id']}", 999, force=True)
@@ -451,6 +473,35 @@ def sub_filters():
 
 
 check("追更 filters: keywords, dates, lengths in and / or groups", sub_filters)
+
+
+def bilibili_412_restarts_session():
+    ch = shiguang.channels
+    class Reply:
+        headers = {"content-type": "application/json"}
+        def __init__(self, body): self.body = body
+        def json(self): return self.body
+    class Session:
+        wbi_key = "a" * 32
+        def __init__(self, blocked): self.blocked = blocked
+        def get(self, url, params=None, timeout=None):
+            if url.endswith("/card"):
+                return Reply({"code": 0, "data": {"card": {"name": "UP", "face": ""}}})
+            if self.blocked:
+                return Reply({"code": -412, "message": "risk control"})
+            return Reply({"code": 0, "data": {"page": {"count": 1}, "list": {"vlist": [
+                {"bvid": "BVtest", "title": "新视频", "created": 1700000000, "length": "1:02"}]}}})
+    sessions = iter([Session(True), Session(False)])
+    old_session, old_sleep = ch.bili_session, ch.time.sleep
+    try:
+        ch.bili_session, ch.time.sleep = lambda mid: next(sessions), lambda sec: None
+        got = ch.list_bilibili("1", 1)
+        assert got["entries"][0]["url"].endswith("BVtest") and got["entries"][0]["duration"] == 62
+    finally:
+        ch.bili_session, ch.time.sleep = old_session, old_sleep
+
+
+check("B站追更 412 starts a new signed session", bilibili_412_restarts_session)
 check("subtitles translated: other languages, not English", lambda: (
     shiguang.tasks.translatable(["/x/v.ja.srt"], "v") == "/x/v.ja.srt"
     and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None

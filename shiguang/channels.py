@@ -1,5 +1,6 @@
 """Following uploaders (追更): listing their videos, weekly checks."""
 import hashlib
+import http.cookiejar
 import json
 import os
 import re
@@ -138,15 +139,35 @@ MIXIN_KEY = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43
              57, 62, 11, 36, 20, 34, 44, 52]
 
 
-def bili_session():
-    """A B站 web session that passes its risk control without logging in: browser cookies (buvid3/4)
-    and the WBI key that signs space API requests."""
+def bili_session(mid):
+    """A B站 space session with real browser cookies and a fresh WBI key.
+
+    A logged-in cookies.txt is optional, but must be used here too: recent B站
+    risk control rejects the listing API when it sees only SESSDATA, or only a
+    newly invented buvid pair.
+    """
     s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Referer": "https://space.bilibili.com/"})
+    s.headers.update({"User-Agent": UA, "Referer": f"https://space.bilibili.com/{mid}/upload/video",
+                      "Accept": "application/json, text/plain, */*", "Accept-Language": "zh-CN,zh;q=0.9"})
+    if COOKIES.exists():
+        try:
+            jar = http.cookiejar.MozillaCookieJar(str(COOKIES))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            for c in jar:
+                if c.domain.lstrip(".").endswith("bilibili.com"):
+                    s.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
+        except (OSError, http.cookiejar.LoadError):
+            pass
+    # Warm the same space page first.  This supplies the browser-side cookies
+    # and makes each retry a genuinely new browser session, rather than six
+    # copies of a request B站 already decided to reject.
+    s.get(f"https://space.bilibili.com/{mid}/upload/video", timeout=20)
     s.get("https://www.bilibili.com/", timeout=15)
     spi = s.get("https://api.bilibili.com/x/frontend/finger/spi", timeout=15).json()["data"]
-    s.cookies.set("buvid3", spi["b_3"], domain=".bilibili.com")
-    s.cookies.set("buvid4", spi["b_4"], domain=".bilibili.com")
+    if not any(c.name == "buvid3" for c in s.cookies):
+        s.cookies.set("buvid3", spi["b_3"], domain=".bilibili.com")
+    if not any(c.name == "buvid4" for c in s.cookies):
+        s.cookies.set("buvid4", spi["b_4"], domain=".bilibili.com")
     img = s.get("https://api.bilibili.com/x/web-interface/nav", timeout=15).json()["data"]["wbi_img"]
     raw = "".join(u.rsplit("/", 1)[1].split(".")[0] for u in (img["img_url"], img["sub_url"]))
     s.wbi_key = "".join(raw[i] for i in MIXIN_KEY)[:32]
@@ -160,21 +181,27 @@ def bili_signed(s, params):
 
 
 def list_bilibili(mid, limit):
-    s = bili_session()
+    s = bili_session(mid)
     card = s.get("https://api.bilibili.com/x/web-interface/card", params={"mid": mid}, timeout=15).json()["data"]
     out, total, pn = [], 0, 1
     while limit is None or len(out) < limit:
-        params = {"mid": mid, "ps": 30, "pn": pn, "order": "pubdate", "platform": "web", "web_location": 1550101,
+        params = {"mid": mid, "ps": 30, "pn": pn, "order": "pubdate", "order_avoided": "true", "platform": "web", "web_location": 1550101,
                   # canvas/WebGL fingerprint fields the web page sends; without them the API answers -352
                   "dm_img_list": "[]", "dm_img_str": "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ",
                   "dm_cover_img_str": "QU5HTEUgKEludGVsLCBJbnRlbChSKSBIRCBHcmFwaGljcyBEaXJlY3QzRDExIHZzXzVfMCBwc181XzApR29vZ2xlIEluYy4gKEludGVsKQ",
                   "dm_img_inter": '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}'}
-        for attempt in range(6):  # B站 answers about half of these with HTTP 412 (risk control); retrying gets through
+        for attempt in range(6):
+            if attempt:
+                # 412 is bound to the fingerprint/session.  Reuse would only
+                # repeat it, so start again and re-fetch the rotating WBI key.
+                s = bili_session(mid)
             r = s.get("https://api.bilibili.com/x/space/wbi/arc/search", params=bili_signed(s, params), timeout=15)
             body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"code": r.status_code}
             if body.get("code") == 0:
                 break
-            time.sleep(3 + attempt * 4)
+            if body.get("code") not in (-412, -352, 412) and r.status_code < 500:
+                raise RuntimeError(f"B站列表获取失败（{body.get('code')} {body.get('message') or ''}）")
+            time.sleep(min(30, 2 ** (attempt + 1)))
         else:
             raise RuntimeError(f"B站列表获取失败（{body.get('code')} {body.get('message') or ''}）")
         data = body["data"]

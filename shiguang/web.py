@@ -28,7 +28,7 @@ from flask import session
 from pathlib import Path
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
-from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
+from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, CAST_URL, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
 
 
 DEVICE_COOKIE = "grabber_device"
@@ -1710,6 +1710,47 @@ def play(jid, n):
     return "", 415
 
 
+@app.get("/api/cast/devices")
+def cast_devices():
+    """DLNA discovery runs on the Pi; a web page has no access to SSDP multicast."""
+    return jsonify(devices=cast.discover())
+
+
+@app.post("/api/cast/start")
+def cast_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        jid, n = int(data.get("id")), int(data.get("part", 0))
+    except (TypeError, ValueError):
+        return jsonify(error="视频不对"), 400
+    media = library.job_media(jid, n)
+    row = q("SELECT title FROM jobs WHERE id=?", (jid,), one=True)
+    if not media or not row:
+        return jsonify(error="这个视频不能投屏"), 404
+    base = CAST_URL or request.host_url.rstrip("/")
+    if not re.match(r"^https?://", base):
+        return jsonify(error="CAST_URL 要写成 http://地址:端口"), 500
+    token = library.media_token(jid, n)
+    media_url = f"{base}/play/{jid}/{n}?t={token}"
+    thumb_url = f"{base}/thumb/{jid}?t={library.media_token(jid, 0)}"
+    mime = "audio/mpeg" if Path(media["path"]).suffix.lower() in AUDIO_EXT else "video/mp4"
+    try:
+        name = cast.start(str(data.get("device", "")), media_url, row["title"] or Path(media["path"]).stem, thumb_url, mime)
+    except (ValueError, RuntimeError) as e:
+        return jsonify(error=str(e)), 502
+    return jsonify(ok=True, name=name)
+
+
+@app.post("/api/cast/control")
+def cast_control():
+    data = request.get_json(silent=True) or {}
+    try:
+        cast.control(str(data.get("device", "")), str(data.get("action", "")), data.get("position"))
+    except (ValueError, RuntimeError) as e:
+        return jsonify(error=str(e)), 502
+    return jsonify(ok=True)
+
+
 @app.get("/subs/<int:jid>/<int:n>/<int:k>")
 def subs(jid, n, k):
     m = library.job_media(jid, n)
@@ -1766,4 +1807,4 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, books, channels, core, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
+from . import ask, board, books, cast, channels, core, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
