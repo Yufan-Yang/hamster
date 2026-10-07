@@ -180,6 +180,17 @@
   .stage.audio img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .55; }
   .stage.audio .note-big { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; color: #555; }
   .stage.audio audio { position: absolute; left: 12px; bottom: 12px; width: calc(100% - 24px); height: 54px; z-index: 1; display: block; }
+  .castOverlay { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 4; color: #fff;
+                 background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.45); border-radius: 4px;
+                 padding: 8px 12px; text-shadow: 0 1px 2px #000; }
+  .castOverlay[hidden] { display: none; }
+  .castHead { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .castHead span { color: rgba(255,255,255,.82); font-variant-numeric: tabular-nums; }
+  .castOverlay input[type=range] { accent-color: var(--yellow); }
+  .castActions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .castActions button { border: 1px solid rgba(255,255,255,.7); background: rgba(0,0,0,.4); color: #fff; padding: 3px 9px; }
+  .castVolume { font-size: 13px; margin: 2px 0 4px; }
+  .castVolume input { width: min(180px, 42vw); }
   .warn { margin-top: 14px; border: 2px solid var(--ink); background: var(--yellow); color: #1d1b26; padding: 6px 10px; }
   .wtitle { font-size: 24px; line-height: 1.4; margin: 20px 0 8px; overflow-wrap: anywhere; font-weight: normal; }
   .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
@@ -1672,9 +1683,9 @@ function openWatch(id, part = 0, t = 0) {
   if (m) {
     // Audio: cover (or a note) fills the frame, controls sit along its bottom edge like a video player
     stage = m.audio
-      ? `<div class="stage audio">${j.thumb ? `<img src="/thumb/${id}" alt="">` : `<div class="note-big">♪</div>`}
-           <audio controls autoplay src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio></div>`
-      : `<div class="stage" id="stage">${videoTag(j, m, t)}</div>`;
+      ? `<div class="stage audio" id="stage">${j.thumb ? `<img src="/thumb/${id}" alt="">` : `<div class="note-big">♪</div>`}
+           <audio controls autoplay src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio><div class="castOverlay" id="castOverlay"></div></div>`
+      : `<div class="stage" id="stage">${videoTag(j, m, t)}<div class="castOverlay" id="castOverlay"></div></div>`;
     if (!m.audio && ["vp9", "av1"].includes(m.vcodec) && /iPhone|iPad/.test(navigator.userAgent))
       stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用电脑或 Plex 看。</div>`;
   } else {
@@ -1900,20 +1911,22 @@ async function startCast(id, part, device) {
   const r = await (await fetch("/api/cast/start", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({id, part, device, position})})).json();
   if (r.error) return toast(r.error);
-  if (el) { el.pause(); el.controls = false; el.dataset.castDisplay = el.style.display; el.style.display = "none"; }
+  if (el) { el.pause(); el.controls = false; }
   casting = {device, position};
   showCastControls(device, r.name);
   toast(`正在投到 ${r.name}`);
 }
 function showCastControls(device, name) {
-  const box = $("#castBox"); if (!box) return;
+  const box = $("#castBox"), overlay = $("#castOverlay"); if (!overlay) return;
   clearInterval(castTimer);
-  box.innerHTML = `<div class="answer"><b>正在投到 ${esc(name)}</b> <span class="sub" id="castTime">连接中…</span>
+  if (box) box.innerHTML = "";
+  overlay.innerHTML = `<div class="castHead"><b>投到 ${esc(name)}</b> <span id="castTime">连接中…</span></div>
     <input id="castSeek" type="range" min="0" max="1" value="0" step="1" style="width:100%;margin:10px 0" oninput="castSeekPreview(this.value)" onchange="castSeek(${esc(JSON.stringify(device))},this.value)">
-    <div class="sub" id="castVolume"></div>
-    <div class="actions"><button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
+    <div class="castVolume" id="castVolume"></div>
+    <div class="castActions"><button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'pause')">暂停</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div></div>`;
+  overlay.hidden = false;
   castStatus(device); castTimer = setInterval(() => castStatus(device), 2000);
 }
 async function castStatus(device) {
@@ -1966,6 +1979,7 @@ function finishCast() {
   }
   casting = null;
   const box = $("#castBox"); if (box) box.innerHTML = "";
+  const overlay = $("#castOverlay"); if (overlay) { overlay.innerHTML = ""; overlay.hidden = true; }
 }
 async function castControl(device, action, position = null, volume = null) {
   const r = await (await fetch("/api/cast/control", {method: "POST", headers: {"Content-Type": "application/json"},

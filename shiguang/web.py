@@ -1866,7 +1866,7 @@ def cast_start():
 def cast_control():
     data = request.get_json(silent=True) or {}
     try:
-        cast.control(str(data.get("device", "")), str(data.get("action", ""),), data.get("position"), data.get("volume"))
+        cast.control(str(data.get("device", "")), str(data.get("action", "")), data.get("position"), data.get("volume"))
     except (ValueError, RuntimeError) as e:
         return jsonify(error=str(e)), 502
     return jsonify(ok=True)
