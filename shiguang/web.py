@@ -198,7 +198,7 @@ def identify():
                            disk={"free": 0, "total": 0}, features={}, privacy={})
         if request.path == "/api/account":
             return jsonify(user=None, devices=[])
-        if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/subs/", "/thumb/")):
+        if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/castplay/", "/subs/", "/thumb/")):
             return jsonify(error="login required", login_required=True), 401
     g.device_label = device_label(request.headers.get("User-Agent"))
     if request.path.startswith("/api/notes") and request.method == "POST":
@@ -1710,6 +1710,16 @@ def play(jid, n):
     return "", 415
 
 
+@app.get("/castplay/<int:jid>/<int:n>/<path:name>")
+def cast_play(jid, n, name):
+    """A DLNA-friendly alias of /play: some TVs reject a media URL without a file extension."""
+    out = play(jid, n)
+    if isinstance(out, Response):
+        out.headers["transferMode.dlna.org"] = "Streaming"
+        out.headers["contentFeatures.dlna.org"] = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+    return out
+
+
 @app.get("/api/cast/devices")
 def cast_devices():
     """DLNA discovery runs on the Pi; a web page has no access to SSDP multicast."""
@@ -1731,7 +1741,7 @@ def cast_start():
     if not re.match(r"^https?://", base):
         return jsonify(error="CAST_URL 要写成 http://地址:端口"), 500
     token = library.media_token(jid, n)
-    media_url = f"{base}/play/{jid}/{n}?t={token}"
+    media_url = f"{base}/castplay/{jid}/{n}/{urllib.parse.quote(Path(media['path']).stem[:120])}.mp4?t={token}"
     thumb_url = f"{base}/thumb/{jid}?t={library.media_token(jid, 0)}"
     mime = "audio/mpeg" if Path(media["path"]).suffix.lower() in AUDIO_EXT else "video/mp4"
     try:
@@ -1749,6 +1759,14 @@ def cast_control():
     except (ValueError, RuntimeError) as e:
         return jsonify(error=str(e)), 502
     return jsonify(ok=True)
+
+
+@app.get("/api/cast/status")
+def cast_status():
+    try:
+        return jsonify(cast.status(str(request.args.get("device", ""))))
+    except (ValueError, RuntimeError) as e:
+        return jsonify(error=str(e)), 502
 
 
 @app.get("/subs/<int:jid>/<int:n>/<int:k>")

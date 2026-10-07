@@ -122,3 +122,19 @@ def control(did, action, position=None):
         _soap(did, "Seek", Unit="REL_TIME", Target=f"{h:02}:{m:02}:{s:02}")
     else:
         raise ValueError("不认识这个投屏操作")
+
+
+def _clock(value):
+    try:
+        h, m, s = (float(x) for x in value.split(":"))
+        return int(h * 3600 + m * 60 + s)
+    except (AttributeError, ValueError):
+        return 0
+
+
+def status(did):
+    """The renderer's own clock, used for the seek bar rather than the phone's stopped player."""
+    pos = ET.fromstring(_soap(did, "GetPositionInfo"))
+    info = ET.fromstring(_soap(did, "GetTransportInfo"))
+    return {"position": _clock(_tag(pos, "RelTime")), "duration": _clock(_tag(pos, "TrackDuration")),
+            "state": _tag(info, "CurrentTransportState")}

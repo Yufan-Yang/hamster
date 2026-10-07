@@ -823,7 +823,7 @@ const STAGES = {"starting": "准备中", "downloading video": "下载中", "down
                 "classifying": "AI 分类", "transcribing speech": "语音转文字", "summarizing": "AI 总结", "filing into library": "归档"};
 const ACTIVE = ["queued", "downloading", "processing"];
 
-let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null;
+let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null, castTimer = null;
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
 
 // Close a sheet / the watch page with a short exit animation instead of vanishing
@@ -1815,6 +1815,7 @@ function seekTo(id, part, t) {
 /* ---------- player ----------
    Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
 function stopMedia() {
+  clearInterval(castTimer); castTimer = null;
   saveWatch();
   document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
 }
@@ -1857,18 +1858,37 @@ async function startCast(id, part, device) {
     body: JSON.stringify({id, part, device})})).json();
   if (r.error) return toast(r.error);
   const el = $("#watchBody video, #watchBody audio"); if (el) el.pause();
-  const box = $("#castBox");
-  if (box) box.innerHTML = `<div class="answer"><b>正在投到 ${esc(r.name)}</b><div class="actions">
-    <button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
+  showCastControls(device, r.name);
+  toast(`正在投到 ${r.name}`);
+}
+function showCastControls(device, name) {
+  const box = $("#castBox"); if (!box) return;
+  clearInterval(castTimer);
+  box.innerHTML = `<div class="answer"><b>正在投到 ${esc(name)}</b> <span class="sub" id="castTime">连接中…</span>
+    <input id="castSeek" type="range" min="0" max="1" value="0" step="1" style="width:100%;margin:10px 0" onchange="castSeek(${esc(JSON.stringify(device))},this.value)">
+    <div class="actions"><button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'pause')">暂停</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div></div>`;
-  toast(`正在投到 ${r.name}`);
+  castStatus(device); castTimer = setInterval(() => castStatus(device), 2000);
+}
+async function castStatus(device) {
+  try {
+    const r = await (await fetch(`/api/cast/status?device=${encodeURIComponent(device)}`)).json();
+    if (r.error) { clearInterval(castTimer); return toast(r.error); }
+    const seek = $("#castSeek"), label = $("#castTime");
+    if (seek && r.duration) { seek.max = r.duration; seek.value = Math.min(r.position || 0, r.duration); }
+    if (label) label.textContent = `${r.state === 'PLAYING' ? '播放中' : r.state === 'PAUSED_PLAYBACK' ? '已暂停' : r.state || '投屏中'} · ${dur(r.position || 0)} / ${dur(r.duration || 0)}`;
+  } catch (e) {}
+}
+async function castSeek(device, position) {
+  await castControl(device, "seek", +position);
+  castStatus(device);
 }
 async function castControl(device, action) {
   const r = await (await fetch("/api/cast/control", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({device, action})})).json();
   if (r.error) toast(r.error);
-  else if (action === "stop") { const box = $("#castBox"); if (box) box.innerHTML = ""; }
+  else if (action === "stop") { clearInterval(castTimer); const box = $("#castBox"); if (box) box.innerHTML = ""; }
 }
 function updateWatchStatus() {
   const el = $("#wstatus"); if (!el || !watching) return;
