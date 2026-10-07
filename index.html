@@ -1152,7 +1152,7 @@ async function fedSave(clear) {
   fedClose(); lastBody = ""; refresh();
 }
 function subRow(s) {
-  const status = s.pending ? "正在获取视频列表…"
+  const status = s.error ? `获取失败 · 下次 ${until(s.next)}` : s.pending ? "正在获取视频列表…"
     : `上次检查 ${ago(s.checked)} · 下次 ${until(s.next)}`;
   const counts = [`已下载 ${s.done}`, s.active ? `下载中/排队 ${s.active}` : "", s.failed ? `失败 ${s.failed}` : "",
                   s.total ? `UP 主共 ${s.total} 个` : ""].filter(Boolean).join(" · ");
@@ -1164,7 +1164,7 @@ function subRow(s) {
       <div class="sub">${esc(counts)}${s.owner_label ? " · @" + esc(s.owner_label) : ""}</div>
       <div class="sub">${esc(status)}${partial && !s.pending ? ` · 先缓存了最新 ${s.backfill} 个${s.filter ? "符合条件的" : ""}` : ""}</div>
       ${s.filter ? `<div class="sub flt"><b>筛选</b> 只缓存${esc(fltText(s.filter))}的视频</div>` : ""}
-      ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}</div>` : ""}
+      ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}${s.platform === "bilibili" && state.admin ? ` · <button class="link" onclick="chooseBiliCookies()">更新 B站登录状态</button>` : ""}</div>` : ""}
       <div class="acts">
         <button class="link" onclick="setChip('sub:${s.id}')">看视频</button>
         <button class="link" onclick="subAct(${s.id}, 'refresh')">立即检查</button>
@@ -1249,6 +1249,20 @@ async function subAct(id, action) {
   toast(r.error || {refresh: "马上检查新视频", all: "开始缓存全部视频", delete: "已取消追更"}[action]);
   if (action === "delete" && chip === "sub:" + id) chip = "subs";
   lastBody = ""; refresh();
+}
+async function chooseBiliCookies() {
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = ".txt,text/plain";
+  input.onchange = async () => {
+    if (!input.files[0]) return;
+    const form = new FormData(); form.append("cookies", input.files[0]);
+    const r = await fetch("/api/bilibili/cookies", {method: "POST", body: form});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(j.error || "登录状态没有更新"); return; }
+    toast("B站登录状态已更新，正在重新获取追更列表");
+    $("#subs").dataset.html = ""; refresh();
+  };
+  input.click();
 }
 
 /* ---------- 随记: everyday notes ---------- */

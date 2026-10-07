@@ -139,6 +139,23 @@ MIXIN_KEY = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43
              57, 62, 11, 36, 20, 34, 44, 52]
 
 
+def bili_cookie_state():
+    """Whether the shared cookie file has the login cookies a B站 listing needs.
+
+    Cookie values deliberately never leave the server. This is only used to
+    tell the administrator why a listing is being rejected.
+    """
+    if not COOKIES.exists():
+        return "missing"
+    try:
+        jar = http.cookiejar.MozillaCookieJar(str(COOKIES))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        names = {c.name for c in jar if c.domain.lstrip(".").endswith("bilibili.com")}
+    except (OSError, http.cookiejar.LoadError):
+        return "invalid"
+    return "ready" if {"SESSDATA", "bili_jct", "DedeUserID"} <= names else "incomplete"
+
+
 def bili_session(mid):
     """A B站 space session with real browser cookies and a fresh WBI key.
 

@@ -2,6 +2,7 @@
 """Smoke test on a copy of the real database: every page API answers, search and the task board work.
 Run on the Pi before deploying:  sudo -u grabber /opt/grabber/venv/bin/python tests/smoke.py [app dir]
 It copies the database to a temp dir (the real one isn't touched) and never starts downloads."""
+import io
 import os
 import shutil
 import sqlite3
@@ -504,6 +505,26 @@ def bilibili_412_restarts_session():
 
 
 check("B站追更 412 starts a new signed session", bilibili_412_restarts_session)
+
+
+def bilibili_cookie_upload():
+    G.q("UPDATE users SET admin=1 WHERE name=?", (user,))
+    sid, _ = shiguang.channels.add_sub("https://space.bilibili.com/9988776655", f"user:{user}")
+    G.q("UPDATE subs SET checked=?, error=? WHERE id=?", (time.time(), "B站列表获取失败（-352 风控校验失败）", sid))
+    cookie = (b"# Netscape HTTP Cookie File\n"
+              b".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tSESSDATA\tx\n"
+              b".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tbili_jct\ty\n"
+              b".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tDedeUserID\t1\n")
+    r = c.post("/api/bilibili/cookies", data={"cookies": (io.BytesIO(cookie), "cookies.txt")},
+               content_type="multipart/form-data")
+    assert r.status_code == 200, r.data
+    assert shiguang.channels.bili_cookie_state() == "ready"
+    row = G.q("SELECT checked, error FROM subs WHERE id=?", (sid,), one=True)
+    assert row["checked"] is None and not row["error"], dict(row)
+    G.q("DELETE FROM subs WHERE id=?", (sid,))
+
+
+check("B站 cookies upload validates and reschedules follows", bilibili_cookie_upload)
 check("subtitles translated: other languages, not English", lambda: (
     shiguang.tasks.translatable(["/x/v.ja.srt"], "v") == "/x/v.ja.srt"
     and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None

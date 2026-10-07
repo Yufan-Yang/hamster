@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import hmac
 import html
+import http.cookiejar
 import ipaddress
 import json
 import os
@@ -829,7 +830,8 @@ def jobs():
     return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
                    features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
-                   subs=subs_list(), sub_interval=channels.SUB_INTERVAL, more=more,
+                   subs=subs_list(), sub_interval=channels.SUB_INTERVAL,
+                   bili_cookie=channels.bili_cookie_state() if g.admin else None, more=more,
                    notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
                    books=q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
                    # ... and books: by title / author and by what's written in them
@@ -895,12 +897,55 @@ def subs_list():
         c = counts.get(f"sub:{r['id']}", {})
         out.append({"id": r["id"], "platform": r["platform"], "name": r["name"], "url": r["url"],
                     "avatar": bool(r["avatar"]), "total": r["total"], "backfill": r["backfill"],
-                    "checked": r["checked"], "error": r["error"], "pending": r["checked"] is None or bool(r["everything"]),
+                    # `everything` stays set after a failed full backfill so it
+                    # can resume later. It does not mean a request is still in
+                    # flight; treating it as one hid the useful error message.
+                    "checked": r["checked"], "error": r["error"], "pending": r["checked"] is None,
                     "filter": json.loads(r["filter"]) if r["filter"] else None,
                     "done": c.get("done", 0), "active": sum(c.get(k, 0) for k in ("queued", "downloading", "processing", "linked")),
                     "failed": c.get("failed", 0), "next": (r["checked"] or time.time()) + (channels.SUB_RETRY if r["error"] else channels.SUB_INTERVAL),
                     **({"owner_label": owner_label(r["owner"])} if g.admin else {})})
     return out
+
+
+@app.post("/api/bilibili/cookies")
+def upload_bilibili_cookies():
+    """Install a Netscape cookies.txt exported from the administrator's B站 browser."""
+    if not g.admin:
+        return jsonify(error="只有管理员能更新 B站登录状态"), 403
+    upload = request.files.get("cookies")
+    if not upload or not upload.filename:
+        return jsonify(error="请选择导出的 cookies.txt"), 400
+    raw = upload.read((1 << 20) + 1)
+    if len(raw) > 1 << 20:
+        return jsonify(error="cookies.txt 太大了"), 400
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return jsonify(error="cookies.txt 必须是 UTF-8 文本"), 400
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=STATE, prefix="cookies-", delete=False) as tmp:
+            tmp.write(text)
+            tmp_name = tmp.name
+        jar = http.cookiejar.MozillaCookieJar(tmp_name)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        names = {c.name for c in jar if c.domain.lstrip(".").endswith("bilibili.com")}
+        if not {"SESSDATA", "bili_jct", "DedeUserID"} <= names:
+            return jsonify(error="这不是完整的 B站登录 Cookie；请重新导出包含 SESSDATA、bili_jct 和 DedeUserID 的 cookies.txt"), 400
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, STATE / "cookies.txt")
+        tmp_name = None
+    except (OSError, http.cookiejar.LoadError):
+        return jsonify(error="cookies.txt 格式不对，请用 Netscape 格式重新导出"), 400
+    finally:
+        if tmp_name:
+            Path(tmp_name).unlink(missing_ok=True)
+    # A fresh session is made for every listing; clear failures so the worker
+    # picks all B站 subscriptions up on its next pass.
+    q("UPDATE subs SET checked=NULL, error='' WHERE platform='bilibili'")
+    return jsonify(ok=True)
 
 
 def sub_visible(sid):
