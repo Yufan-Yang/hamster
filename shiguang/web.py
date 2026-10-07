@@ -994,7 +994,17 @@ def bilibili_login_qr_poll(login):
         if body.get("code") != 0:
             raise RuntimeError(body.get("message") or "B站没有返回登录状态")
         if status == 0:
-            channels.save_bili_cookies(item["client"].cookies)
+            # B站 has used both Set-Cookie and a cross-domain URL with the
+            # same cookies in its query string. Keep the latter too: requests
+            # follows that redirect, so otherwise the one useful response can
+            # be lost after a successful scan.
+            cookies = item["client"].cookies.copy()
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(data.get("url") or "").query)
+            expires = query.get("Expires", [None])[0]
+            for name in channels.BILI_LOGIN_COOKIES | {"DedeUserID__ckMd5", "sid"}:
+                if value := query.get(name, [None])[0]:
+                    cookies.set(name, value, domain=".bilibili.com", path="/", expires=int(expires) if str(expires).isdigit() else None)
+            channels.save_bili_cookies(cookies)
             BILI_QR_LOGINS.pop(login, None)
             q("UPDATE subs SET checked=NULL, error='' WHERE platform='bilibili'")
             return jsonify(status="done")

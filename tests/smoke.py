@@ -546,9 +546,8 @@ def bilibili_qr_login():
             if url.endswith("/generate"):
                 return Reply({"code": 0, "data": {"url": "https://example.test/qr", "qrcode_key": "q" * 32}})
             self.polls += 1
-            for name, value in (("SESSDATA", "new"), ("bili_jct", "new"), ("DedeUserID", "2")):
-                self.cookies.set(name, value, domain=".bilibili.com", path="/")
-            return Reply({"code": 0, "data": {"code": 0}})
+            return Reply({"code": 0, "data": {"code": 0,
+                         "url": "https://passport.biligame.com/crossDomain?SESSDATA=new&bili_jct=new&DedeUserID=2"}})
 
     old_session, old_qrcode = web.requests.Session, sys.modules.get("qrcode")
     try:
