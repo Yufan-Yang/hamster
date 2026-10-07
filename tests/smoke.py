@@ -423,6 +423,34 @@ def pornhub_follow():
 
 
 check("Pornhub uploader pages are followed, and kept out of sight in privacy mode", pornhub_follow)
+def sub_filters():
+    ch = shiguang.channels
+    f = ch.clean_filter({"op": "and", "items": [
+        {"op": "or", "items": [{"f": "title", "op": "has", "v": "教程"}, {"f": "title", "op": "has", "v": "Vlog"}]},
+        {"f": "date", "op": "after", "v": "2026-01-01"}, {"f": "title", "op": "has", "v": " "}, {"f": "len", "op": "gt", "v": "5"}]})
+    assert len(f["items"]) == 3, f  # the empty keyword is dropped
+    assert ch.matches(f, {"title": "Python教程", "date": "2026-02-01", "duration": 600})
+    assert not ch.matches(f, {"title": "my vlog", "date": "2025-12-31", "duration": 600})
+    assert ch.matches(f, {"title": "my VLOG"})  # no date / length in the list: those conditions can't say no
+    assert not ch.matches(f, {"title": "教程", "date": "2026-05-01", "duration": 120})
+    assert ch.clean_filter({"op": "or", "items": []}) is None
+    for bad in ({"f": "date", "op": "after", "v": "2026/1/1"}, {"op": "xor", "items": []}, {"f": "x", "op": "has", "v": "a"}):
+        try:
+            ch.clean_filter(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+    sid, _ = ch.add_sub("https://space.bilibili.com/999999999999", f"user:{user}", flt=f)
+    G.q("UPDATE subs SET checked=?, refilter=0 WHERE id=?", (time.time(), sid))  # (no fetching from here)
+    assert [s for s in get("/api/jobs")["subs"] if s["id"] == sid][0]["filter"] == f
+    assert c.post(f"/api/subs/{sid}/filter", json={"filter": {"f": "date", "op": "after", "v": "bad"}}).status_code == 400
+    assert c.post(f"/api/subs/{sid}/filter", json={"filter": None}).status_code == 200
+    row = G.q("SELECT filter, refilter, checked FROM subs WHERE id=?", (sid,), one=True)
+    assert row["filter"] == "" and row["refilter"] == 1 and row["checked"] is None, dict(row)
+    G.q("DELETE FROM subs WHERE id=?", (sid,))
+
+
+check("追更 filters: keywords, dates, lengths in and / or groups", sub_filters)
 check("subtitles translated: other languages, not English", lambda: (
     shiguang.tasks.translatable(["/x/v.ja.srt"], "v") == "/x/v.ja.srt"
     and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None

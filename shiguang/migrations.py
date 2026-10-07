@@ -60,6 +60,8 @@ STEPS = [
     (15, lambda db: add(db, "notes", "tags", "TEXT DEFAULT '[]'")),  # AI tags of a 随记
     (16, lambda db: add(db, "jobs", "advice", "TEXT DEFAULT ''")),  # why a download failed and what to do (AI)
     (17, lambda db: add(db, "users", "shortcut_key", "TEXT")),  # the iOS shortcut's secret, so it works from outside too
+    # 追更 filters: which videos of the uploader to cache; `refilter` = changed, the next check looks back again
+    (18, lambda db: (add(db, "subs", "filter", "TEXT DEFAULT ''"), add(db, "subs", "refilter", "INTEGER DEFAULT 0"))),
 ]
 
 

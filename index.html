@@ -233,6 +233,18 @@
   .subrow .plat.youtube { background: var(--accent); color: #fff; }
   .subrow .plat.pornhub { background: #000; color: #ff9000; }
   .subrow .acts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+  .subrow .flt { color: var(--ink); }
+  .subrow .flt b { font-weight: normal; background: var(--yellow); color: #1d1b26; padding: 0 4px; }
+  /* 追更 filter editor: conditions, and groups of them, joined by 全部 (and) / 任一 (or) */
+  .fed { border-top: 2px dashed var(--ink); margin-top: 8px; padding-top: 6px; }
+  .fgrp.nest { border: 2px solid var(--ink); background: var(--soft); padding: 4px 8px; margin: 6px 0; }
+  .frow { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 6px 0; }
+  .frow select, .frow input { font: inherit; height: 32px; border: 2px solid var(--ink); border-radius: 0; background: var(--panel);
+                              color: var(--ink); padding: 0 6px; }
+  .frow input { flex: 1; min-width: 110px; }
+  .frow .x { width: 32px; height: 32px; border: 2px solid var(--ink); background: var(--panel); color: var(--accent); padding: 0; }
+  .frow .andor { color: var(--muted); }
+  .fed .btn { height: 32px; }
   .err { white-space: pre-line; color: var(--accent); margin-top: 12px; overflow-wrap: anywhere; }
   /* 随记: everyday notes */
   .notes { max-width: 720px; }
@@ -1073,6 +1085,72 @@ function every(sec) {
   return sec % 604800 === 0 ? (sec === 604800 ? "每周" : `每 ${sec / 604800} 周`)
     : sec % 86400 === 0 ? `每 ${sec / 86400} 天` : sec >= 3600 ? `每 ${Math.round(sec / 3600)} 小时` : `每 ${Math.round(sec / 60)} 分钟`;
 }
+/* which videos of an uploader to cache: {op: "and"|"or", items: [condition | group]}, condition {f, op, v} */
+const FCOND = [["title", "has", "标题包含"], ["title", "not", "标题不含"], ["date", "after", "发布日期不早于"],
+               ["date", "before", "发布日期不晚于"], ["len", "gt", "时长至少（分钟）"], ["len", "lt", "时长最多（分钟）"]];
+function fltText(f, nested) {
+  if (f.items) {
+    const t = f.items.map(x => fltText(x, true)).join(f.op === "and" ? " 且 " : " 或 ");
+    return nested && f.items.length > 1 ? `（${t}）` : t;
+  }
+  return {has: `标题含「${f.v}」`, not: `标题不含「${f.v}」`, after: `${f.v} 及以后发布`, before: `${f.v} 及以前发布`,
+          gt: `至少 ${f.v} 分钟`, lt: `最多 ${f.v} 分钟`}[f.op];
+}
+let fltOpen = null, fltDraft = null;  // the editor that's open (a sub id, or "new" on the follow form) and its filter
+function fedGet(path) { return path.split(".").filter(Boolean).reduce((g, i) => g.items[+i], fltDraft); }
+function fedParent(path) { const p = path.split("."); const i = +p.pop(); return [fedGet(p.join(".")), i]; }
+function fedGroup(g, path, depth) {
+  const op = `<select onchange="fedGet('${path}').op = this.value; fedDraw()">
+    <option value="and"${g.op === "and" ? " selected" : ""}>全部</option><option value="or"${g.op === "or" ? " selected" : ""}>任一</option></select>`;
+  const join = `<span class="andor">${g.op === "and" ? "且" : "或"}</span>`;
+  return `<div class="fgrp${depth ? " nest" : ""}">
+    <div class="frow">满足${op}条件${depth ? `<button class="link" style="margin-left:auto" onclick="fedDel('${path}')">删掉这组</button>` : ""}</div>
+    ${g.items.map((x, i) => (i ? join : "") + (x.items ? fedGroup(x, `${path}.${i}`, depth + 1) : fedCond(x, `${path}.${i}`))).join("")}
+    <div class="frow"><button class="link" onclick="fedAdd('${path}')">+ 条件</button>${depth ? "" :
+      `<button class="link" onclick="fedAdd('${path}', 1)">+ 一组条件</button>`}</div></div>`;
+}
+function fedCond(c, path) {
+  const kind = `<select onchange="fedKind('${path}', this.value)">${FCOND.map(([f, op, label]) =>
+    `<option value="${f}:${op}"${c.f === f && c.op === op ? " selected" : ""}>${label}</option>`).join("")}</select>`;
+  const type = c.f === "date" ? "date" : c.f === "len" ? "number" : "text";
+  return `<div class="frow">${kind}<input type="${type}" ${type === "number" ? 'min="0" step="any" inputmode="decimal"' : ""}
+    value="${esc(c.v ?? "")}" placeholder="${c.f === "title" ? "关键字" : c.f === "len" ? "分钟" : ""}"
+    oninput="fedGet('${path}').v = this.value"><button class="x" title="删掉" onclick="fedDel('${path}')">×</button></div>`;
+}
+function fedKind(path, v) {
+  const c = fedGet(path), [f, op] = v.split(":");
+  if (c.f !== f) c.v = "";
+  Object.assign(c, {f, op}); fedDraw();
+}
+function fedAdd(path, group) {
+  const c = () => ({f: "title", op: "has", v: ""});
+  fedGet(path).items.push(group ? {op: "or", items: [c(), c()]} : c()); fedDraw();
+}
+function fedDel(path) { const [g, i] = fedParent(path); g.items.splice(i, 1); fedDraw(); }
+function fedDraw() { const el = $("#fedTree"); if (el) el.innerHTML = fedGroup(fltDraft, "", 0); }
+function fedBox(saveLabel) {
+  const old = fltOpen !== "new" && ((state.subs || []).find(x => x.id === fltOpen) || {}).filter;
+  return `<div class="fed" id="fed"><div id="fedTree">${fedGroup(fltDraft, "", 0)}</div>
+    <div class="frow">${saveLabel ? `<button class="btn" onclick="fedSave()">${saveLabel}</button>` : ""}
+      ${old ? `<button class="btn plain" onclick="fedSave(true)">不再筛选</button>` : ""}
+      <button class="btn plain" onclick="fedClose()">${saveLabel ? "取消" : "不加筛选"}</button></div>
+    <div class="sub">只缓存满足条件的视频，关键字不分大小写。${saveLabel ? "保存后马上按新条件重新看最近的视频：新符合的开始下载，还在排队但不再符合的取消，已经下好的不动。" : ""}Pornhub 的视频列表没有日期和时长，这两种条件对它不起作用。</div></div>`;
+}
+function openFilter(id) {
+  const s = (state.subs || []).find(x => x.id === id) || {};
+  fltOpen = id;
+  fltDraft = s.filter ? JSON.parse(JSON.stringify(s.filter)) : {op: "and", items: [{f: "title", op: "has", v: ""}]};
+  renderSubs(true);
+}
+function fedClose() { fltOpen = fltDraft = null; renderSubs(true); }
+async function fedSave(clear) {
+  const r = await fetch(`/api/subs/${fltOpen}/filter`, {method: "POST", headers: {"Content-Type": "application/json"},
+                                                         body: JSON.stringify({filter: clear ? null : fltDraft})});
+  const j = await r.json();
+  if (!r.ok) { toast(j.error || "没保存上"); return; }
+  toast(clear ? "不再筛选，马上重新检查" : "筛选条件保存了，马上按新条件重新检查");
+  fedClose(); lastBody = ""; refresh();
+}
 function subRow(s) {
   const status = s.pending ? "正在获取视频列表…"
     : `上次检查 ${ago(s.checked)} · 下次 ${until(s.next)}`;
@@ -1084,15 +1162,18 @@ function subRow(s) {
     <div class="body">
       <div class="name" onclick="setChip('sub:${s.id}')">${esc(s.name)}<span class="plat ${esc(s.platform)}">${PLAT[s.platform] || esc(s.platform)}</span></div>
       <div class="sub">${esc(counts)}${s.owner_label ? " · @" + esc(s.owner_label) : ""}</div>
-      <div class="sub">${esc(status)}${partial && !s.pending ? ` · 先缓存了最新 ${s.backfill} 个` : ""}</div>
+      <div class="sub">${esc(status)}${partial && !s.pending ? ` · 先缓存了最新 ${s.backfill} 个${s.filter ? "符合条件的" : ""}` : ""}</div>
+      ${s.filter ? `<div class="sub flt"><b>筛选</b> 只缓存${esc(fltText(s.filter))}的视频</div>` : ""}
       ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}</div>` : ""}
       <div class="acts">
         <button class="link" onclick="setChip('sub:${s.id}')">看视频</button>
         <button class="link" onclick="subAct(${s.id}, 'refresh')">立即检查</button>
+        <button class="link" onclick="openFilter(${s.id})">${s.filter ? "改筛选" : "筛选"}</button>
         ${partial ? `<button class="link" onclick="subAct(${s.id}, 'all')">缓存全部</button>` : ""}
         <a class="link" href="${esc(s.url)}" target="_blank" rel="noopener">主页</a>
         <button class="link" style="color:var(--accent)" onclick="subAct(${s.id}, 'delete')">取消追更</button>
       </div>
+      ${fltOpen === s.id ? fedBox("保存") : ""}
     </div>
   </div>`;
 }
@@ -1130,13 +1211,18 @@ async function openJob(id, part, t) {
   }
   if (part !== undefined) { hide($("#askSheet")); openWatch(id, part, t || 0.01); } else openWatch(id);
 }
-function renderSubs() {
+function renderSubs(force) {
+  // an open filter editor holds what's being typed: the list waits until it's closed
+  if (!force && fltOpen !== null && $("#fed")) return;
+  if (fltOpen !== null && fltOpen !== "new" && !(state.subs || []).some(x => x.id === fltOpen)) fltOpen = fltDraft = null;
   const list = state.subs || [];
   const html = `<form class="subadd" onsubmit="addSub(event)">
       <input type="text" id="subUrl" placeholder="B站 UP 主空间 / YouTube 频道链接" autocomplete="off">
       <button class="btn">追更</button>
     </form>
-    <div class="sub">${every(state.sub_interval || 604800)}检查一次新视频，有新的就自动下载。取消追更不会删除已经下载的视频。</div>
+    ${fltOpen === "new" ? fedBox() : ""}
+    <div class="sub">${every(state.sub_interval || 604800)}检查一次新视频，有新的就自动下载。取消追更不会删除已经下载的视频。${fltOpen === "new" ? "" :
+      ` <button class="link" type="button" onclick="openFilter('new')">追更时加筛选条件</button>`}</div>
     ${list.length ? digestCard() : ""}
     ${list.map(subRow).join("") || '<div class="empty" style="padding:40px 0">还没有追更的 UP 主</div>'}`;
   const el = $("#subs");
@@ -1145,15 +1231,20 @@ function renderSubs() {
   el.innerHTML = html; el.dataset.html = html;
   $("#subUrl").value = typed; if (focused) $("#subUrl").focus();
 }
-function addSub(e) {
+async function addSub(e) {
   e.preventDefault();
   const t = $("#subUrl").value.trim(); if (!t) return;
-  $("#subUrl").value = ""; $("#subs").dataset.html = ""; sendText(t);
+  const f = new FormData(); f.append("text", t);
+  if (fltOpen === "new") f.append("filter", JSON.stringify(fltDraft));
+  if (!await send(f)) return;
+  $("#subUrl").value = ""; if (fltOpen === "new") fltOpen = fltDraft = null;
+  $("#subs").dataset.html = ""; renderSubs(true);
 }
 async function subAct(id, action) {
   const s = (state.subs || []).find(x => x.id === id) || {};
   if (action === "delete" && !confirm(`不再追更「${s.name}」？已经下载的视频会保留，还在排队的会取消。`)) return;
-  if (action === "all" && !confirm(`下载「${s.name}」的全部 ${s.total} 个视频？会占用不少硬盘和时间，但不影响你手动添加的下载。`)) return;
+  if (action === "all" && !confirm(s.filter ? `下载「${s.name}」全部 ${s.total} 个视频里符合筛选条件的？会占用不少硬盘和时间，但不影响你手动添加的下载。`
+    : `下载「${s.name}」的全部 ${s.total} 个视频？会占用不少硬盘和时间，但不影响你手动添加的下载。`)) return;
   const r = await (await fetch(`/api/subs/${id}/${action}`, {method: "POST"})).json();
   toast(r.error || {refresh: "马上检查新视频", all: "开始缓存全部视频", delete: "已取消追更"}[action]);
   if (action === "delete" && chip === "sub:" + id) chip = "subs";
@@ -1984,10 +2075,11 @@ async function send(body) {
     : [subsNew ? `开始追更 ${subsNew} 个 UP 主，正在获取视频列表` : "", subsDup ? `${subsDup} 个 UP 主已经在追了` : "",
        fresh ? `已开始下载 ${fresh} 个` : "", link ? `${link} 个别人已经下过，直接加进来了` : "",
        dup ? `${dup} 个已经在列表里了` : "", shelfNew ? `${shelfNew} 本电子书开始下载到书架` : "",
-       shelfDup ? `${shelfDup} 本电子书已经在书架上了` : ""].filter(Boolean).join("，"));
-  if (r.ok && dup && !fresh && j.ids.length === 1) { hide($("#addSheet")); await refresh(); openWatch(j.ids[0]); return; }
+       shelfDup ? `${shelfDup} 本电子书已经在书架上了` : "", subsDup && body.get && body.get("filter") ? "筛选条件换成新的了" : ""].filter(Boolean).join("，"));
+  if (r.ok && dup && !fresh && j.ids.length === 1) { hide($("#addSheet")); await refresh(); openWatch(j.ids[0]); return true; }
   if (r.ok) { hide($("#addSheet")); chip = (j.subs || []).length && !(j.ids || []).length ? "subs" : (j.books || []).length && !(j.ids || []).length ? "books" : "all"; }
   refresh();
+  return r.ok;
 }
 function sendText(t) { const f = new FormData(); f.append("text", t); return send(f); }
 function sendFile(file) { const f = new FormData(); f.append("torrent", file); return send(f); }

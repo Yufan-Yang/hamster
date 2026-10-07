@@ -19,6 +19,7 @@ SUB_BACKFILL = int(os.environ.get("SUB_BACKFILL", "50"))
 SUB_WORKERS = int(os.environ.get("SUB_WORKERS", "2"))  # download slots followed channels may use; the rest stay free for links you send
 SUB_SEEN_MAX = 5000
 SUB_RETRY = 3600  # a failed check (e.g. B站 risk control) is tried again an hour later, not next week
+SUB_FILTER_SCAN = int(os.environ.get("SUB_FILTER_SCAN", "300"))  # with a filter, the first check looks this far back
 # Adult sites: their uploaders are left out of 追更周报 (its AI headline covers everyone) and, in privacy mode, out of
 # every list that names uploaders (web.hidden_subs)
 ADULT_PLATFORMS = {"pornhub"}
@@ -45,18 +46,91 @@ def channel_of(url):
     return None
 
 
-def add_sub(url, owner, device=None):
-    """Follow an uploader. Returns (subscription id, "new" | "duplicate")."""
+def add_sub(url, owner, device=None, flt=None):
+    """Follow an uploader, caching only the videos `flt` lets through (see clean_filter; None = all of them).
+    Returns (subscription id, "new" | "duplicate")."""
     platform, cid, videos = channel_of(url)
     key = f"{platform}:{cid.lower()}"
     row = q("SELECT id FROM subs WHERE owner IS ? AND key=?", (owner, key), one=True)
     if row:
+        if flt:  # followed already: the filter sent with it replaces the old one
+            set_filter(row["id"], flt)
         return row["id"], "duplicate"
     with db_lock:
-        cur = core.DB.execute("INSERT INTO subs (owner, platform, key, url, name, backfill, device, created) VALUES (?,?,?,?,?,?,?,?)",
-                         (owner, platform, key, videos, cid.removeprefix("@").rsplit("/", 1)[-1], SUB_BACKFILL, device, time.time()))
+        cur = core.DB.execute("INSERT INTO subs (owner, platform, key, url, name, backfill, device, created, filter) "
+                              "VALUES (?,?,?,?,?,?,?,?,?)",
+                              (owner, platform, key, videos, cid.removeprefix("@").rsplit("/", 1)[-1], SUB_BACKFILL, device,
+                               time.time(), json.dumps(flt, ensure_ascii=False) if flt else ""))
         core.DB.commit()
     return cur.lastrowid, "new"  # the worker fetches the list within a minute (checked IS NULL)
+
+
+# ---------------------------------------------------------------- filters: which of an uploader's videos to cache
+# A filter is a group: {"op": "and" | "or", "items": [...]}, each item a condition or another group (nested at most
+# FILTER_DEPTH deep), so "(keyword A or keyword B) and after 2026-01-01" is
+#   {"op": "and", "items": [{"op": "or", "items": [{"f": "title", "op": "has", "v": "A"}, {...}]},
+#                           {"f": "date", "op": "after", "v": "2026-01-01"}]}
+# Conditions:  title has / not  (keyword, case-insensitive)   ·   date after / before  (YYYY-MM-DD, both ends included)
+#              len gt / lt  (minutes)
+# A video whose list entry doesn't tell its date or length (Pornhub's) passes those conditions: they can't be judged.
+FILTER_DEPTH = 3
+FILTER_OPS = {"title": ("has", "not"), "date": ("after", "before"), "len": ("gt", "lt")}
+
+
+def clean_filter(f, depth=1):
+    """`f` as sent by the page, checked and tidied: empty conditions and groups dropped. None when nothing is left;
+    ValueError when it's malformed."""
+    if not isinstance(f, dict):
+        raise ValueError("筛选条件格式不对")
+    if "items" in f:
+        if depth > FILTER_DEPTH or f.get("op") not in ("and", "or") or not isinstance(f["items"], list):
+            raise ValueError("筛选条件格式不对")
+        items = [c for c in (clean_filter(x, depth + 1) for x in f["items"][:50]) if c]
+        return {"op": f["op"], "items": items} if items else None
+    field, op, v = f.get("f"), f.get("op"), f.get("v")
+    if op not in FILTER_OPS.get(field, ()):
+        raise ValueError("筛选条件格式不对")
+    if field == "title":
+        v = str(v or "").strip()[:100]
+        return {"f": field, "op": op, "v": v} if v else None
+    if field == "date":
+        v = str(v or "").strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError(f"日期要写成 2026-01-31 这样：{v}")
+        return {"f": field, "op": op, "v": v}
+    try:
+        v = float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        raise ValueError(f"时长要填分钟数：{v}")
+    return {"f": field, "op": op, "v": v} if v is not None and v >= 0 else None
+
+
+def matches(f, e):
+    """Whether list entry `e` (title, and date / duration when the list has them) passes filter `f` (None: all do)."""
+    if not f:
+        return True
+    if "items" in f:
+        hits = (matches(x, e) for x in f["items"])
+        return all(hits) if f["op"] == "and" else any(hits)
+    if f["f"] == "title":
+        has = f["v"].casefold() in (e.get("title") or "").casefold()
+        return has if f["op"] == "has" else not has
+    if f["f"] == "date":
+        if not e.get("date"):
+            return True
+        return e["date"] >= f["v"] if f["op"] == "after" else e["date"] <= f["v"]
+    if not e.get("duration"):
+        return True
+    return e["duration"] >= f["v"] * 60 if f["op"] == "gt" else e["duration"] <= f["v"] * 60
+
+
+def set_filter(sub_id, flt):
+    """Change what's cached of this uploader: the next check (within a minute) looks through the latest videos again,
+    queues the ones that now pass and drops the queued ones that no longer do."""
+    q("UPDATE subs SET filter=?, refilter=1, checked=NULL WHERE id=?",
+      (json.dumps(flt, ensure_ascii=False) if flt else "", sub_id))
 
 
 MIXIN_KEY = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39,
@@ -106,7 +180,9 @@ def list_bilibili(mid, limit):
         data = body["data"]
         total = data["page"]["count"]
         vlist = data["list"]["vlist"] or []
-        out += [{"url": f"https://www.bilibili.com/video/{v['bvid']}", "title": v["title"]} for v in vlist]
+        out += [{"url": f"https://www.bilibili.com/video/{v['bvid']}", "title": v["title"],
+                 "date": time.strftime("%Y-%m-%d", time.localtime(v["created"])) if v.get("created") else None,
+                 "duration": clock_seconds(v.get("length"))} for v in vlist]
         if not vlist or pn * 30 >= total:
             break
         pn += 1
@@ -115,10 +191,32 @@ def list_bilibili(mid, limit):
             "entries": out[:limit] if limit else out}
 
 
+def clock_seconds(s):
+    """ "1:02:03" / "12:34" -> seconds (None when it isn't one)."""
+    try:
+        sec = 0
+        for part in str(s).split(":"):
+            sec = sec * 60 + int(part)
+        return sec or None
+    except ValueError:
+        return None
+
+
+def entry_date(e):
+    """A yt-dlp entry's upload day, YYYY-MM-DD, if the flat list has one."""
+    if e.get("upload_date"):
+        d = e["upload_date"]
+        return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+    ts = e.get("timestamp") or e.get("release_timestamp")
+    return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else None
+
+
 def list_ytdlp(url, limit):
     """An uploader's videos through yt-dlp's flat playlist (YouTube, Pornhub), newest first."""
     import yt_dlp
-    opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True}
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "skip_download": True,
+            # YouTube's list says "3 weeks ago": turned into an approximate date, for the date filters
+            "extractor_args": {"youtubetab": {"approximate_date": [""]}}}
     if limit:
         opts["playlistend"] = limit
     if COOKIES.exists():
@@ -126,7 +224,8 @@ def list_ytdlp(url, limit):
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     entries = [{"url": re.sub(r"^http://", "https://", e.get("url") or f"https://www.youtube.com/watch?v={e['id']}"),
-                "title": e.get("title") or ""} for e in info.get("entries") or [] if e and (e.get("url") or e.get("id"))]  # (Pornhub's have no id)
+                "title": e.get("title") or "", "date": entry_date(e), "duration": e.get("duration") or None}
+               for e in info.get("entries") or [] if e and (e.get("url") or e.get("id"))]  # (Pornhub's have no id)
     avatar = next((t["url"] for t in info.get("thumbnails") or [] if t.get("id") == "avatar_uncropped"), "")
     return {"name": info.get("channel") or info.get("uploader") or "", "avatar": avatar,
             "total": info.get("playlist_count") or (None if limit else len(entries)), "entries": entries}
@@ -143,14 +242,19 @@ AVATARS = STATE / "avatars"
 
 
 def check_sub(sub_id, everything=False):
-    """Queue the uploader's videos not seen yet. First check: the newest `backfill` (0 = all);
-    later checks only look at the newest 30; everything=True goes through the whole list.
+    """Queue the uploader's videos not seen yet that pass its filter. First check: the newest `backfill` (0 = all)
+    of them, looking up to SUB_FILTER_SCAN back when there's a filter; later checks only look at the newest 30;
+    everything=True goes through the whole list. After the filter changed (refilter) it's a first check again, and
+    queued videos that no longer pass are dropped (they come back if a later filter lets them through).
     Returns how many were queued, or None if the list couldn't be fetched."""
     sub = q("SELECT * FROM subs WHERE id=?", (sub_id,), one=True)
     if not sub:
         return 0
+    flt = json.loads(sub["filter"]) if sub["filter"] else None
     first = sub["seen"] in (None, "[]")  # no successful check yet
-    limit = None if everything or (first and not sub["backfill"]) else sub["backfill"] if first else 30
+    wide = first or bool(sub["refilter"])
+    limit = (None if everything or (wide and not sub["backfill"]) else
+             (max(sub["backfill"], SUB_FILTER_SCAN) if flt else sub["backfill"]) if wide else 30)
     try:
         res = list_channel(sub, limit)
     except Exception as e:
@@ -158,14 +262,23 @@ def check_sub(sub_id, everything=False):
         q("UPDATE subs SET checked=?, error=? WHERE id=?", (time.time(), str(e)[:300], sub_id))
         return None
     seen = json.loads(sub["seen"] or "[]")
+    passing = [e for e in res["entries"] if matches(flt, e)]
+    if wide and not everything and sub["backfill"]:
+        passing = passing[:sub["backfill"]]
+    if sub["refilter"]:
+        drop = {link_key(e["url"]) for e in res["entries"] if not matches(flt, e)}
+        for r in q("SELECT id, key FROM jobs WHERE source=? AND status IN ('queued','linked')", (f"sub:{sub_id}",)):
+            if r["key"] in drop:
+                pipeline.cancel_job(r["id"])
+        seen = [k for k in seen if k not in drop]
     seen_set = set(seen)
-    new = [e for e in res["entries"] if link_key(e["url"]) not in seen_set]
+    new = [e for e in passing if link_key(e["url"]) not in seen_set]
     # oldest first, so the newest video gets the highest id and sits at the top of the page
     for e in reversed(new):
         jid, how = pipeline.add_job_ex(e["url"], source=f"sub:{sub_id}", owner=sub["owner"], device=sub["device"])
         if how == "new" and e["title"]:
             update(jid, title=e["title"])  # the list already has the title: show it while the video waits
-        if how == "new" and (first or everything):
+        if how == "new" and (wide or everything):
             update(jid, backfill=1)  # older videos: their subtitles are made in idle time
     seen = (seen + [link_key(e["url"]) for e in reversed(new)])[-SUB_SEEN_MAX:]
     avatar = sub["avatar"] or ""
@@ -180,9 +293,10 @@ def check_sub(sub_id, everything=False):
             pass
     total = res["total"] if res["total"] is not None else sub["total"]
     # with a list that's longer than what we fetched, `total` is still how many the uploader has
-    q("UPDATE subs SET name=?, avatar=?, total=?, seen=?, checked=?, error='', backfill=? WHERE id=?",
+    # (a filter changed while this check ran stays marked for the next one)
+    q("UPDATE subs SET name=?, avatar=?, total=?, seen=?, checked=?, error='', backfill=?, refilter=0 WHERE id=? AND filter IS ?",
       (res["name"] or sub["name"], avatar, total or len(res["entries"]), json.dumps(seen), time.time(),
-       0 if everything else sub["backfill"], sub_id))
+       0 if everything else sub["backfill"], sub_id, sub["filter"]))
     if new:
         print(f"sub {sub_id} {res['name']}: queued {len(new)}")
     return len(new)

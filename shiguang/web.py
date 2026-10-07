@@ -629,6 +629,11 @@ def add_post():
         m = re.search(r'"device"\s*:\s*"([^"]{1,60})"', raw)
         device = m.group(1) if m else ""
     source = f"shortcut:{device}" if device else "web"
+    try:  # 追更 page: follow with a filter (which videos to cache)
+        flt = request.form.get("filter") or body.get("filter")
+        flt = channels.clean_filter(json.loads(flt) if isinstance(flt, str) else flt) if flt else None
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
     hows, subs, shelf = [], [], []
     blocked = []
     for u in find_urls(text):
@@ -636,7 +641,7 @@ def add_post():
             blocked.append(bad)
             continue
         if channels.channel_of(u):  # an uploader's page: follow it instead of downloading the page
-            sid, how = channels.add_sub(u, g.owner, g.device_label)
+            sid, how = channels.add_sub(u, g.owner, g.device_label, flt)
             subs.append({"id": sid, "how": how})
             continue
         if books.is_book_url(u):  # a link to an .epub / .pdf / .txt / .mobi file: onto the shelf
@@ -891,6 +896,7 @@ def subs_list():
         out.append({"id": r["id"], "platform": r["platform"], "name": r["name"], "url": r["url"],
                     "avatar": bool(r["avatar"]), "total": r["total"], "backfill": r["backfill"],
                     "checked": r["checked"], "error": r["error"], "pending": r["checked"] is None or bool(r["everything"]),
+                    "filter": json.loads(r["filter"]) if r["filter"] else None,
                     "done": c.get("done", 0), "active": sum(c.get(k, 0) for k in ("queued", "downloading", "processing", "linked")),
                     "failed": c.get("failed", 0), "next": (r["checked"] or time.time()) + (channels.SUB_RETRY if r["error"] else channels.SUB_INTERVAL),
                     **({"owner_label": owner_label(r["owner"])} if g.admin else {})})
@@ -904,7 +910,8 @@ def sub_visible(sid):
 
 @app.post("/api/subs/<int:sid>/<action>")
 def sub_action(sid, action):
-    """refresh: check for new videos now · all: download every video of the uploader · delete: stop following
+    """refresh: check for new videos now · all: download every video of the uploader (that passes its filter) ·
+    filter: change which videos are cached · delete: stop following
     (videos already downloaded stay; ones still waiting in the queue are dropped)"""
     if not sub_visible(sid):
         return jsonify(error="not found"), 404
@@ -912,6 +919,11 @@ def sub_action(sid, action):
         q("UPDATE subs SET checked=NULL WHERE id=?", (sid,))
     elif action == "all":
         q("UPDATE subs SET everything=1, checked=NULL WHERE id=?", (sid,))
+    elif action == "filter":  # {"filter": {...} | null}: which of its videos to cache from now on
+        try:
+            channels.set_filter(sid, channels.clean_filter((request.get_json(silent=True) or {}).get("filter") or {"op": "and", "items": []}))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
     elif action == "delete":
         q("DELETE FROM subs WHERE id=?", (sid,))
         for r in q("SELECT id FROM jobs WHERE source=? AND status='queued'", (f"sub:{sid}",)):
