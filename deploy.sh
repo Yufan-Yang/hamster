@@ -16,20 +16,20 @@ scp -q /tmp/shiguang-page.js "$PI":/tmp/shiguang-page.js
 ssh "$PI" 'node --check /tmp/shiguang-page.js; s=$?; rm -f /tmp/shiguang-page.js; exit $s'
 
 echo "== copy to the Pi (staging)"
-tar czf /tmp/shiguang-deploy.tgz grabber.py index.html refresh_metadata.py shiguang tests static send-to-pi.shortcut 2>/dev/null \
-  || tar czf /tmp/shiguang-deploy.tgz grabber.py index.html refresh_metadata.py shiguang tests static
+tar czf /tmp/shiguang-deploy.tgz grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests static send-to-pi.shortcut 2>/dev/null \
+  || tar czf /tmp/shiguang-deploy.tgz grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests static
 scp -q /tmp/shiguang-deploy.tgz "$PI":/tmp/
 ssh "$PI" "sudo rm -rf $APP.next && sudo mkdir -p $APP.next && sudo tar xzf /tmp/shiguang-deploy.tgz -C $APP.next && rm /tmp/shiguang-deploy.tgz \
   && sudo find $APP.next -name __pycache__ -prune -exec rm -rf {} + ; sudo chown -R grabber:grabber $APP.next"
 
 echo "== smoke test on a copy of the database"
-ssh "$PI" "cd $APP.next && sudo -u grabber $APP/venv/bin/python tests/smoke.py $APP.next > /tmp/shiguang-smoke.log 2>&1; s=\$?; grep -v -i warn /tmp/shiguang-smoke.log; rm -f /tmp/shiguang-smoke.log; exit \$s"
+ssh "$PI" "sudo -u grabber $APP/venv/bin/pip install -q -r $APP.next/requirements-pi.txt && cd $APP.next && sudo -u grabber $APP/venv/bin/python tests/smoke.py $APP.next > /tmp/shiguang-smoke.log 2>&1; s=\$?; grep -v -i warn /tmp/shiguang-smoke.log; rm -f /tmp/shiguang-smoke.log; exit \$s"
 
 echo "== swap in and restart"
 ssh "$PI" "set -e
 sudo rm -rf $APP.prev && sudo mkdir -p $APP.prev
-for f in grabber.py index.html refresh_metadata.py shiguang tests; do [ -e $APP/\$f ] && sudo cp -a $APP/\$f $APP.prev/ || true; done
-for f in grabber.py index.html refresh_metadata.py shiguang tests; do sudo rm -rf $APP/\$f; sudo cp -a $APP.next/\$f $APP/; done
+for f in grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests; do [ -e $APP/\$f ] && sudo cp -a $APP/\$f $APP.prev/ || true; done
+for f in grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests; do sudo rm -rf $APP/\$f; sudo cp -a $APP.next/\$f $APP/; done
 sudo cp -a $APP.next/static/. $APP/static/
 [ -e $APP.next/send-to-pi.shortcut ] && sudo cp -a $APP.next/send-to-pi.shortcut $APP/ || true
 sudo systemctl restart grabber grabber-worker
@@ -41,7 +41,7 @@ for i in \$(seq 1 20); do
 done
 if [ \$ok = 1 ]; then echo 'up and running'; else
   echo 'NOT healthy: putting the previous code back'
-  for f in grabber.py index.html refresh_metadata.py shiguang tests; do sudo rm -rf $APP/\$f; [ -e $APP.prev/\$f ] && sudo cp -a $APP.prev/\$f $APP/; done
+  for f in grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests; do sudo rm -rf $APP/\$f; [ -e $APP.prev/\$f ] && sudo cp -a $APP.prev/\$f $APP/; done
   sudo systemctl restart grabber grabber-worker; exit 1
 fi"
 

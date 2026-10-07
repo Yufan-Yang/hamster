@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import traceback
+import types
 from pathlib import Path
 
 APP = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
@@ -525,6 +526,48 @@ def bilibili_cookie_upload():
 
 
 check("B站 cookies upload validates and reschedules follows", bilibili_cookie_upload)
+
+
+def bilibili_qr_login():
+    import requests
+    from shiguang import web
+
+    class Reply:
+        def __init__(self, body): self.body = body
+        def json(self): return self.body
+
+    class Image:
+        def save(self, out, format=None): out.write(b"not-a-real-png")
+
+    class Session:
+        def __init__(self):
+            self.headers, self.cookies, self.polls = {}, requests.cookies.RequestsCookieJar(), 0
+        def get(self, url, params=None, timeout=None):
+            if url.endswith("/generate"):
+                return Reply({"code": 0, "data": {"url": "https://example.test/qr", "qrcode_key": "q" * 32}})
+            self.polls += 1
+            for name, value in (("SESSDATA", "new"), ("bili_jct", "new"), ("DedeUserID", "2")):
+                self.cookies.set(name, value, domain=".bilibili.com", path="/")
+            return Reply({"code": 0, "data": {"code": 0}})
+
+    old_session, old_qrcode = web.requests.Session, sys.modules.get("qrcode")
+    try:
+        web.requests.Session = Session
+        sys.modules["qrcode"] = types.SimpleNamespace(make=lambda url: Image())
+        made = c.post("/api/bilibili/login/qr")
+        assert made.status_code == 200, made.data
+        result = c.get("/api/bilibili/login/qr/" + made.get_json()["login"])
+        assert result.get_json()["status"] == "done", result.data
+        assert shiguang.channels.bili_cookie_state() == "ready"
+    finally:
+        web.requests.Session = old_session
+        if old_qrcode is None:
+            sys.modules.pop("qrcode", None)
+        else:
+            sys.modules["qrcode"] = old_qrcode
+
+
+check("B站扫码登录 stores cookies and restarts follows", bilibili_qr_login)
 check("subtitles translated: other languages, not English", lambda: (
     shiguang.tasks.translatable(["/x/v.ja.srt"], "v") == "/x/v.ja.srt"
     and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None

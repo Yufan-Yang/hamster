@@ -747,6 +747,9 @@
 <div class="sheet-bg" id="accountSheet" hidden onclick="if (event.target === this) hide(this)">
   <div class="sheet" id="accountBody"></div>
 </div>
+<div class="sheet-bg" id="biliLoginSheet" hidden onclick="if (event.target === this) closeBiliLogin()">
+  <div class="sheet" id="biliLoginBody"></div>
+</div>
 
 <!-- watch -->
 <div id="watch" hidden>
@@ -1164,7 +1167,7 @@ function subRow(s) {
       <div class="sub">${esc(counts)}${s.owner_label ? " · @" + esc(s.owner_label) : ""}</div>
       <div class="sub">${esc(status)}${partial && !s.pending ? ` · 先缓存了最新 ${s.backfill} 个${s.filter ? "符合条件的" : ""}` : ""}</div>
       ${s.filter ? `<div class="sub flt"><b>筛选</b> 只缓存${esc(fltText(s.filter))}的视频</div>` : ""}
-      ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}${s.platform === "bilibili" && state.admin ? ` · <button class="link" onclick="chooseBiliCookies()">更新 B站登录状态</button>` : ""}</div>` : ""}
+      ${s.error ? `<div class="err" style="margin-top:4px">${esc(s.error)}${s.platform === "bilibili" && state.admin ? ` · <button class="link" onclick="openBiliLogin()">登录 B站</button>` : ""}</div>` : ""}
       <div class="acts">
         <button class="link" onclick="setChip('sub:${s.id}')">看视频</button>
         <button class="link" onclick="subAct(${s.id}, 'refresh')">立即检查</button>
@@ -1249,6 +1252,30 @@ async function subAct(id, action) {
   toast(r.error || {refresh: "马上检查新视频", all: "开始缓存全部视频", delete: "已取消追更"}[action]);
   if (action === "delete" && chip === "sub:" + id) chip = "subs";
   lastBody = ""; refresh();
+}
+let biliLoginTimer = null;
+function closeBiliLogin() { clearTimeout(biliLoginTimer); biliLoginTimer = null; hide($("#biliLoginSheet")); }
+async function openBiliLogin() {
+  $("#biliLoginSheet").hidden = false;
+  $("#biliLoginBody").innerHTML = "<h2>B站登录</h2><p class='hint'>正在生成二维码…</p>";
+  const r = await fetch("/api/bilibili/login/qr", {method: "POST"});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#biliLoginBody").innerHTML = `<h2>B站登录</h2><p class="err">${esc(j.error || "二维码生成失败")}</p><button class="btn plain wide" onclick="closeBiliLogin()">关闭</button>`; return; }
+  $("#biliLoginBody").innerHTML = `<h2>B站登录</h2><p class="hint">请用已登录 B站账号的 App 扫码并确认。二维码三分钟后失效。</p>
+    <img src="${j.qr}" alt="B站登录二维码" style="display:block;width:min(280px,80vw);margin:14px auto;image-rendering:auto">
+    <p class="sub" id="biliLoginState">等待扫码…</p>
+    <button class="link" onclick="chooseBiliCookies()">改为导入 cookies.txt</button>
+    <button class="btn plain wide" style="margin-top:12px" onclick="closeBiliLogin()">取消</button>`;
+  const poll = async () => {
+    const p = await fetch(`/api/bilibili/login/qr/${j.login}`).then(x => x.json()).catch(() => ({error: "连不上 Pi"}));
+    const el = $("#biliLoginState"); if (!el) return;
+    if (p.status === "done") { el.textContent = "登录成功，正在重新获取追更列表"; $("#subs").dataset.html = ""; refresh(); biliLoginTimer = setTimeout(closeBiliLogin, 1200); return; }
+    if (p.status === "expired") { el.textContent = "二维码已失效，请关闭后重新打开"; return; }
+    if (p.error) { el.textContent = p.error; return; }
+    el.textContent = p.status === "scanned" ? "已扫码，请在 B站 App 确认登录…" : "等待扫码…";
+    biliLoginTimer = setTimeout(poll, 2000);
+  };
+  poll();
 }
 async function chooseBiliCookies() {
   const input = document.createElement("input");

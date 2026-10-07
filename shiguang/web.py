@@ -1,4 +1,5 @@
 """The web page and its API, accounts and privacy, the task board over HTTP."""
+import base64
 import gzip
 import hashlib
 import hmac
@@ -8,6 +9,7 @@ import ipaddress
 import json
 import os
 import re
+import requests
 import secrets
 import shutil
 import socket
@@ -18,6 +20,7 @@ import time
 import traceback
 import urllib.parse
 import zipfile
+from io import BytesIO
 
 from flask import Response
 from flask import g
@@ -29,12 +32,14 @@ from flask import session
 from pathlib import Path
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
-from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, CAST_URL, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
+from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, CAST_URL, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, UA, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
 
 
 DEVICE_COOKIE = "grabber_device"
 NAME_RE = re.compile(r"[\w.\-]{1,32}")
 _seen_cache = {}
+BILI_QR_LOGINS = {}
+BILI_QR_TTL = 180
 
 
 def ensure_admin():
@@ -923,21 +928,18 @@ def upload_bilibili_cookies():
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return jsonify(error="cookies.txt 必须是 UTF-8 文本"), 400
-    STATE.mkdir(parents=True, exist_ok=True)
     tmp_name = None
     try:
+        STATE.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=STATE, prefix="cookies-", delete=False) as tmp:
             tmp.write(text)
             tmp_name = tmp.name
         jar = http.cookiejar.MozillaCookieJar(tmp_name)
         jar.load(ignore_discard=True, ignore_expires=True)
-        names = {c.name for c in jar if c.domain.lstrip(".").endswith("bilibili.com")}
-        if not {"SESSDATA", "bili_jct", "DedeUserID"} <= names:
+        if not channels.BILI_LOGIN_COOKIES <= channels.bili_cookie_names(jar):
             return jsonify(error="这不是完整的 B站登录 Cookie；请重新导出包含 SESSDATA、bili_jct 和 DedeUserID 的 cookies.txt"), 400
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, STATE / "cookies.txt")
-        tmp_name = None
-    except (OSError, http.cookiejar.LoadError):
+        channels.save_bili_cookies(jar)
+    except (OSError, http.cookiejar.LoadError, ValueError):
         return jsonify(error="cookies.txt 格式不对，请用 Netscape 格式重新导出"), 400
     finally:
         if tmp_name:
@@ -946,6 +948,59 @@ def upload_bilibili_cookies():
     # picks all B站 subscriptions up on its next pass.
     q("UPDATE subs SET checked=NULL, error='' WHERE platform='bilibili'")
     return jsonify(ok=True)
+
+
+def bili_login_required():
+    if not g.admin:
+        return jsonify(error="只有管理员能更新 B站登录状态"), 403
+
+
+@app.post("/api/bilibili/login/qr")
+def bilibili_login_qr():
+    if denied := bili_login_required():
+        return denied
+    BILI_QR_LOGINS.clear()  # only the current administrator login needs to exist
+    try:
+        import qrcode
+        client = requests.Session()
+        client.headers.update({"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+        body = client.get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate", timeout=15).json()
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("message") or "B站没有返回二维码")
+        data = body["data"]
+        image = qrcode.make(data["url"])
+        png = BytesIO()
+        image.save(png, format="PNG")
+    except Exception as e:
+        return jsonify(error=f"二维码获取失败：{e}"), 502
+    lid = secrets.token_urlsafe(24)
+    BILI_QR_LOGINS[lid] = {"client": client, "key": data["qrcode_key"], "expires": time.time() + BILI_QR_TTL}
+    return jsonify(login=lid, qr="data:image/png;base64," + base64.b64encode(png.getvalue()).decode(), expires=BILI_QR_TTL)
+
+
+@app.get("/api/bilibili/login/qr/<login>")
+def bilibili_login_qr_poll(login):
+    if denied := bili_login_required():
+        return denied
+    item = BILI_QR_LOGINS.get(login)
+    if not item or item["expires"] < time.time():
+        BILI_QR_LOGINS.pop(login, None)
+        return jsonify(status="expired")
+    try:
+        body = item["client"].get("https://passport.bilibili.com/x/passport-login/web/qrcode/poll",
+                                  params={"qrcode_key": item["key"]}, timeout=15).json()
+        data = body.get("data") or {}
+        status = data.get("code")
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("message") or "B站没有返回登录状态")
+        if status == 0:
+            channels.save_bili_cookies(item["client"].cookies)
+            BILI_QR_LOGINS.pop(login, None)
+            q("UPDATE subs SET checked=NULL, error='' WHERE platform='bilibili'")
+            return jsonify(status="done")
+        return jsonify(status={86101: "waiting", 86090: "scanned", 86038: "expired"}.get(status, "waiting"))
+    except (OSError, RuntimeError, ValueError, requests.RequestException) as e:
+        return jsonify(error=f"登录状态检查失败：{e}"), 502
 
 
 def sub_visible(sid):

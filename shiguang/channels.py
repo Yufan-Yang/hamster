@@ -8,6 +8,7 @@ import requests
 import time
 import traceback
 import urllib.parse
+from copy import copy
 from .core import (COOKIES, STATE, UA, db_lock, link_key, q, update)
 
 
@@ -139,6 +140,13 @@ MIXIN_KEY = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43
              57, 62, 11, 36, 20, 34, 44, 52]
 
 
+BILI_LOGIN_COOKIES = {"SESSDATA", "bili_jct", "DedeUserID"}
+
+
+def bili_cookie_names(cookies):
+    return {c.name for c in cookies if c.domain.lstrip(".").endswith("bilibili.com")}
+
+
 def bili_cookie_state():
     """Whether the shared cookie file has the login cookies a B站 listing needs.
 
@@ -150,10 +158,38 @@ def bili_cookie_state():
     try:
         jar = http.cookiejar.MozillaCookieJar(str(COOKIES))
         jar.load(ignore_discard=True, ignore_expires=True)
-        names = {c.name for c in jar if c.domain.lstrip(".").endswith("bilibili.com")}
+        names = bili_cookie_names(jar)
     except (OSError, http.cookiejar.LoadError):
         return "invalid"
-    return "ready" if {"SESSDATA", "bili_jct", "DedeUserID"} <= names else "incomplete"
+    return "ready" if BILI_LOGIN_COOKIES <= names else "incomplete"
+
+
+def save_bili_cookies(cookies):
+    """Merge a newly authenticated B站 session into the shared cookie file."""
+    fresh = [copy(c) for c in cookies if c.domain.lstrip(".").endswith("bilibili.com")]
+    if not BILI_LOGIN_COOKIES <= bili_cookie_names(fresh):
+        raise ValueError("登录没有返回完整的 B站 Cookie，请重新扫码")
+    jar = http.cookiejar.MozillaCookieJar()
+    if COOKIES.exists():
+        try:
+            jar = http.cookiejar.MozillaCookieJar(str(COOKIES))
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except (OSError, http.cookiejar.LoadError):
+            jar = http.cookiejar.MozillaCookieJar()
+    for c in list(jar):
+        if c.domain.lstrip(".").endswith("bilibili.com"):
+            jar.clear(c.domain, c.path, c.name)
+    for c in fresh:
+        jar.set_cookie(c)
+    COOKIES.parent.mkdir(parents=True, exist_ok=True)
+    tmp = COOKIES.with_name(f".{COOKIES.name}.{os.getpid()}")
+    try:
+        jar.filename = str(tmp)
+        jar.save(ignore_discard=True, ignore_expires=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, COOKIES)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def bili_session(mid):
