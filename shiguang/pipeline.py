@@ -319,8 +319,23 @@ def worker_loop():
         # metadata, tag tidy-up, browser copy); don't hold a download slot for that, reap it later
         while proc.poll() is None:
             time.sleep(3)
-            if (q("SELECT status FROM jobs WHERE id=?", (jid,), one=True) or {"status": None})["status"] \
-                    not in ("downloading", "processing"):
+            row = q("SELECT status, cancel FROM jobs WHERE id=?", (jid,), one=True) or {"status": None, "cancel": 0}
+            if row["cancel"] and row["status"] in ("downloading", "processing"):
+                # A yt-dlp probe can be stuck in a site request before it has
+                # a progress hook to observe cancel=1. The worker owns this
+                # child, so stop it here instead of leaving the card forever
+                # in “starting”.
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                update(jid, status="cancelled", stage="", speed="")
+                shutil.rmtree(INCOMPLETE / str(jid), ignore_errors=True)
+                finish_links(jid)
+                break
+            if row["status"] not in ("downloading", "processing"):
                 finishing.append(proc)
                 break
         with claim_lock:
