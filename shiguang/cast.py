@@ -59,18 +59,12 @@ def discover(timeout=2.0):
             control = urllib.parse.urljoin(location, control)
             # A Huawei screen advertises both its ordinary DLNA renderer and a
             # Bilibili-only AVTransport endpoint from the same address.  The
-            # latter answers generic SetAVTransportURI with HTTP 500, so merge
-            # the advertisements and always pick the regular renderer.  Keep
-            # the friendlier/longer name from either advertisement.
+            # latter answers generic SetAVTransportURI with HTTP 500, so it
+            # cannot play the Pi's local media and is deliberately omitted.
+            if "/bilibili/" in control.lower():
+                continue
             host = urllib.parse.urlsplit(location).hostname or location
             name = _tag(root, "friendlyName") or "DLNA 设备"
-            prior = fresh.get(host)
-            regular = "/bilibili/" not in control.lower()
-            if prior and not regular and "/bilibili/" not in prior["control"].lower():
-                prior["name"] = max((prior["name"], name), key=len)
-                continue
-            if prior and regular and "/bilibili/" in prior["control"].lower():
-                name = max((prior["name"], name), key=len)
             did = hashlib.sha256(host.encode()).hexdigest()[:20]
             fresh[host] = {"id": did, "name": name, "control": control, "until": now + 300}
         except (requests.RequestException, ET.ParseError, OSError):
