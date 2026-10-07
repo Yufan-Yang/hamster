@@ -45,7 +45,7 @@ def discover(timeout=2.0):
                 found.add(headers["location"])
     finally:
         sock.close()
-    now = time.time()
+    now, fresh = time.time(), {}
     for location in found:
         try:
             root = ET.fromstring(requests.get(location, timeout=4).content)
@@ -56,11 +56,27 @@ def discover(timeout=2.0):
             control = _tag(service, "controlURL") if service is not None else ""
             if not control:
                 continue
-            did = hashlib.sha256(location.encode()).hexdigest()[:20]
-            _devices[did] = {"id": did, "name": _tag(root, "friendlyName") or "DLNA 设备",
-                             "control": urllib.parse.urljoin(location, control), "until": now + 300}
+            control = urllib.parse.urljoin(location, control)
+            # A Huawei screen advertises both its ordinary DLNA renderer and a
+            # Bilibili-only AVTransport endpoint from the same address.  The
+            # latter answers generic SetAVTransportURI with HTTP 500, so merge
+            # the advertisements and always pick the regular renderer.  Keep
+            # the friendlier/longer name from either advertisement.
+            host = urllib.parse.urlsplit(location).hostname or location
+            name = _tag(root, "friendlyName") or "DLNA 设备"
+            prior = fresh.get(host)
+            regular = "/bilibili/" not in control.lower()
+            if prior and not regular and "/bilibili/" not in prior["control"].lower():
+                prior["name"] = max((prior["name"], name), key=len)
+                continue
+            if prior and regular and "/bilibili/" in prior["control"].lower():
+                name = max((prior["name"], name), key=len)
+            did = hashlib.sha256(host.encode()).hexdigest()[:20]
+            fresh[host] = {"id": did, "name": name, "control": control, "until": now + 300}
         except (requests.RequestException, ET.ParseError, OSError):
             continue
+    _devices.clear()
+    _devices.update({d["id"]: d for d in fresh.values()})
     return [{"id": d["id"], "name": d["name"]} for d in _devices.values() if d["until"] > now]
 
 
