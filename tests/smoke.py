@@ -121,16 +121,18 @@ def cast_api():
     seen = {}
     try:
         cast.discover = lambda: [{"id": "tv", "name": "测试电视"}]
-        cast.start = lambda did, url, title, thumb, mime: seen.update(did=did, url=url, title=title, thumb=thumb, mime=mime) or "测试电视"
-        cast.control = lambda did, action, pos: seen.update(control=(did, action, pos))
-        cast.status = lambda did: {"position": 30, "duration": 100, "state": "PLAYING"}
+        cast.start = lambda did, url, title, thumb, mime, position=0: seen.update(did=did, url=url, title=title, thumb=thumb, mime=mime, start_position=position) or "测试电视"
+        cast.control = lambda did, action, pos=None, volume=None: seen.update(control=(did, action, pos, volume))
+        cast.status = lambda did: {"position": 30, "duration": 100, "state": "PLAYING", "volume": 50}
         shiguang.web.CAST_URL = "http://pi.test:8088"
         assert get("/api/cast/devices")["devices"][0]["id"] == "tv"
         got = post("/api/cast/start", {"id": some_job["id"], "part": 0, "device": "tv"})
         assert got["name"] == "测试电视" and seen["did"] == "tv" and seen["url"].startswith("http://pi.test:8088/castplay/")
         assert seen["thumb"].startswith("http://pi.test:8088/thumb/") and seen["mime"] == ("audio/mpeg" if some_job["media"][0]["audio"] else "video/mp4")
         post("/api/cast/control", {"device": "tv", "action": "pause"})
-        assert seen["control"] == ("tv", "pause", None)
+        assert seen["control"] == ("tv", "pause", None, None)
+        post("/api/cast/control", {"device": "tv", "action": "volume", "volume": 42})
+        assert seen["control"] == ("tv", "volume", None, 42)
         assert get("/api/cast/status?device=tv")["position"] == 30
     finally:
         cast.discover, cast.start, cast.control, cast.status, shiguang.web.CAST_URL = old_discover, old_start, old_control, old_status, old_url

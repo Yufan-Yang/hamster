@@ -826,7 +826,7 @@ const STAGES = {"starting": "准备中", "downloading video": "下载中", "down
                 "classifying": "AI 分类", "transcribing speech": "语音转文字", "summarizing": "AI 总结", "filing into library": "归档"};
 const ACTIVE = ["queued", "downloading", "processing"];
 
-let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null, castTimer = null;
+let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null, castTimer = null, casting = null, castVolumeTimer = null;
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
 
 // Close a sheet / the watch page with a short exit animation instead of vanishing
@@ -1895,10 +1895,13 @@ async function findCast(id, part) {
   } catch (e) { box.innerHTML = `<p class="err">寻找电视失败</p>`; }
 }
 async function startCast(id, part, device) {
+  const el = $("#watchBody video, #watchBody audio");
+  const position = el && isFinite(el.currentTime) ? el.currentTime : 0;
   const r = await (await fetch("/api/cast/start", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id, part, device})})).json();
+    body: JSON.stringify({id, part, device, position})})).json();
   if (r.error) return toast(r.error);
-  const el = $("#watchBody video, #watchBody audio"); if (el) el.pause();
+  if (el) { el.pause(); el.controls = false; el.dataset.castDisplay = el.style.display; el.style.display = "none"; }
+  casting = {device, position};
   showCastControls(device, r.name);
   toast(`正在投到 ${r.name}`);
 }
@@ -1906,7 +1909,8 @@ function showCastControls(device, name) {
   const box = $("#castBox"); if (!box) return;
   clearInterval(castTimer);
   box.innerHTML = `<div class="answer"><b>正在投到 ${esc(name)}</b> <span class="sub" id="castTime">连接中…</span>
-    <input id="castSeek" type="range" min="0" max="1" value="0" step="1" style="width:100%;margin:10px 0" onchange="castSeek(${esc(JSON.stringify(device))},this.value)">
+    <input id="castSeek" type="range" min="0" max="1" value="0" step="1" style="width:100%;margin:10px 0" oninput="castSeekPreview(this.value)" onchange="castSeek(${esc(JSON.stringify(device))},this.value)">
+    <div class="sub" id="castVolume"></div>
     <div class="actions"><button onclick="castControl(${esc(JSON.stringify(device))},'play')">播放</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'pause')">暂停</button>
     <button onclick="castControl(${esc(JSON.stringify(device))},'stop')">停止投屏</button></div></div>`;
@@ -1917,19 +1921,57 @@ async function castStatus(device) {
     const r = await (await fetch(`/api/cast/status?device=${encodeURIComponent(device)}`)).json();
     if (r.error) { clearInterval(castTimer); return toast(r.error); }
     const seek = $("#castSeek"), label = $("#castTime");
-    if (seek && r.duration) { seek.max = r.duration; seek.value = Math.min(r.position || 0, r.duration); }
+    if (seek && r.duration) {
+      seek.max = r.duration;
+      if (casting && casting.seeking) {
+        seek.value = Math.min(casting.seekTarget, r.duration);
+        if (Math.abs((r.position || 0) - casting.seekTarget) <= 3 || Date.now() > casting.seekDeadline)
+          casting.seeking = false;
+      }
+      if (!(casting && casting.seeking)) seek.value = Math.min(r.position || 0, r.duration);
+    }
     if (label) label.textContent = `${r.state === 'PLAYING' ? '播放中' : r.state === 'PAUSED_PLAYBACK' ? '已暂停' : r.state || '投屏中'} · ${dur(r.position || 0)} / ${dur(r.duration || 0)}`;
+    if (casting) casting.position = r.position || 0;
+    const volume = $("#castVolume");
+    if (volume && r.volume !== null && r.volume !== undefined && !(casting && casting.adjustingVolume))
+      volume.innerHTML = `音量 <input id="castVolumeRange" type="range" min="0" max="100" value="${r.volume}" style="vertical-align:middle" oninput="castVolume(${esc(JSON.stringify(device))},this.value)"> <span id="castVolumeValue">${r.volume}%</span>`;
   } catch (e) {}
 }
-async function castSeek(device, position) {
-  await castControl(device, "seek", +position);
-  castStatus(device);
+function castSeekPreview(position) {
+  const label = $("#castTime"); if (!label) return;
+  const old = label.textContent.split(" · ")[0]; label.textContent = `${old} · ${dur(+position)} / ${dur(+$("#castSeek").max || 0)}`;
 }
-async function castControl(device, action) {
+async function castSeek(device, position) {
+  if (casting) { casting.seeking = true; casting.seekTarget = +position; casting.seekDeadline = Date.now() + 5000; }
+  await castControl(device, "seek", +position);
+  setTimeout(() => castStatus(device), 800);
+}
+function castVolume(device, volume) {
+  const value = $("#castVolumeValue"); if (value) value.textContent = Math.round(volume) + "%";
+  if (casting) casting.adjustingVolume = true;
+  clearTimeout(castVolumeTimer);
+  castVolumeTimer = setTimeout(async () => {
+    await castControl(device, "volume", null, +volume);
+    if (casting) casting.adjustingVolume = false;
+  }, 150);
+}
+function finishCast() {
+  clearInterval(castTimer); castTimer = null; clearTimeout(castVolumeTimer);
+  const el = $("#watchBody video, #watchBody audio");
+  if (el) {
+    el.style.display = el.dataset.castDisplay || "";
+    delete el.dataset.castDisplay;
+    el.controls = true;
+    if (casting && isFinite(casting.position)) el.currentTime = casting.position;
+  }
+  casting = null;
+  const box = $("#castBox"); if (box) box.innerHTML = "";
+}
+async function castControl(device, action, position = null, volume = null) {
   const r = await (await fetch("/api/cast/control", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({device, action})})).json();
+    body: JSON.stringify({device, action, position, volume})})).json();
   if (r.error) toast(r.error);
-  else if (action === "stop") { clearInterval(castTimer); const box = $("#castBox"); if (box) box.innerHTML = ""; }
+  else if (action === "stop") finishCast();
 }
 function updateWatchStatus() {
   const el = $("#wstatus"); if (!el || !watching) return;

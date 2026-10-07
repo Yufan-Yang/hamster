@@ -1855,7 +1855,8 @@ def cast_start():
     thumb_url = f"{base}/thumb/{jid}?t={library.media_token(jid, 0)}"
     mime = "audio/mpeg" if Path(media["path"]).suffix.lower() in AUDIO_EXT else "video/mp4"
     try:
-        name = cast.start(str(data.get("device", "")), media_url, row["title"] or Path(media["path"]).stem, thumb_url, mime)
+        name = cast.start(str(data.get("device", "")), media_url, row["title"] or Path(media["path"]).stem, thumb_url, mime,
+                          data.get("position", 0))
     except (ValueError, RuntimeError) as e:
         return jsonify(error=str(e)), 502
     return jsonify(ok=True, name=name)
@@ -1865,7 +1866,7 @@ def cast_start():
 def cast_control():
     data = request.get_json(silent=True) or {}
     try:
-        cast.control(str(data.get("device", "")), str(data.get("action", "")), data.get("position"))
+        cast.control(str(data.get("device", "")), str(data.get("action", ""),), data.get("position"), data.get("volume"))
     except (ValueError, RuntimeError) as e:
         return jsonify(error=str(e)), 502
     return jsonify(ok=True)
