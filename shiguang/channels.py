@@ -27,10 +27,20 @@ SUB_FILTER_SCAN = int(os.environ.get("SUB_FILTER_SCAN", "300"))  # with a filter
 ADULT_PLATFORMS = {"pornhub"}
 
 
-def channel_of(url):
+def channel_of(url, _followed_short=False):
     """(platform, id, URL of the uploader's video list) when `url` is an uploader page, else None."""
     parts = urllib.parse.urlsplit(url.strip())
     host = parts.netloc.lower().removeprefix("www.").removeprefix("m.")
+    if host == "b23.tv" and not _followed_short:
+        # Resolve only the known B站 shortener, once, before classifying the
+        # resulting space URL. Other submitted URLs are never fetched here.
+        try:
+            resolved = requests.get(url.strip(), headers={"User-Agent": UA},
+                                    allow_redirects=True, timeout=10).url
+        except requests.RequestException:
+            return None
+        if resolved and resolved.strip() != url.strip():
+            return channel_of(resolved, _followed_short=True)
     if host == "space.bilibili.com":
         m = re.match(r"/(\d+)", parts.path)
         if m:

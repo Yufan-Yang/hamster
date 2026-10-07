@@ -481,6 +481,23 @@ def sub_filters():
 check("追更 filters: keywords, dates, lengths in and / or groups", sub_filters)
 
 
+def bilibili_short_uploader_link():
+    import shiguang.channels as ch
+    class Redirect:
+        url = "https://space.bilibili.com/3546957240862932"
+    old_get = ch.requests.get
+    try:
+        ch.requests.get = lambda *args, **kwargs: Redirect()
+        assert ch.channel_of("https://b23.tv/6G32VMG") == (
+            "bilibili", "3546957240862932",
+            "https://space.bilibili.com/3546957240862932/upload/video")
+    finally:
+        ch.requests.get = old_get
+
+
+check("B站 b23.tv short uploader links are followed", bilibili_short_uploader_link)
+
+
 def bilibili_412_restarts_session():
     ch = shiguang.channels
     class Reply:
