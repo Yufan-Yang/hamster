@@ -11,6 +11,13 @@ BAD=/var/lib/lan-switch/wired-failed
 mkdir -p /var/lib/lan-switch
 
 log() { echo "$*"; logger -t lan-switch "$*"; }
+# pi-gateway.local answers only from the link in use (with both, a Mac may pick the Wi-Fi spare address)
+mdns() {
+  local conf=/etc/avahi/avahi-daemon.conf
+  sed -i '/^deny-interfaces=/d' "$conf"
+  [ "$1" = wired ] && sed -i "/^\[server\]/a deny-interfaces=$WIFI" "$conf"
+  systemctl try-restart avahi-daemon
+}
 carrier() { cat /sys/class/net/eth0/carrier 2>/dev/null || echo 0; }
 on_wired() { nmcli -t -f GENERAL.STATE con show "$WIRED" 2>/dev/null | grep -q activated; }
 
@@ -26,14 +33,16 @@ to_wifi() {
   nmcli con down "$WIRED" >/dev/null 2>&1
   nmcli dev modify "$WIFI" ipv4.addresses "$ADDR/24" >/dev/null
   arping -c2 -U -I "$WIFI" "$ADDR" >/dev/null 2>&1
+  mdns wifi
   log "on Wi-Fi at $ADDR"
 }
 
 to_wired() {
   log "cable in: moving $ADDR to the cable"
   nmcli dev modify "$WIFI" ipv4.addresses "$SPARE/24" >/dev/null
-  if nmcli con up "$WIRED" >/dev/null 2>&1 && arping -c2 -U -I eth0 "$ADDR" >/dev/null 2>&1; works; then
+  if nmcli con up "$WIRED" >/dev/null 2>&1 && { arping -c2 -U -I eth0 "$ADDR" >/dev/null 2>&1; works; }; then
     rm -f "$BAD"
+    mdns wired
     log "on the cable at $ADDR (Wi-Fi at $SPARE)"
   else
     touch "$BAD"
