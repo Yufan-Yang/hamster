@@ -440,6 +440,8 @@ def job_media(jid, n):
     if not (token_ok(jid, n) or web.visible(jid)):
         return None
     row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+    if not row:  # deleted meanwhile; a signed link outlives the job
+        return None
     items = playable(job_dict(row))
     return items[n] if 0 <= n < len(items) else None
 
