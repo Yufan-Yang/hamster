@@ -628,7 +628,36 @@ check("subtitles translated: other languages, not English", lambda: (
     and shiguang.tasks.translatable(["/x/v.en.srt"], "v") is None
     and shiguang.tasks.translatable(["/x/v.ja.srt", "/x/v.en.srt"], "v") is None
     and shiguang.tasks.translatable(["/x/v.ko.srt", "/x/v.zh.srt"], "v") is None
-    and shiguang.tasks.translatable(["/x/v.srt"], "v") is None) or 1/0)
+    and shiguang.tasks.translatable(["/x/v.srt"], "v") is None
+    and shiguang.tasks.translatable(["/x/v.ai-zh.srt"], "v") is None  # B站's AI subtitles: Chinese, not "ai"
+    and shiguang.tasks.translatable(["/x/v.ai-en.srt"], "v") is None) or 1/0)
+
+
+def heal_incidents():
+    """A task failing for good becomes one incident (however often), goes to the Mac once, and a fix with retry puts
+    its failed tasks back on the board."""
+    B = shiguang.board
+    B.task("heal_test_dummy", "测试", "light")(lambda task, beat: 1 / 0)
+    tids = [B.publish("heal_test_dummy", f"heal-test:{i}", payload={"title": "t"}) for i in range(2)]
+    for tid in tids:
+        G.q("UPDATE tasks SET state='running', worker='w', attempts=5 WHERE id=?", (tid,))
+        assert B.fail_task(tid, "w", "ZeroDivisionError: division by zero", trace=f'File "/opt/grabber/shiguang/x.py", line {tid}, in f')
+    inc = G.q("SELECT * FROM incidents WHERE kind='heal_test_dummy'", one=True)
+    assert inc and inc["count"] == 2 and inc["state"] == "healing", dict(inc or {})
+    sent = G.q("SELECT * FROM tasks WHERE kind='heal' AND target=?", (f"incident:{inc['id']}",), one=True)
+    assert sent and json.loads(sent["payload"])["error"].startswith("ZeroDivisionError")
+    G.q("UPDATE tasks SET state='running', worker='mac' WHERE id=?", (sent["id"],))
+    assert B.complete_task(sent["id"], "mac", {"state": "fixed", "diagnosis": "d", "summary": "s", "retry": True})
+    assert G.q("SELECT state FROM incidents WHERE id=?", (inc["id"],), one=True)["state"] == "fixed"
+    assert all(G.q("SELECT state FROM tasks WHERE id=?", (t,), one=True)["state"] == "queued" for t in tids)
+    B.fail_task(tids[0], None, "x", expected=True)  # (not running: nothing happens)
+    assert get("/api/tasks")["heal"][0]["state"] == "fixed"
+    G.q("DELETE FROM tasks WHERE kind IN ('heal_test_dummy', 'heal')")
+    G.q("DELETE FROM incidents WHERE kind='heal_test_dummy'")
+    del B.TASK_KINDS["heal_test_dummy"]
+
+
+check("自修复: failures become incidents, a fix retries them", heal_incidents)
 
 import runpy  # noqa: E402
 runpy.run_path(str(APP / "tests" / "classification_tags.py"))["run"](check)

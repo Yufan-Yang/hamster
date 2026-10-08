@@ -23,6 +23,7 @@ import zipfile
 from io import BytesIO
 
 from flask import Response
+from flask import got_request_exception
 from flask import g
 from flask import jsonify
 from flask import request
@@ -695,14 +696,21 @@ def owner_label(o):
     return o[5:] if o.startswith("user:") else "快捷指令（未识别）" if o == "shortcut" else "匿名设备" if o else "旧任务"
 
 
+# A video's category chip: its folder in the Videos library, else the library; "Other" when there's none
+CATEGORY_SQL = ("CASE WHEN json_extract(analysis, '$.library') = 'Videos' "
+                "THEN COALESCE(NULLIF(json_extract(analysis, '$.folder'), ''), 'Other') "
+                "ELSE COALESCE(NULLIF(json_extract(analysis, '$.library'), ''), 'Other') END")
+
+
 def category_counts():
-    """How many finished videos each category chip has (all of them, not only the page loaded)."""
+    """How many finished videos each category chip has (all of them, not only the page loaded); hidden ones (privacy
+    mode, not revealed) aren't counted."""
     scope, args = scope_sql()
+    hidden = hidden_ids()
     out = {}
-    for r in q(f"SELECT json_extract(analysis, '$.library') lib, json_extract(analysis, '$.folder') folder, COUNT(*) n "
-               f"FROM jobs WHERE {scope} AND status IN ('done', 'linked') GROUP BY lib, folder", args):
-        key = (r["folder"] or "Other") if r["lib"] == "Videos" else (r["lib"] or "Other")
-        out[key] = out.get(key, 0) + r["n"]
+    for r in q(f"SELECT id, {CATEGORY_SQL} cat FROM jobs WHERE {scope} AND status IN ('done', 'linked')", args):
+        if r["id"] not in hidden:
+            out[r["cat"]] = out.get(r["cat"], 0) + 1
     return out
 
 
@@ -731,8 +739,7 @@ def jobs():
         scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), max(limit, 1000)
     cat = request.args.get("cat", "")
     if cat:  # a category chip: every video in it (a small category can be spread over many pages of the newest)
-        field = "folder" if cat not in ("Movies", "TV", "Music", "Downloads") else "library"
-        scope += f" AND json_extract(analysis, '$.{field}') = ?" + (" AND json_extract(analysis, '$.library') = 'Videos'" if field == "folder" else "")
+        scope += f" AND {CATEGORY_SQL} = ?"  # the same key category_counts counts by ("Other" includes unsorted ones)
         scope_args, limit = (*scope_args, cat), max(limit, 2000)
     more = False
     parsed = None
@@ -1137,7 +1144,8 @@ def api_fail(tid):
     if (denied := compute_auth()):
         return denied
     body = request.get_json(silent=True) or {}
-    return jsonify(ok=board.fail_task(tid, _worker(), body.get("error", ""), retry=bool(body.get("retry", True))))
+    return jsonify(ok=board.fail_task(tid, _worker(), body.get("error", ""), retry=bool(body.get("retry", True)),
+                                      trace=str(body.get("trace") or "")[-8000:], expected=bool(body.get("expected"))))
 
 
 @app.post("/api/tasks/ingest")
@@ -1956,4 +1964,13 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, books, cast, channels, core, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
+from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
+
+
+def _request_crashed(sender, exception, **extra):
+    """A request that crashed (a 500) goes to 自修复 too."""
+    import traceback
+    heal.request_failed(request.method, request.path, exception, traceback.format_exc())
+
+
+got_request_exception.connect(_request_crashed, app)

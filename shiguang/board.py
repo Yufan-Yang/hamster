@@ -214,8 +214,9 @@ def complete_task(tid, worker, result):
     return True
 
 
-def fail_task(tid, worker, error, retry=True):
-    """retry: try again later (after 1, 4, 9... minutes; at most 5 times); else it stays failed."""
+def fail_task(tid, worker, error, retry=True, trace="", expected=False):
+    """retry: try again later (after 1, 4, 9... minutes; at most 5 times); else it stays failed, and unless it was
+    `expected` (the target is gone...) it goes to 自修复 (heal.py) with its traceback."""
     row = q("SELECT attempts FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
     if not row:
         return False
@@ -225,6 +226,8 @@ def fail_task(tid, worker, error, retry=True):
     else:
         _write("UPDATE tasks SET state='failed', worker=NULL, lease_until=NULL, error=?, updated=? WHERE id=?",
                (str(error)[:1000], time.time(), tid))
+        from . import heal
+        heal.task_failed(tid, error, trace, expected)
     return True
 
 
@@ -244,15 +247,23 @@ def task_media(task):
     return Path(media[p["part"]]["path"]), media[p["part"]]["subs"]
 
 
+class AlreadySaved(Exception):
+    """The parent's result was written into the library by an earlier run of this task (which then failed to
+    report back): only its summary is left, and saving it again would wipe what was saved."""
+
+
 def parent_result(task):
     row = q("SELECT result FROM tasks WHERE id=(SELECT parent FROM tasks WHERE id=?)", (task["id"],), one=True)
-    return json.loads(row["result"] or "{}") if row else {}
+    res = json.loads(row["result"] or "{}") if row else {}
+    if res.get("saved"):
+        raise AlreadySaved()
+    return res
 
 
 def drop_parent_result(task, summary):
     """Once written into the library, the bulky result (vectors, every subtitle line) isn't needed on the board."""
     _write("UPDATE tasks SET result=? WHERE id=(SELECT parent FROM tasks WHERE id=?)",
-           (json.dumps(summary, ensure_ascii=False), task["id"]))
+           (json.dumps({**summary, "saved": True}, ensure_ascii=False), task["id"]))
 
 
 # ---- the Pi's own work for each kind
@@ -269,12 +280,14 @@ def run_claimed(task, worker):
     except Paused:
         release_task(task["id"], worker)
         return "paused"
+    except AlreadySaved:
+        result = {"skipped": "saved by an earlier run"}
     except ValueError as e:  # the target is gone or doesn't fit: no point trying again
-        fail_task(task["id"], worker, e, retry=False)
+        fail_task(task["id"], worker, e, retry=False, expected=True)
         return "failed"
     except Exception as e:
         traceback.print_exc()
-        fail_task(task["id"], worker, e)
+        fail_task(task["id"], worker, e, trace=traceback.format_exc())
         return "failed"
     complete_task(task["id"], worker, result)
     return "done"
@@ -372,8 +385,9 @@ def board_summary(since=0):
                 "online": time.time() - r["seen"] < WORKER_FRESH, "task": r["task"],
                 "paused": json.loads(r["paused"])["why"] if r["paused"] else None}
                for r in q("SELECT * FROM workers ORDER BY seen DESC")]
+    from . import heal
     return {"kinds": kinds, "running": running, "failed": failed, "workers": workers, "enabled": IDLE_WORK,
-            "busy": box_busy()}
+            "busy": box_busy(), "heal": heal.recent()}
 
 
 @once("board_chapters")

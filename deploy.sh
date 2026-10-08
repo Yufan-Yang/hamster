@@ -25,6 +25,9 @@ ssh "$PI" "sudo rm -rf $APP.next && sudo mkdir -p $APP.next && sudo tar xzf /tmp
 echo "== smoke test on a copy of the database"
 ssh "$PI" "sudo -u grabber $APP/venv/bin/pip install -q -r $APP.next/requirements-pi.txt && cd $APP.next && sudo -u grabber $APP/venv/bin/python tests/smoke.py $APP.next > /tmp/shiguang-smoke.log 2>&1; s=\$?; grep -v -i warn /tmp/shiguang-smoke.log; rm -f /tmp/shiguang-smoke.log; exit \$s"
 
+# which commit the Pi runs (自修复 only changes code when it's the committed one)
+REV=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+[ -z "$(git status --porcelain -- grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests static 2>/dev/null)" ] || REV="$REV-dirty"
 echo "== swap in and restart"
 ssh "$PI" "set -e
 sudo rm -rf $APP.prev && sudo mkdir -p $APP.prev
@@ -39,7 +42,7 @@ for i in \$(seq 1 20); do
   if [ \"\$(curl -s -o /dev/null -w '%{http_code}' localhost:8088/)\" = 200 ] && systemctl is-active -q grabber-worker \
      && curl -s localhost:8088/api/tasks | grep -q '\"pi-cpu\"'; then ok=1; break; fi
 done
-if [ \$ok = 1 ]; then echo 'up and running'; else
+if [ \$ok = 1 ]; then echo 'up and running'; echo '$REV' | sudo tee $APP/REVISION >/dev/null; else
   echo 'NOT healthy: putting the previous code back'
   for f in grabber.py index.html refresh_metadata.py requirements-pi.txt shiguang tests; do sudo rm -rf $APP/\$f; [ -e $APP.prev/\$f ] && sudo cp -a $APP.prev/\$f $APP/; done
   sudo systemctl restart grabber grabber-worker; exit 1

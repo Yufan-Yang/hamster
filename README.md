@@ -306,6 +306,21 @@
   - 账户余额定时查询（`/user/balance`），所以能和实际扣费对照。
 - **硬盘空间**：媒体库（mergerfs 两块盘）、每块盘和 SD 卡的已用/剩余；各顶层文件夹（视频、电影、书架、随记、数据库……）的大小由后台每小时 `du` 一次（低 IO 优先级），存在 kv `space`，打开页面不现算。
 - **设备状态**：CPU 温度，以及硬盘的 SMART 健康数据。硬盘数据由 root 定时器 `pi/disk-health` 写到 `/run/disk-health.json`，读取时不唤醒休眠中的硬盘。
+- **自修复**：最近的报错，以及 Claude 的诊断和修复（见 3.13）。
+
+### 3.13 自修复
+
+Pi 上的报错自动交给 Mac 上的 Claude Code 诊断，能改的直接改，测试通过就上线。
+- **什么算报错**（`shiguang/heal.py`）：任务彻底失败（重试 5 次都不行，或工人说不用重试），以及页面请求崩溃（500）。不算：目标没了（`ValueError`）、网络错误、AI 请求（本来就会退回 DeepSeek）。
+- **同一个 bug 只处理一次**：按「任务类型 + 去掉数字和路径的报错 + 出错的函数」合并成一条事故，只计次数。修好后又出现，再修一次；每条最多 2 次（`HEAL_TRIES`），每天最多送出 6 条（`HEAL_PER_DAY`）。`HEAL=0` 关掉。
+- **Mac 上怎么修**（`mac_worker.py` 的 `heal`）：
+  1. 在 `~/vpn/grabber` 的一个 git worktree 里（`~/shiguang-compute/heal-worktree`，不碰你自己的工作目录），用 `claude -p` 跑 Opus（`HEAL_MODEL`）。只给读、搜、改文件的工具，不能跑命令；每轮最多 30 轮对话（`--max-turns`，`HEAL_TURNS`）。
+  2. 只允许改 `shiguang/`、`grabber.py`、`index.html`、`tests/`，别处的改动会被撤掉。
+  3. 有改动就提交，用 `deploy.sh --no-mac` 部署：lint、在数据库副本上跑 smoke 测试、换上、起不来自动回滚。没过就把失败输出交回 Claude 再改一次（共 2 轮，`HEAL_ROUNDS`）；还不过，Pi 上的代码不动，记为「已诊断」。
+  4. 上线后把提交快进合并到当前分支；当前分支已经往前走了就留在 `heal/<事故号>` 分支。
+  5. Claude 说该重试（修好了，或原因已经过去），失败的那些任务回到任务板。
+- **只诊断不改**：Pi 上跑的不是已提交的代码时（`deploy.sh` 把提交号写进 `/opt/grabber/REVISION`，有未提交改动就带 `-dirty`），只读代码、给出诊断，不改。所以手动部署前先提交。
+- 结果在「资源使用」的「自修复」一栏。
 
 ---
 

@@ -642,6 +642,171 @@ def claude_loop(n, extra=False):
                 pass
 
 
+# ---- 自修复: an error the Pi ran into (shiguang/heal.py), worked out and fixed with this Mac's Claude Code
+
+REPO = Path(os.environ.get("SHIGUANG_REPO") or Path.home() / "vpn" / "grabber")  # the code, deploy.sh next to it
+HEAL_DIR = HERE / "heal-worktree"  # a git worktree of it: the user's own checkout is never touched
+HEAL_MODEL = os.environ.get("HEAL_MODEL", "opus")
+HEAL_TURNS = int(os.environ.get("HEAL_TURNS", "30"))  # Claude's turns (tool calls and answers) per round, at most
+HEAL_ROUNDS = 2  # a fix the smoke test rejects goes back to Claude once, with what failed
+HEAL_PATHS = ("shiguang/", "grabber.py", "index.html", "tests/")  # what a fix may change (not deploy.sh, mac/, config)
+PI_SSH = os.environ.get("PI_SSH", "pi@192.168.3.200")
+HEAL_SYSTEM = """You fix bugs in 拾光, a home media server on a Raspberry Pi. The code is in this folder: the shiguang/
+package, grabber.py (entry), index.html (the page), tests/smoke.py (run before every deploy, on a copy of the real
+database). An error happened in production; its details are below.
+
+Work out the cause from the code (you can read and search; you can't run anything). If it's a bug in this code, fix it
+with the smallest change that makes it right, in the style of the code around it (comments, naming, idiom). Don't
+touch deploy.sh, mac/ or config; don't weaken or delete tests to make them pass; don't add features or refactor.
+If it isn't a bug in the code (a site down, a broken file, the network, the disk), change nothing.
+
+Your final answer: state "fixed" (you changed code), "diagnosed" (a bug you couldn't fix safely, or it needs a person),
+or "not_a_bug"; diagnosis: 2-5 sentences in Simplified Chinese: the cause, and what you changed or what a person
+should do; summary: one short line in Simplified Chinese; retry: true when the failed tasks should run again now
+(after your fix, or when the cause has passed)."""
+HEAL_SCHEMA = {"type": "object", "required": ["state", "diagnosis", "summary", "retry"], "properties": {
+    "state": {"enum": ["fixed", "diagnosed", "not_a_bug"]}, "diagnosis": {"type": "string"},
+    "summary": {"type": "string"}, "retry": {"type": "boolean"}}}
+
+
+def git(*args, cwd=REPO, check=True):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()[-300:]}")
+    return r.stdout.strip()
+
+
+def deployed_revision():
+    """The commit the Pi runs (deploy.sh writes it), "…-dirty" when it was deployed with uncommitted changes."""
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", PI_SSH, "cat /opt/grabber/REVISION"],
+                       capture_output=True, text=True, timeout=30)
+    return r.stdout.strip()
+
+
+def heal_prompt(p, failed=""):
+    ctx = json.dumps(p.get("context") or {}, ensure_ascii=False, indent=1)
+    return (f"Where: {p['label']} ({p['kind']}){' — ' + p['about'] if p.get('about') else ''}\n"
+            f"Happened {p.get('count', 1)} time(s).\nError: {p['error']}\n\nTraceback:\n{p.get('trace') or '(none: it failed on a remote worker)'}\n\n"
+            f"Context:\n{ctx}\n"
+            + (f"\nA fix was made for this before ({p['before']}), and it happened again after it.\n" if p.get("before") else "")
+            + (f"\nYour fix so far is in the working tree, but the deploy rejected it:\n{failed}\nFix that.\n" if failed else ""))
+
+
+def ask_healer(p, beat, can_edit, failed=""):
+    """One round of Claude Code in the worktree: read-only when it can't fix (it then only diagnoses)."""
+    cmd = [str(CLAUDE), "-p", "--safe-mode", "--no-session-persistence", "--output-format", "json",
+           "--model", HEAL_MODEL, "--max-turns", str(HEAL_TURNS),
+           "--tools", "Read,Grep,Glob,Edit,Write" if can_edit else "Read,Grep,Glob",
+           "--permission-mode", "acceptEdits", "--append-system-prompt", HEAL_SYSTEM, "--json-schema", json.dumps(HEAL_SCHEMA)]
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          cwd=HEAL_DIR, env=proxy_env()) as proc:
+        stop = threading.Event()
+        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
+        try:
+            stdout, stderr = proc.communicate(heal_prompt(p, failed), timeout=1800)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RuntimeError("claude: no answer in 30 min")
+        finally:
+            stop.set()
+    try:
+        out = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"claude said (exit {proc.returncode}): {(stderr or stdout).strip()[-300:]}")
+    answer = out.get("structured_output")
+    if not isinstance(answer, dict):
+        if out.get("subtype") == "error_max_turns":
+            return {"state": "diagnosed", "diagnosis": f"对话到了 {HEAL_TURNS} 轮上限，还没找到原因。", "summary": "没查出来", "retry": False}
+        raise RuntimeError(f"claude: {str(out.get('result') or out.get('subtype'))[:300]}")
+    return answer
+
+
+def heal(task, beat):
+    """Diagnose an incident and, when the Pi runs the committed code, fix it: Claude edits a worktree, deploy.sh tests
+    the fix on a copy of the database and puts it live (or leaves the Pi as it was); the fix is then committed onto
+    the checkout's branch (or a heal/N branch when that has moved on)."""
+    p = task["payload"]
+    base = git("rev-parse", "HEAD")
+    can_edit = deployed_revision() == base
+    if HEAL_DIR.exists():
+        git("worktree", "remove", "--force", str(HEAL_DIR), check=False)
+        shutil.rmtree(HEAL_DIR, ignore_errors=True)
+    git("worktree", "prune")
+    git("worktree", "add", "--detach", str(HEAL_DIR), base)
+    try:
+        failed, rounds = "", 0
+        while True:
+            rounds += 1
+            answer = ask_healer(p, beat, can_edit, failed)
+            for line in git("status", "--porcelain", cwd=HEAL_DIR).splitlines():  # outside what a fix may touch: undone
+                path = line[3:].split(" -> ")[-1]
+                if not path.startswith(HEAL_PATHS):
+                    git("checkout", "--", path, cwd=HEAL_DIR, check=False) if line[:2] != "??" else (HEAL_DIR / path).unlink(missing_ok=True)
+            out = {"state": answer["state"], "diagnosis": answer["diagnosis"], "summary": answer["summary"],
+                   "retry": bool(answer["retry"]), "rounds": rounds}
+            if not can_edit:
+                out["diagnosis"] += "（Pi 上的代码不是已提交的版本，所以这次只诊断、没有改代码。）"
+                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}
+            if not git("status", "--porcelain", cwd=HEAL_DIR):
+                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}
+            git("add", "-A", "--", *HEAL_PATHS, cwd=HEAL_DIR)
+            git("commit", "-q", "-m", f"自修复 #{p['incident']}: {answer['summary']}\n\n{answer['diagnosis']}\n\n"
+                "Co-Authored-By: Claude <noreply@anthropic.com>", cwd=HEAL_DIR)
+            env = dict(os.environ, PYFLAKES=os.environ.get("PYFLAKES") or str(Path(sys.executable).parent / "pyflakes"))
+            stop = threading.Event()
+            threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
+            try:
+                d = subprocess.run(["./deploy.sh", "--no-mac"], cwd=HEAL_DIR, capture_output=True, text=True, timeout=1200, env=env)
+            finally:
+                stop.set()
+            if d.returncode == 0:
+                sha = git("rev-parse", "HEAD", cwd=HEAL_DIR)
+                if git("merge", "--ff-only", "-q", sha, check=False) == "" and git("rev-parse", "HEAD") == sha:
+                    note = ""
+                else:  # the checkout moved on meanwhile: the fix waits on its own branch
+                    git("branch", "-f", f"heal/{p['incident']}", sha)
+                    note = f"（修复已上线，提交在分支 heal/{p['incident']}，还没合并进当前分支。）"
+                return out | {"state": "fixed", "commit": sha[:10], "diagnosis": out["diagnosis"] + note}
+            log("heal", p["incident"], "deploy rejected the fix, round", rounds)
+            git("reset", "-q", "--soft", "HEAD~1", cwd=HEAL_DIR)  # the fix stays in the tree for the next round
+            if rounds >= HEAL_ROUNDS:
+                return out | {"state": "diagnosed", "retry": False, "diagnosis": out["diagnosis"] +
+                              f"（改了 {rounds} 次都没通过部署前的测试，Pi 上的代码没动，需要人看一下。）",
+                              "log": (d.stdout + d.stderr)[-3000:]}
+            failed = (d.stdout + d.stderr)[-4000:]
+    finally:
+        git("worktree", "remove", "--force", str(HEAL_DIR), check=False)
+
+
+def heal_loop():
+    """Its own thread, one incident at a time (they're rare; a deploy at a time)."""
+    me.name = f"{NAME}-heal"
+    if not CLAUDE.exists() or not (REPO / ".git").exists():
+        log("no Claude Code or no code at", REPO, ": 自修复 stays off")
+        return
+    while True:
+        try:
+            task = call("/api/tasks/claim", caps=["heal"], wait=25)["task"]
+        except requests.RequestException:
+            time.sleep(60)
+            continue
+        if not task:
+            continue
+        tid, started = task["id"], time.time()
+        log("heal", tid, task["payload"].get("title"))
+        try:
+            result = heal(task, lambda: call(f"/api/tasks/{tid}/heartbeat"))
+            call(f"/api/tasks/{tid}/done", result=result)
+            log("healed", tid, result["state"], f"{time.time() - started:.0f}s", result["summary"])
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                call(f"/api/tasks/{tid}/fail", error=str(e)[:500], retry=False)
+            except requests.RequestException:
+                pass
+
+
 # ---- the claim loop
 
 def work(task):
@@ -675,7 +840,7 @@ def work(task):
     except Exception as e:  # the task itself (unreadable audio...): failed for good
         stop.set()
         traceback.print_exc()
-        call(f"/api/tasks/{task['id']}/fail", error=str(e), retry=False)
+        call(f"/api/tasks/{task['id']}/fail", error=str(e), retry=False, trace=traceback.format_exc()[-8000:])
         return
     stop.set()
     call(f"/api/tasks/{task['id']}/done", result=result)
@@ -720,6 +885,7 @@ def run():
     log("worker", NAME, CAPS, "->", PI, "model", WHISPER)
     threading.Thread(target=drop_loop, daemon=True).start()
     threading.Thread(target=pic_loop, daemon=True).start()
+    threading.Thread(target=heal_loop, daemon=True).start()
     for n in range(1, CLAUDE_LOOPS + CLAUDE_EXTRA + 1):
         threading.Thread(target=claude_loop, args=(n, n > CLAUDE_LOOPS), daemon=True).start()
     last_work, loaded, paused_for_game = time.time(), False, False

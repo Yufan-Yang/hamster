@@ -283,6 +283,11 @@ def sub_lang(path, stem):
     return Path(path).name[len(stem) + 1:].rsplit(".", 1)[0]
 
 
+def base_lang(code):
+    """The language of a sub_lang code: "en-orig" -> "en", B站's AI subtitles "ai-zh" -> "zh" (not a language "ai")."""
+    return re.sub(r"^ai-", "", code).split("-")[0]
+
+
 def srt_cues(path):
     """[(start, end, text)] of an .srt/.vtt, consecutive repeats merged and overlaps cut (auto captions roll: each
     cue starts before the last one ends)."""
@@ -425,9 +430,9 @@ def bilingual_pair(m):
     track was translated from."""
     stem = Path(m["path"]).stem
     by = {sub_lang(x, stem): x for x in m["subs"]}
-    zh = next((by[k] for k in by if k.split("-")[0] == "zh"), None)
-    other = by.get("en") or next((by[k] for k in by if k.split("-")[0] == "en"), None) \
-        or next((by[k] for k in by if k.split("-")[0] not in ("zh", "und", "")), None)
+    zh = next((by[k] for k in by if base_lang(k) == "zh"), None)
+    other = by.get("en") or next((by[k] for k in by if base_lang(k) == "en"), None) \
+        or next((by[k] for k in by if base_lang(k) not in ("zh", "und", "")), None)
     return (zh, other) if zh and other else None
 
 

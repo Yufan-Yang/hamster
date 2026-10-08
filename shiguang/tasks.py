@@ -124,7 +124,7 @@ LANG_NAMES = {"ja": "Japanese", "ko": "Korean", "fr": "French", "de": "German", 
 def translatable(subs, stem):
     """The subtitle file to translate into Chinese: one in a language that's neither Chinese nor English (English is
     read as it is), when there's no Chinese or English track at all; else None."""
-    base = [(library.sub_lang(x, stem).split("-")[0], x) for x in subs]
+    base = [(library.base_lang(library.sub_lang(x, stem)), x) for x in subs]
     if any(l in ("zh", "en") for l, _ in base):
         return None
     return next((x for l, x in base if known_lang(l)), None)
@@ -139,7 +139,7 @@ def maybe_translate(task, path, subs_or_lang):
     """Subtitles in another language (Japanese, Korean...) and no Chinese or English ones: translate them into Chinese
     (off-peak, at half the price). English stays as it is."""
     langs = [subs_or_lang] if isinstance(subs_or_lang, str) else [library.sub_lang(x, path.stem) for x in subs_or_lang]
-    base = {l.split("-")[0] for l in langs}
+    base = {library.base_lang(l) for l in langs}
     if not base & {"zh", "en"} and any(map(known_lang, base)) and LLM_API_KEY:
         board.publish("translate", task["target"], task["priority"] - 2, parent=task["id"], not_before=llm.offpeak_from())
 
@@ -162,7 +162,7 @@ def pi_translate(task, beat):
     src = translatable(subs, path.stem)
     if not src:
         return {"skipped": "Chinese or English subtitles already, or none in another language"}
-    lang = library.sub_lang(src, path.stem).split("-")[0]
+    lang = library.base_lang(library.sub_lang(src, path.stem))
     en = [src]  # (the file translated from)
     cues = library.srt_cues(en[0])
     # carry on from what an earlier run (stopped by a restart) translated already

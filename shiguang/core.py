@@ -259,6 +259,11 @@ def init_db(reset=False):
         worker TEXT, lease_until REAL, attempts INTEGER DEFAULT 0, not_before REAL, error TEXT DEFAULT '',
         parent INTEGER, published_by TEXT, created REAL, updated REAL, UNIQUE (kind, target));
     CREATE INDEX IF NOT EXISTS tasks_queue ON tasks (state, priority, id);
+    -- 自修复 (heal.py): errors the Pi ran into, one row per distinct bug, and what the Mac's Claude Code made of it
+    CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, sig TEXT UNIQUE, kind TEXT, label TEXT,
+        title TEXT, error TEXT, trace TEXT, context TEXT, tasks TEXT DEFAULT '[]', count INTEGER DEFAULT 1,
+        tries INTEGER DEFAULT 0, state TEXT DEFAULT 'new', diagnosis TEXT DEFAULT '', summary TEXT DEFAULT '',
+        commit_id TEXT DEFAULT '', first REAL, last REAL, healed REAL);
     -- who claims tasks and what they can do
     CREATE TABLE IF NOT EXISTS workers (name TEXT PRIMARY KEY, caps TEXT, seen REAL, task INTEGER, paused TEXT);
     -- same content uploaded twice, or a clip of a longer video: per job a fingerprint (MinHash of what's said,

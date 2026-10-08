@@ -3495,6 +3495,8 @@ function bytes(n) {
 }
 // money: enough digits that a single call (a fraction of a fen) doesn't show as ¥0.00
 function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 10 ? 2 : n >= 0.1 ? 3 : 4)); }
+const HEAL_STATES = {new: "待诊断", healing: "诊断中", back: "修复后又出现", fixed: "已修复", diagnosed: "已诊断",
+  not_a_bug: "不是代码问题", error: "诊断出错"};
 function workerName(n) {
   const c = /^mac.*-claude-(\d+)$/i.exec(n || "");
   return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n]
@@ -3602,6 +3604,9 @@ async function openUsage(days) {
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
       ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
     ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 60))}`).join("；")}</p>` : ""}
+    ${(board.heal || []).length ? `<div class="usec"><b>自修复</b><span class="sub">报错交给 Mac 上的 Claude 诊断；改了代码、测试通过就自动上线</span></div>
+      ${board.heal.map(h => `<p style="margin:6px 0"><b>${esc(HEAL_STATES[h.state] || h.state)}</b> ${esc(h.label)}${h.title ? "「" + esc(h.title.slice(0, 20)) + "」" : ""}${h.count > 1 ? `（${num(h.count)} 次）` : ""} · ${esc(ago(h.last))}<br>
+        <span class="hint">${esc(h.diagnosis || h.why || h.error.slice(0, 120))}${h.commit ? " · 提交 " + esc(h.commit) : ""}</span></p>`).join("")}` : ""}
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
 }
 
