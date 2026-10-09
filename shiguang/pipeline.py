@@ -84,39 +84,64 @@ def bili_staff(url):
         return []
 
 
-_bangumi = {}  # bvid -> its entry in its B站 番剧 (one season list answers for all of the show's videos)
+
+
+def bangumi_season(params):
+    """A B站 番剧 season (params: {"season_id": ...} or {"ep_id": ...}): its name, cover, its show and season number,
+    and every video of it: {"episodes": [entry...]}, each {"id", "bvid", "url", "title" (as the page shows it:
+    "第193话 慕兰之战17", "慕兰之战第19集预告"), "badge" ("会员" / "预告"...), "extra" (not 正片), "episode" (its
+    number, for 正片), "date", "duration"}."""
+    res = requests.get("https://api.bilibili.com/pgc/view/web/season", params=params, timeout=15,
+                       headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"}).json()["result"]
+    seasons = [x.get("season_id") for x in res.get("seasons") or []]
+    out = {"season_id": res["season_id"], "name": res.get("title") or "", "cover": res.get("cover") or "",
+           "show": (res.get("series") or {}).get("series_title") or res.get("title") or "",
+           "season": seasons.index(res["season_id"]) + 1 if res["season_id"] in seasons else 1, "episodes": []}
+    for section, eps in [(None, res.get("episodes") or [])] + [(x, x.get("episodes") or []) for x in res.get("section") or []]:
+        for e in eps:
+            # only 正片's own list says what is 正片 (section_type 0); the sections hold 花絮 and PVs, but also old
+            # 正片 (凡人修仙传's 2020版): those are left to the classifier
+            main = section is None and e.get("section_type", 0) == 0
+            num = str(e.get("title") or "")
+            out["episodes"].append({
+                "id": e.get("id"), "bvid": e.get("bvid"),
+                "url": f"https://www.bilibili.com/video/{e['bvid']}" if e.get("bvid") else f"https://www.bilibili.com/bangumi/play/ep{e.get('id')}",
+                "title": e.get("show_title") or " ".join(str(e.get(k) or "") for k in ("title", "long_title")).strip(),
+                "badge": e.get("badge") or "", "extra": section is None and not main,
+                "episode": int(num) if main and num.isdigit() else None,
+                "date": time.strftime("%Y-%m-%d", time.localtime(e["pub_time"])) if e.get("pub_time") else None,
+                "duration": (e.get("duration") or 0) / 1000 or None})
+    return out
+
+
+_bangumi = {}  # bvid -> its entry (one season list answers for all of the show's videos)
 
 
 def bili_episode(url):
-    """For a video of a B站 番剧: {"title": the name the page shows ("第193话 慕兰之战17", "慕兰之战第19集预告"),
-    "badge": "会员" / "预告"..., "extra": True when it isn't 正片}; None otherwise. (yt-dlp names an episode
-    "<number> <long title>", so the preview listed as 195 came out as "195 慕兰之战19", like an episode.)"""
+    """For a video of a B站 番剧: its entry in bangumi_season, plus "show" and "season"; None otherwise. (yt-dlp names
+    an episode "<number> <long title>", so the preview listed as 195 came out as "195 慕兰之战19", like an episode.)"""
     m = re.search(r"/bangumi/play/ep(\d+)", url or "") or re.search(r"(BV[0-9A-Za-z]{10})", url or "")
     if not m:
         return None
-    hdrs = {"User-Agent": UA, "Referer": "https://www.bilibili.com/"}
     try:
         ep_id = m.group(1) if m.group(1).isdigit() else None
         if not ep_id:
             if m.group(1) in _bangumi:
                 return _bangumi[m.group(1)]
-            r = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": m.group(1)}, timeout=15, headers=hdrs)
+            r = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": m.group(1)}, timeout=15,
+                             headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
             ep = re.search(r"/bangumi/play/ep(\d+)", (r.json().get("data") or {}).get("redirect_url") or "")
             if not ep:
                 return None  # an ordinary video
             ep_id = ep.group(1)
-        res = requests.get("https://api.bilibili.com/pgc/view/web/season", params={"ep_id": ep_id}, timeout=15,
-                           headers=hdrs).json()["result"]
+        season = bangumi_season({"ep_id": ep_id})
         found = None
-        for section, eps in [(None, res.get("episodes") or [])] + [(s, s.get("episodes") or []) for s in res.get("section") or []]:
-            for e in eps:
-                info = {"title": e.get("show_title") or " ".join(str(e.get(k) or "") for k in ("title", "long_title")).strip(),
-                        # only 正片's own list says (section_type); sections hold 花絮 and PVs but also old 正片 (2020版)
-                        "badge": e.get("badge") or "", "extra": section is None and e.get("section_type", 0) != 0}
-                if e.get("bvid"):
-                    _bangumi.setdefault(e["bvid"], info)
-                if str(e.get("id")) == ep_id:
-                    found = found or info
+        for e in season["episodes"]:
+            info = {**e, "show": season["show"], "season": season["season"]}
+            if e["bvid"]:
+                _bangumi.setdefault(e["bvid"], info)
+            if str(e["id"]) == ep_id:
+                found = found or info
         return found
     except Exception:
         traceback.print_exc()
@@ -236,6 +261,8 @@ def process(job_id):
                 a["episode"] = None  # B站 lists it outside 正片 (a preview, PV, 花絮...): not an episode
             if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
                 library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
+            if bangumi and bangumi["episode"] is not None:  # 番剧 正片: an episode, numbered as B站 numbers it
+                a.update(library="TV", folder="Other", show=bangumi["show"], season=bangumi["season"], episode=bangumi["episode"])
             if site_line.get("markers"):  # what the site shows along its progress bar (only one video per link)
                 a["markers"] = {"0": site_line["markers"]}
             if site_line.get("heat"):

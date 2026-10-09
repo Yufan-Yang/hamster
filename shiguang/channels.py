@@ -45,6 +45,15 @@ def channel_of(url, _followed_short=False):
         m = re.match(r"/(\d+)", parts.path)
         if m:
             return "bilibili", m.group(1), f"https://space.bilibili.com/{m.group(1)}/upload/video"
+    if host == "bilibili.com":  # a 番剧's own page (追番): followed as its season; an episode link is one video
+        m = re.match(r"/bangumi/media/md(\d+)", parts.path)
+        if m:
+            try:
+                sid = bangumi_season_id(m.group(1))
+            except Exception:
+                traceback.print_exc()
+                return None
+            return "bangumi", f"ss{sid}", f"https://www.bilibili.com/bangumi/play/ss{sid}"
     if host == "youtube.com":
         m = re.match(r"/(@[^/?#]+|channel/[\w-]+|c/[^/?#]+|user/[^/?#]+)", parts.path)
         if m:
@@ -56,6 +65,20 @@ def channel_of(url, _followed_short=False):
             path = f"{m.group(1)}/{m.group(2).lower()}"
             return "pornhub", path, f"https://www.pornhub.com/{path}/videos" + ("/public" if m.group(1) == "users" else "")
     return None
+
+
+def bangumi_season_id(media_id):
+    """The season a 番剧's page (bilibili.com/bangumi/media/md<id>) is about."""
+    r = requests.get("https://api.bilibili.com/pgc/review/user", params={"media_id": media_id}, timeout=15,
+                     headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+    return int(r.json()["result"]["media"]["season_id"])
+
+
+def list_bangumi(season_id, limit):
+    """追番: a 番剧 season's 正片, newest first (its previews, PVs and 花絮 aren't followed)."""
+    s = pipeline.bangumi_season({"season_id": season_id})
+    eps = [e for e in s["episodes"] if e["episode"] is not None][::-1]
+    return {"name": s["name"], "avatar": s["cover"], "total": len(eps), "entries": eps[:limit] if limit else eps}
 
 
 def add_sub(url, owner, device=None, flt=None):
@@ -75,7 +98,8 @@ def add_sub(url, owner, device=None, flt=None):
     with db_lock:
         cur = core.DB.execute("INSERT INTO subs (owner, platform, key, url, name, backfill, device, created, filter) "
                               "VALUES (?,?,?,?,?,?,?,?,?)",
-                              (owner, platform, key, videos, cid.removeprefix("@").rsplit("/", 1)[-1], SUB_BACKFILL, device,
+                              (owner, platform, key, videos, cid.removeprefix("@").rsplit("/", 1)[-1],
+                               0 if platform == "bangumi" else SUB_BACKFILL, device,  # 追番: every episode
                                time.time(), json.dumps(flt, ensure_ascii=False) if flt else ""))
         core.DB.commit()
     return cur.lastrowid, "new"  # the worker fetches the list within a minute (checked IS NULL)
@@ -338,6 +362,8 @@ def list_ytdlp(url, limit):
 def list_channel(sub, limit, flt=None):
     """The uploader's videos, newest first (at most `limit`; None = all). B站 only lists the ones whose title
     may pass `flt` (see search_keyword)."""
+    if sub["platform"] == "bangumi":
+        return list_bangumi(sub["key"].split(":", 1)[1].removeprefix("ss"), limit)
     if sub["platform"] == "bilibili":
         return list_bilibili(sub["key"].split(":", 1)[1], limit, search_keyword(flt))
     return list_ytdlp(sub["url"], limit)
@@ -383,6 +409,14 @@ def check_sub(sub_id, everything=False):
         seen = [k for k in seen if k not in drop]
     seen_set = set(seen)
     new = [e for e in passing if link_key(e["url"]) not in seen_set]
+    if flt and sub["platform"] == "bilibili":
+        # a 番剧's list names a preview like an episode ("195 慕兰之战19"): the filter also judges the name its page
+        # shows ("慕兰之战第19集预告"), so "不含 预告" keeps it out
+        for e in new:
+            ep = pipeline.bili_episode(e["url"])
+            if ep and not matches(flt, {**e, "title": ep["title"]}):
+                e["skip"] = True
+        new = [e for e in new if not e.get("skip")]
     # oldest first, so the newest video gets the highest id and sits at the top of the page
     for e in reversed(new):
         jid, how = pipeline.add_job_ex(e["url"], source=f"sub:{sub_id}", owner=sub["owner"], device=sub["device"])
