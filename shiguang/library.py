@@ -2,7 +2,6 @@
 import contextlib
 import fcntl
 import functools
-import glob
 import hashlib
 import hmac
 import json
@@ -344,26 +343,55 @@ def keyframes(path, out_dir):
 BROWSER_DIRECT = {".mp4", ".m4v", ".mov", ".webm", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 
 
+_listings = {}  # folder -> (when read, its file names): the page lists the library every few seconds
+LISTING_TTL = 30
+
+
+def folder_names(folder, fresh=False):
+    """The file names in a folder, read at most every LISTING_TTL seconds (listing folders through mergerfs is
+    what made the video list slow: ~10 ms a folder, a hundred folders each time the page asked)."""
+    hit = _listings.get(folder)
+    if fresh or not hit or time.time() - hit[0] > LISTING_TTL:
+        try:
+            names = set(os.listdir(folder))
+        except OSError:
+            names = set()
+        hit = _listings[folder] = (time.time(), names)
+    return hit[1]
+
+
 def playable(job):
-    """Media files of a finished job the page can play, with their subtitle files."""
+    """Media files of a finished job the page can play, with their subtitle files (new subtitles show up within
+    LISTING_TTL seconds)."""
     out = []
     for f in job["files"]:
         p = Path(f)
-        if p.suffix.lower() in VIDEO_EXT | AUDIO_EXT and p.exists():
-            subs = [str(x) for x in sorted(p.parent.glob(glob.escape(p.stem) + ".*"))
-                    if x.suffix.lower() in (".srt", ".vtt")]
-            out.append({"path": f, "subs": subs})
+        if p.suffix.lower() not in VIDEO_EXT | AUDIO_EXT:
+            continue
+        names = folder_names(str(p.parent))
+        if p.name not in names:  # just made, or really gone: look again
+            names = folder_names(str(p.parent), fresh=True)
+            if p.name not in names:
+                continue
+        prefix = p.stem + "."
+        subs = [str(p.parent / n) for n in sorted(n for n in names if n.startswith(prefix))
+                if n.lower().endswith((".srt", ".vtt"))]
+        out.append({"path": f, "subs": subs})
     return out
 
 
 _probes = {}
+_mtimes = {}  # path -> (when looked, its modification time)
 
 
 def probe_of(path):
     """(duration in seconds, video codec) of a media file. ffprobe takes a second or more per file on the Pi's
     disks, and the list shows a hundred of them, so results are kept in the database (by path + modification
     time) and survive restarts; the first page load after a restart used to take minutes."""
-    key = (path, Path(path).stat().st_mtime)
+    seen = _mtimes.get(path)
+    if not seen or time.time() - seen[0] > LISTING_TTL:  # (a stat through mergerfs costs a few ms)
+        seen = _mtimes[path] = (time.time(), Path(path).stat().st_mtime)
+    key = (path, seen[1])
     if key in _probes:
         return _probes[key]
     row = q("SELECT duration, vcodec FROM probes WHERE path=? AND mtime=?", key, one=True)

@@ -24,6 +24,7 @@ from io import BytesIO
 
 from flask import Response
 from flask import got_request_exception
+from flask import has_app_context
 from flask import g
 from flask import jsonify
 from flask import request
@@ -230,6 +231,27 @@ def remember(resp):
     if getattr(g, "external", False):  # only ever sent back over https (outside is https only; home is plain http)
         cookies = [c if "; Secure" in c else c + "; Secure" for c in resp.headers.getlist("Set-Cookie")]
         resp.headers.setlist("Set-Cookie", cookies)
+    return compress(resp)
+
+
+COMPRESSIBLE = {"application/json", "text/html", "text/vtt", "text/plain"}
+
+
+def compress(resp):
+    """The page and its JSON: unchanged ones answer 304 (the page asks for the list every few seconds; the browser
+    revalidates by ETag), the rest go gzipped (the list is ~0.5 MB of JSON, a lot through the tunnel from outside)."""
+    if (request.method != "GET" or resp.status_code != 200 or resp.direct_passthrough or resp.is_streamed
+            or resp.mimetype not in COMPRESSIBLE or "Content-Encoding" in resp.headers):
+        return resp
+    resp.add_etag()
+    resp.headers.setdefault("Cache-Control", "no-cache")
+    resp.make_conditional(request)
+    if resp.status_code != 200:
+        return resp
+    resp.vary.add("Accept-Encoding")
+    if "gzip" in request.headers.get("Accept-Encoding", "") and resp.content_length and resp.content_length > 1400:
+        resp.set_data(gzip.compress(resp.get_data(), 5))
+        resp.headers["Content-Encoding"] = "gzip"
     return resp
 
 
@@ -292,21 +314,36 @@ def revealed():
     return bool(tok and tok["reveal"])
 
 
-def is_hidden(d, prefs):
-    # hiding is by tag only (hiding single items by hand was dropped)
-    aliases = kv_get("tag_aliases", {})
+def hides_tags(tags, prefs):
+    """Whether a video with these tags is hidden by these privacy settings (hiding is by tag only). The aliases are
+    read once per request: this runs for every video of the library."""
+    if not has_app_context():
+        aliases = kv_get("tag_aliases", {})
+    else:
+        if "tag_aliases" not in g:
+            g.tag_aliases = kv_get("tag_aliases", {})
+        aliases = g.tag_aliases
     hide = {aliases.get(t, t).lower() for t in prefs["tags"]}
-    return any(aliases.get(t, t).lower() in hide for t in (d.get("analysis") or {}).get("tags") or [])
+    return any(aliases.get(t, t).lower() in hide for t in tags or [])
+
+
+def is_hidden(d, prefs):
+    return hides_tags((d.get("analysis") or {}).get("tags"), prefs)
 
 
 def hidden_ids():
-    """Videos this page must not mention right now (privacy mode, not revealed): none of them, nor their counts."""
+    """Videos this page must not mention right now (privacy mode, not revealed): none of them, nor their counts.
+    Worked out once per request (the video list, the category counts and the 追更 list all ask)."""
+    if "hidden_ids" in g:
+        return g.hidden_ids
     prefs = privacy_get(g.owner)
     if not prefs["tags"] or revealed():
-        return set()
+        g.hidden_ids = set()
+        return g.hidden_ids
     scope, scope_args = scope_sql()
-    return {r["id"] for r in q(f"SELECT id, analysis FROM jobs WHERE {scope}", scope_args)
-            if is_hidden({"analysis": json.loads(r["analysis"] or "{}")}, prefs)}
+    g.hidden_ids = {r["id"] for r in q(f"SELECT id, json_extract(analysis, '$.tags') tags FROM jobs WHERE {scope}", scope_args)
+                    if r["tags"] and hides_tags(json.loads(r["tags"]), prefs)}
+    return g.hidden_ids
 
 
 def hidden_subs(skip=None):
@@ -509,9 +546,17 @@ def logout():
     return jsonify(ok=True)
 
 
+_page = [0, b""]  # index.html's mtime and bytes
+
+
 @app.get("/")
 def index():
-    return send_from_directory(HERE, "index.html")
+    """From memory (it's read again when it changes), so it can go gzipped and revalidated like the API."""
+    path = HERE / "index.html"
+    mtime = path.stat().st_mtime
+    if _page[0] != mtime:
+        _page[:] = [mtime, path.read_bytes()]
+    return Response(_page[1], mimetype="text/html")
 
 
 @app.get("/static/<path:name>")
@@ -716,6 +761,18 @@ def category_counts():
     return out
 
 
+_list_columns = []
+
+
+def list_columns():
+    """The jobs columns the list needs: all but the transcripts (job_dict drops them anyway, and reading every
+    finished video's transcript was a good part of the list's time)."""
+    if not _list_columns:
+        _list_columns.append(", ".join(r["name"] for r in q("PRAGMA table_info(jobs)")
+                                       if r["name"] not in ("transcript", "segments")))
+    return _list_columns[0]
+
+
 @app.get("/api/jobs")
 def jobs():
     term = request.args.get("q", "").strip()
@@ -809,19 +866,20 @@ def jobs():
         out += sorted(only_looks, key=lambda d: -looks[d["id"]][0][0])[:12]
     else:
         unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
-        rows = q(f"SELECT * FROM jobs WHERE {scope} AND {unfinished}", scope_args)
-        finished = q(f"SELECT * FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order} LIMIT ?", (*scope_args, limit + 1))
+        cols = list_columns()
+        rows = q(f"SELECT {cols} FROM jobs WHERE {scope} AND {unfinished}", scope_args)
+        finished = q(f"SELECT {cols} FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order} LIMIT ?", (*scope_args, limit + 1))
         more = len(finished) > limit
         if request.args.get("ids"):  # particular videos (opened from a digest, a note...), wherever they are
             wanted = [int(x) for x in request.args["ids"].split(",") if x.isdigit()][:50]
-            finished += q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(wanted))})", (*scope_args, *wanted)) if wanted else []
+            finished += q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(wanted))})", (*scope_args, *wanted)) if wanted else []
             finished = list({r["id"]: r for r in finished}.values())
             limit = len(finished)
         shown = {r["id"] for r in rows + finished[:limit]}
         # videos you're in the middle of are always there, also when they're further back than the first page
         resume = [r["job_id"] for r in q("SELECT job_id FROM watch WHERE owner=? AND done=0 AND pos > 15 "
                                          "ORDER BY updated DESC LIMIT 12", (g.owner,)) if r["job_id"] not in shown]
-        extra = q(f"SELECT * FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(resume))})", (*scope_args, *resume)) if resume else []
+        extra = q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(resume))})", (*scope_args, *resume)) if resume else []
         out = [job_dict(r) for r in sorted(rows + finished[:limit] + extra, key=lambda r: r["id"], reverse=True)]
     # privacy mode: hidden items aren't even sent unless they've been revealed with the password
     prefs, show_hidden = privacy_get(g.owner), revealed()
