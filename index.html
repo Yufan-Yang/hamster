@@ -3812,7 +3812,23 @@ refresh().then(() => {
   // a link to a book (#book=12) opens it; so does reloading the page while reading
   const m = /^#book=(\d+)$/.exec(location.hash);
   if (m) openReader(+m[1]);
+  sendTimings();
 });
+// How long opening the page took on this device, step by step (in the web log): finding the Pi, getting the
+// page, first paint, the list shown
+function sendTimings() {
+  try {
+    const listed = performance.now();
+    const n = performance.getEntriesByType("navigation")[0] || {}, r = x => Math.round(x || 0);
+    const paint = Object.fromEntries(performance.getEntriesByType("paint").map(p => [p.name, r(p.startTime)]));
+    const fetches = performance.getEntriesByType("resource").filter(e => /\/api\/jobs|pixel\.woff2/.test(e.name))
+      .map(e => `${e.name.replace(location.origin, "")} ${r(e.startTime)}+${r(e.duration)}ms ${r(e.transferSize / 1024)}KB`);
+    navigator.sendBeacon("/api/timings", JSON.stringify({
+      host: location.host, redirect: r(n.redirectEnd - n.redirectStart), dns: r(n.domainLookupEnd - n.domainLookupStart),
+      connect: r(n.connectEnd - n.connectStart), wait: r(n.responseStart - n.requestStart), download: r(n.responseEnd - n.responseStart),
+      response_end: r(n.responseEnd), dom_ready: r(n.domContentLoadedEventEnd), paint, listed: r(listed), fetches}));
+  } catch (e) {}
+}
 refreshCacheIndex();
 // over https (from outside) the page itself is kept too, so cached books open without the Pi
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});

@@ -559,6 +559,14 @@ def index():
     return Response(_page[1], mimetype="text/html")
 
 
+@app.post("/api/timings")
+def page_timings():
+    """How long opening the page took on a device (sent by the page once the list shows): kept in the web log."""
+    data = request.get_json(force=True, silent=True) or {}
+    app.logger.warning("page timings %s (%s): %s", g.device_label, client_ip(), json.dumps(data, ensure_ascii=False)[:1500])
+    return "", 204
+
+
 @app.get("/static/<path:name>")
 def static_file(name):
     return send_from_directory(HERE / "static", name, max_age=30 * 86400)
