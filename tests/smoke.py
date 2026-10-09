@@ -124,13 +124,16 @@ def share_once():
         cl.environ_base["SERVER_PORT"] = str(shiguang.core.EXTERNAL_PORT)
     assert friend.get(f"/s/{code}").status_code == 200
     assert friend.get(f"/api/s/{code}").get_json()["state"] == "open"  # only looking (a link preview) claims nothing
+    r = friend.post(f"/api/s/{code}", headers={"User-Agent": "facebookexternalhit/1.1 Facebot Twitterbot/1.0"})
+    assert r.status_code == 403 and r.get_json()["state"] == "preview"  # iMessage drawing a preview doesn't use it up
+    assert friend.get(f"/api/s/{code}").get_json()["state"] == "open"
     r = friend.post(f"/api/s/{code}")
     assert r.status_code == 200 and r.get_json()["state"] == "mine" and r.get_json()["media"], r.data[:200]
     src = r.get_json()["media"][0]["src"]
     assert friend.get(src, headers={"Range": "bytes=0-1"}).status_code in (200, 206)
     assert friend.post(f"/api/s/{code}").get_json()["state"] == "mine"  # again, as often as they like
     other.get(f"/s/{code}")
-    assert other.get(f"/api/s/{code}").get_json() == {"state": "taken", "title": None}
+    assert other.get(f"/api/s/{code}").get_json() == {"state": "taken"}
     assert other.post(f"/api/s/{code}").status_code == 403
     listed = get(f"/api/shares?job={some_job['id']}")["shares"]
     assert next(x for x in listed if x["code"] == code)["opens"] == 2
@@ -540,6 +543,13 @@ def sub_filters():
             raise AssertionError(bad)
         except ValueError:
             pass
+    assert ch.search_keyword(f) is None  # (an "or" group can't be searched for)
+    assert ch.search_keyword({"op": "and", "items": [{"f": "title", "op": "not", "v": "预告"},
+                                                     {"f": "title", "op": "has", "v": "凡人"}]}) == "凡人"
+    sid, _ = ch.add_sub("https://space.bilibili.com/999999999998/search?keyword=%E5%87%A1%E4%BA%BA", f"user:{user}")
+    assert json.loads(G.q("SELECT filter FROM subs WHERE id=?", (sid,), one=True)["filter"]) == {
+        "op": "and", "items": [{"f": "title", "op": "has", "v": "凡人"}]}
+    G.q("DELETE FROM subs WHERE id=?", (sid,))
     sid, _ = ch.add_sub("https://space.bilibili.com/999999999999", f"user:{user}", flt=f)
     G.q("UPDATE subs SET checked=?, refilter=0 WHERE id=?", (time.time(), sid))  # (no fetching from here)
     assert [s for s in get("/api/jobs")["subs"] if s["id"] == sid][0]["filter"] == f

@@ -1,8 +1,11 @@
 """分享: a link to one video for one person. The first browser that opens it owns it from then on and can open it
 as often as it likes; the same link opened anywhere else (forwarded on) is refused.
 
-Opening takes a tap on the page, not just loading it: chat apps fetch links to draw previews, and that fetch
-must not use the link up. Whoever shared it can unbind it (the friend changed phones) or cancel it."""
+Opening the page is enough, but chat apps fetch links to draw previews (WeChat's servers, iMessage on the
+sender's phone, ...) and that must not use the link up: the page itself only looks, its script claims the link once
+it is really on someone's screen (shown and focused), and known preview fetchers are never let claim. Whoever shared
+it can unbind it (the friend changed phones, or a preview got it after all) or cancel it."""
+import re
 import secrets
 import time
 
@@ -14,6 +17,9 @@ from .core import HERE, app, job_dict, q
 
 SHARE_MEDIA_DAYS = 0.5  # how long the play / subtitle links handed to a share page work (it fetches new ones on reload)
 CODE_LEN = 12  # bytes of randomness in a link
+# link-preview fetchers and crawlers (iMessage previews come as "facebookexternalhit ... Twitterbot")
+PREVIEW_UA = re.compile(r"bot\b|bot/|crawl|spider|slurp|preview|facebookexternalhit|facebot|whatsapp|"
+                        r"embedly|vkshare|bytespider|headless|python-|curl/|wget|okhttp|go-http|java/", re.I)
 
 
 def share_url(code):
@@ -102,11 +108,10 @@ def share_state(row):
 
 @app.get("/api/s/<code>")
 def share_peek(code):
-    """Only looks: the page asks this first, and opening (below) is a separate tap."""
+    """Only looks: the page asks this first, and claims (below) once it is on screen."""
     row = q("SELECT * FROM shares WHERE code=?", (code,), one=True)
     state = share_state(row)
-    title = q("SELECT title FROM jobs WHERE id=?", (row["job_id"],), one=True)["title"] if state in ("open", "own") else None
-    return jsonify(state=state, title=title)
+    return jsonify(state=state)
 
 
 @app.post("/api/s/<code>")
@@ -114,6 +119,8 @@ def share_open(code):
     from . import library
     row = q("SELECT * FROM shares WHERE code=?", (code,), one=True)
     state = share_state(row)
+    if state == "open" and PREVIEW_UA.search(request.headers.get("User-Agent") or ""):
+        return jsonify(state="preview"), 403
     if state == "open":
         # whoever gets here first has it (one statement, so two browsers opening at once can't both win)
         q("UPDATE shares SET device=?, label=?, claimed=? WHERE code=? AND device IS NULL",

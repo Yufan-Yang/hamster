@@ -1966,7 +1966,7 @@ async function openShares(id, created) {
       <button class="link" onclick="shareAction(${id},'${s.code}','revoke')">作废</button>
     </div>`).join("");
   box.innerHTML = `<div class="answer" style="margin-top:14px"><b>分享</b>
-    <p class="hint" style="margin:0">每个链接给一个人：第一台打开它的设备领走后，只有那台设备能反复看，转发出去别人打不开。点链接就能复制。</p>
+    <p class="hint" style="margin:0">每个链接给一个人：第一台打开它的设备就占住了它，之后只有那台设备能反复看，转发出去别人打不开（聊天软件生成链接预览不算打开）。点链接就能复制。</p>
     ${rows}
     <div class="actions"><button onclick="newShare(${id})">新建分享链接</button><button onclick="$('#shareBox').innerHTML=''">收起</button></div></div>`;
 }

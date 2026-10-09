@@ -56,6 +56,7 @@ function box(title, text, button) {
 }
 const MESSAGES = {
   gone: ["链接已失效", "分享的人取消了这个链接，或者视频已经不在了。"],
+  preview: ["打不开", "请在浏览器里打开这个链接。"],
   taken: ["这个链接已经被领取了", "它只能在第一次打开它的那台设备、那个浏览器上看。<br>如果那就是你（换了手机、换了浏览器或清了缓存），请让分享的人在拾光里把这个链接「解绑」，再重新打开。"],
 };
 
@@ -64,18 +65,36 @@ async function peek() {
   try { r = await (await fetch(`/api/s/${encodeURIComponent(code)}`)).json(); }
   catch (e) { return box("打不开", "网络有问题，稍后再试。"); }
   if (r.state === "mine" || r.state === "own") return claim();
-  if (r.state === "open")
-    return box(r.title || "一个视频", "有人分享给你一个视频。<br>这个链接只能在一台设备上看：点下面的按钮之后，它就只属于这台设备和这个浏览器了，以后在这里可以随时再打开，转发给别人是打不开的。<br>如果你平时用别的浏览器，请先复制链接到那里再打开。",
-               `<button class="btn" onclick="claim()">在这台设备上观看</button>`);
+  if (r.state === "open") return claimWhenSeen();
   const m = MESSAGES[r.state] || MESSAGES.gone;
   box(m[0], m[1]);
 }
 
+// Opening the link is what claims it, but only once the page is really in front of someone: chat apps load links
+// in the background to draw previews, and those must not use it up. Visible and focused (or touched) = a person.
+function claimWhenSeen() {
+  let done = false;
+  const go = () => {
+    if (done) return;
+    done = true;
+    ["visibilitychange", "focus", "pointerdown", "touchstart", "keydown", "scroll"].forEach(e => removeEventListener(e, check, true));
+    claim();
+  };
+  const check = e => { if (document.visibilityState === "visible" && (document.hasFocus() || (e && e.type !== "visibilitychange"))) go(); };
+  ["visibilitychange", "focus", "pointerdown", "touchstart", "keydown", "scroll"].forEach(e => addEventListener(e, check, true));
+  setTimeout(check, 600);
+  // an in-app browser that never reports focus: a tap still opens it
+  setTimeout(() => { if (!done) box("", "点一下打开视频", `<button class="btn" onclick="claim()">打开</button>`); }, 4000);
+}
+
+let claiming = false;
 async function claim() {
-  const b = $(".btn"); if (b) b.disabled = true;
+  if (claiming || shared) return;
+  claiming = true;
   let res, r;
   try { res = await fetch(`/api/s/${encodeURIComponent(code)}`, {method: "POST"}); r = await res.json(); }
-  catch (e) { if (b) b.disabled = false; return box("打不开", "网络有问题，稍后再试。"); }
+  catch (e) { return box("打不开", "网络有问题，刷新一下再试。"); }
+  finally { claiming = false; }
   if (!res.ok) { const m = MESSAGES[r.state] || MESSAGES.gone; return box(m[0], m[1]); }
   shared = r;
   document.title = `${r.title || "分享"} · 拾光`;
