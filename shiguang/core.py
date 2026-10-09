@@ -304,6 +304,9 @@ def init_db(reset=False):
         pct0 REAL, pct1 REAL, PRIMARY KEY (owner, day, kind, ref));
     -- 每周总结: a week's numbers per account, kept as they were that Monday (what was still left to watch / read)
     CREATE TABLE IF NOT EXISTS weekly (owner TEXT, start TEXT, end TEXT, body TEXT, created REAL, PRIMARY KEY (owner, start));
+    -- 分享: a link to one video for one person; `device` = the browser that opened it first (only it may open it again)
+    CREATE TABLE IF NOT EXISTS shares (code TEXT PRIMARY KEY, job_id INTEGER, owner TEXT, created REAL, device TEXT,
+        label TEXT, claimed REAL, opens INTEGER DEFAULT 0, seen REAL, revoked INTEGER DEFAULT 0);
     """)
     from . import migrations  # imports core: only here, at run time
     migrations.run(DB)

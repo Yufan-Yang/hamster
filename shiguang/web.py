@@ -205,7 +205,9 @@ def identify():
                            disk={"free": 0, "total": 0}, features={}, privacy={})
         if request.path == "/api/account":
             return jsonify(user=None, devices=[])
-        if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/castplay/", "/subs/", "/thumb/")):
+        # (a 分享 link is for someone without an account: /s/ and /api/s/ check the link themselves)
+        if request.path not in PUBLIC_PATHS and not request.path.startswith(("/static/", "/play/", "/castplay/", "/subs/", "/thumb/",
+                                                                             "/s/", "/api/s/")):
             return jsonify(error="login required", login_required=True), 401
     g.device_label = device_label(request.headers.get("User-Agent"))
     if request.path.startswith("/api/notes") and request.method == "POST":
@@ -1964,7 +1966,7 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
+from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, share, tasks, weekly  # noqa: E402
 
 
 def _request_crashed(sender, exception, **extra):

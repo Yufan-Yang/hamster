@@ -110,6 +110,41 @@ check("usage", lambda: get("/api/usage?days=7"))
 check("account", lambda: get("/api/account"))
 check("digests", lambda: get("/api/digests"))
 check("watch page extras", lambda: (get(f"/api/points/{some_job['id']}"), get(f"/api/similar/{some_job['id']}")))
+
+
+def share_once():
+    """分享: the first browser to open a link keeps it; the link forwarded to another browser doesn't open."""
+    made = post("/api/shares", {"id": some_job["id"]})
+    code = made["code"]
+    assert made["url"].endswith("/s/" + code) and not made["claimed"]
+    assert get(f"/api/s/{code}")["state"] == "own"  # the sharer looking at it doesn't use it up
+    # friends come from outside, with no account
+    friend, other = app.test_client(), app.test_client()
+    for cl in (friend, other):
+        cl.environ_base["SERVER_PORT"] = str(shiguang.core.EXTERNAL_PORT)
+    assert friend.get(f"/s/{code}").status_code == 200
+    assert friend.get(f"/api/s/{code}").get_json()["state"] == "open"  # only looking (a link preview) claims nothing
+    r = friend.post(f"/api/s/{code}")
+    assert r.status_code == 200 and r.get_json()["state"] == "mine" and r.get_json()["media"], r.data[:200]
+    src = r.get_json()["media"][0]["src"]
+    assert friend.get(src, headers={"Range": "bytes=0-1"}).status_code in (200, 206)
+    assert friend.post(f"/api/s/{code}").get_json()["state"] == "mine"  # again, as often as they like
+    other.get(f"/s/{code}")
+    assert other.get(f"/api/s/{code}").get_json() == {"state": "taken", "title": None}
+    assert other.post(f"/api/s/{code}").status_code == 403
+    listed = get(f"/api/shares?job={some_job['id']}")["shares"]
+    assert next(x for x in listed if x["code"] == code)["opens"] == 2
+    post(f"/api/shares/{code}/reset", {})
+    assert other.post(f"/api/s/{code}").get_json()["state"] == "mine"
+    assert friend.post(f"/api/s/{code}").status_code == 403
+    post(f"/api/shares/{code}/revoke", {})
+    assert other.post(f"/api/s/{code}").get_json()["state"] == "gone"
+    assert code not in [x["code"] for x in get(f"/api/shares?job={some_job['id']}")["shares"]]
+    assert app.test_client().post(f"/api/shares/{code}/reset").status_code == 404  # not someone else's to change
+    G.q("DELETE FROM shares WHERE code=?", (code,))
+
+
+check("分享: one browser per link", share_once)
 check("play (range)", lambda: c.get(some_job["media"][0]["src"], headers={"Range": "bytes=0-99"}).status_code in (200, 206) or 1 / 0)
 check("thumb", lambda: get(f"/thumb/{some_job['id']}", code=200))
 check("save position", lambda: post(f"/api/watch/{some_job['id']}", {"part": 0, "pos": 30, "dur": 100}))

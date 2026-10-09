@@ -400,7 +400,7 @@ def warm_probes():
 def media_token(jid, n, days=7):
     """Signed, expiring token for /play, /subs and /thumb URLs. iOS Safari plays video through a separate
     media process that doesn't reliably send the page's cookies, so these URLs carry their own permission."""
-    exp = int(time.time()) + days * 86400
+    exp = int(time.time() + days * 86400)
     sig = hmac.new(app.secret_key.encode(), f"{jid}:{n}:{exp}".encode(), "sha256").hexdigest()[:24]
     return f"{exp}.{sig}"
 
@@ -414,14 +414,14 @@ def token_ok(jid, n):
         return False
 
 
-def media_info(job):
+def media_info(job, days=7):
     jid = job["id"]
     return [{"name": Path(m["path"]).stem, "audio": Path(m["path"]).suffix.lower() in AUDIO_EXT,
              "duration": duration_of(m["path"]), "vcodec": vcodec_of(m["path"]),
-             "src": f"/play/{jid}/{i}?t={media_token(jid, i)}",
-             "subsrc": [f"/subs/{jid}/{i}/{k}?t={media_token(jid, i)}" for k in range(len(m["subs"]))],
+             "src": f"/play/{jid}/{i}?t={media_token(jid, i, days)}",
+             "subsrc": [f"/subs/{jid}/{i}/{k}?t={media_token(jid, i, days)}" for k in range(len(m["subs"]))],
              "subs": [Path(x).name[len(Path(m["path"]).stem) + 1:].rsplit(".", 1)[0] or "字幕" for x in m["subs"]],
-             "bilingual": f"/subs/{jid}/{i}/bi?t={media_token(jid, i)}" if bilingual_pair(m) else None}
+             "bilingual": f"/subs/{jid}/{i}/bi?t={media_token(jid, i, days)}" if bilingual_pair(m) else None}
             for i, m in enumerate(playable(job))]
 
 

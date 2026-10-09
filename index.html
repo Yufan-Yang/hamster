@@ -1759,11 +1759,13 @@ function openWatch(id, part = 0, t = 0) {
     <div class="actions">
       ${m && airplayAvailable() ? `<button onclick="showAirPlay()">AirPlay</button>` : ""}
       ${m ? `<button onclick="findCast(${id},${part})">${casting ? '更换投屏设备' : '投屏到电视'}</button>` : ""}
+      ${m && j.status === "done" ? `<button onclick="openShares(${id})">分享</button>` : ""}
       ${active ? `<button onclick="act(${id},'cancel')">取消下载</button>` : ""}
       ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
       ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
     </div>
     <div id="castBox"></div>
+    <div id="shareBox"></div>
     ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
     <div id="similarBox"></div>
     <div id="chapters"></div>
@@ -1951,6 +1953,37 @@ function showAirPlay() {
   const el = $("#watchBody video, #watchBody audio");
   if (!el || !airplayAvailable()) return toast("请用 Safari 播放后，从播放器里选择 AirPlay");
   try { el.webkitShowPlaybackTargetPicker(); } catch (e) { toast("没有找到可用的 AirPlay 设备"); }
+}
+/* 分享: one link per person; the first browser that opens it keeps it, forwarded on it doesn't open */
+async function openShares(id, created) {
+  const box = $("#shareBox"); if (!box) return;
+  let r;
+  try { r = await (await fetch(`/api/shares?job=${id}`)).json(); } catch (e) { box.innerHTML = `<p class="err">没拿到分享链接</p>`; return; }
+  const rows = (r.shares || []).map(s => `<div style="margin-top:10px">
+      <code class="copy block" onclick="copyText(this)"${s.code === created ? ' style="background:var(--yellow)"' : ""}>${esc(s.url)}</code>
+      <span class="meta">${s.claimed ? `已被 ${esc(s.label || "一台设备")} 领取 · 看了 ${s.opens} 次${s.seen ? " · 最近 " + esc(ago(s.seen)) : ""}` : `还没人打开 · ${esc(ago(s.created))}建的`}</span>
+      ${s.claimed ? `<button class="link" onclick="shareAction(${id},'${s.code}','reset')">解绑</button>` : ""}
+      <button class="link" onclick="shareAction(${id},'${s.code}','revoke')">作废</button>
+    </div>`).join("");
+  box.innerHTML = `<div class="answer" style="margin-top:14px"><b>分享</b>
+    <p class="hint" style="margin:0">每个链接给一个人：第一台打开它的设备领走后，只有那台设备能反复看，转发出去别人打不开。点链接就能复制。</p>
+    ${rows}
+    <div class="actions"><button onclick="newShare(${id})">新建分享链接</button><button onclick="$('#shareBox').innerHTML=''">收起</button></div></div>`;
+}
+async function newShare(id) {
+  const res = await fetch("/api/shares", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id})});
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok) return toast(r.error || "没建成");
+  await openShares(id, r.code);
+  const el = [...document.querySelectorAll("#shareBox code")].find(x => x.textContent === r.url);
+  if (el) copyText(el);
+}
+async function shareAction(id, code, action) {
+  if (action === "revoke" && !confirm("作废这个链接？已经领取的人也看不了了。")) return;
+  if (action === "reset" && !confirm("解绑后，下一台打开这个链接的设备会领走它（原来那台就看不了了）。")) return;
+  const res = await fetch(`/api/shares/${code}/${action}`, {method: "POST"});
+  toast(res.ok ? (action === "reset" ? "已解绑" : "已作废") : "没成功");
+  openShares(id);
 }
 async function findCast(id, part) {
   const box = $("#castBox"); if (!box) return;

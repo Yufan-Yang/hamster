@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f5f0e1">
+<meta name="robots" content="noindex">
+<title>拾光 · 分享</title>
+<link rel="icon" href="/favicon.ico?v=2" sizes="any">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=2">
+<style>
+  /* the 拾光 pixel look, trimmed down to what this one page needs */
+  @font-face { font-family: "Pixel"; src: url("/static/pixel.woff2") format("woff2"); font-display: swap; }
+  :root { --bg: #f5f0e1; --panel: #fffdf6; --ink: #1d1b26; --muted: #57536a; --accent: #ff004d; --soft: #e9e2cd; --on-accent: #fff; }
+  * { box-sizing: border-box; border-radius: 0 !important; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body, button { font-family: "Pixel", "PingFang SC", monospace; font-size: 12px; line-height: 1.75;
+                 -webkit-font-smoothing: none; -moz-osx-font-smoothing: unset; }
+  button { color: inherit; cursor: pointer; touch-action: manipulation; }
+  header { border-bottom: 2px solid var(--ink); padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .logo { font-size: 24px; line-height: 1; color: var(--bg); background: var(--accent); border: 2px solid var(--ink);
+          box-shadow: 3px 3px 0 var(--ink); padding: 4px 8px 6px; letter-spacing: 2px; display: inline-block; }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+  .box { border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); padding: 20px; max-width: 520px; margin: 40px auto; }
+  .box h1 { font-size: 24px; font-weight: normal; line-height: 1.4; margin: 0 0 12px; overflow-wrap: anywhere; }
+  .hint { color: var(--muted); margin: 0 0 14px; }
+  .btn { height: 42px; width: 100%; padding: 0 14px; border: 2px solid var(--ink); background: var(--accent); color: var(--on-accent);
+         box-shadow: 3px 3px 0 var(--ink); }
+  .btn:active:not(:disabled) { transform: translate(3px, 3px); box-shadow: none; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .stage { background: #000; border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); }
+  .stage video, .stage audio { display: block; width: 100%; max-height: 70vh; background: #000; }
+  .stage.audio img { display: block; width: 100%; max-height: 60vh; object-fit: contain; }
+  .wtitle { font-size: 24px; line-height: 1.4; margin: 20px 0 8px; overflow-wrap: anywhere; }
+  .parts { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
+  .parts button { border: 2px solid var(--ink); background: var(--panel); padding: 2px 10px; }
+  .parts button.on { background: var(--ink); color: var(--bg); }
+  .desc { border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); padding: 12px 14px; margin-top: 20px;
+          white-space: pre-line; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header><span class="logo">拾光</span></header>
+<main id="main"><div class="box"><p class="hint">正在打开…</p></div></main>
+<script>
+const code = location.pathname.split("/").pop();
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const SUB_NAMES = {"zh": "中文", "zh-Hans": "中文", "zh-CN": "中文", "en": "英文", "ja": "日文", "ko": "韩文"};
+let shared = null;
+
+function box(title, text, button) {
+  $("#main").innerHTML = `<div class="box">${title ? `<h1>${esc(title)}</h1>` : ""}<p class="hint">${text}</p>${button || ""}</div>`;
+}
+const MESSAGES = {
+  gone: ["链接已失效", "分享的人取消了这个链接，或者视频已经不在了。"],
+  taken: ["这个链接已经被领取了", "它只能在第一次打开它的那台设备、那个浏览器上看。<br>如果那就是你（换了手机、换了浏览器或清了缓存），请让分享的人在拾光里把这个链接「解绑」，再重新打开。"],
+};
+
+async function peek() {
+  let r;
+  try { r = await (await fetch(`/api/s/${encodeURIComponent(code)}`)).json(); }
+  catch (e) { return box("打不开", "网络有问题，稍后再试。"); }
+  if (r.state === "mine" || r.state === "own") return claim();
+  if (r.state === "open")
+    return box(r.title || "一个视频", "有人分享给你一个视频。<br>这个链接只能在一台设备上看：点下面的按钮之后，它就只属于这台设备和这个浏览器了，以后在这里可以随时再打开，转发给别人是打不开的。<br>如果你平时用别的浏览器，请先复制链接到那里再打开。",
+               `<button class="btn" onclick="claim()">在这台设备上观看</button>`);
+  const m = MESSAGES[r.state] || MESSAGES.gone;
+  box(m[0], m[1]);
+}
+
+async function claim() {
+  const b = $(".btn"); if (b) b.disabled = true;
+  let res, r;
+  try { res = await fetch(`/api/s/${encodeURIComponent(code)}`, {method: "POST"}); r = await res.json(); }
+  catch (e) { if (b) b.disabled = false; return box("打不开", "网络有问题，稍后再试。"); }
+  if (!res.ok) { const m = MESSAGES[r.state] || MESSAGES.gone; return box(m[0], m[1]); }
+  shared = r;
+  document.title = `${r.title || "分享"} · 拾光`;
+  show(0);
+}
+
+function show(part) {
+  const r = shared, m = r.media[part];
+  if (!m) return box(r.title, "这个视频暂时放不了。");
+  const tracks = (m.bilingual ? `<track kind="subtitles" src="${m.bilingual}" label="双语" srclang="zh">` : "") + m.subs.map((label, k) =>
+    `<track kind="subtitles" src="${m.subsrc[k]}" label="${esc(SUB_NAMES[label] || label)}" srclang="${esc(label.split("-")[0])}">`).join("");
+  const stage = m.audio
+    ? `<div class="stage audio">${r.thumb ? `<img src="${r.thumb}" alt="">` : ""}<audio controls preload="metadata" src="${m.src}"></audio></div>`
+    : `<div class="stage"><video controls playsinline preload="metadata" controlslist="nodownload" ${r.thumb ? `poster="${r.thumb}"` : ""} src="${m.src}">${tracks}</video></div>`;
+  const parts = r.media.length > 1 ? `<div class="parts">${r.media.map((x, i) =>
+    `<button class="${i === part ? "on" : ""}" onclick="show(${i})">${i + 1}. ${esc(x.name.slice(-24))}</button>`).join("")}</div>` : "";
+  $("#main").innerHTML = `${stage}<div class="wtitle">${esc(r.title)}</div>${parts}
+    ${r.state === "own" ? `<p class="hint">这是你自己分享出去的链接，你打开不算领取。</p>` : ""}
+    ${r.summary ? `<div class="desc">${esc(r.summary)}</div>` : ""}`;
+  const el = $("video");
+  if (el) for (const t of el.textTracks) t.mode = "disabled";
+}
+
+peek();
+</script>
+</body>
+</html>
