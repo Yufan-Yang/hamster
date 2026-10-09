@@ -60,8 +60,12 @@ def channel_of(url, _followed_short=False):
 
 def add_sub(url, owner, device=None, flt=None):
     """Follow an uploader, caching only the videos `flt` lets through (see clean_filter; None = all of them).
+    A B站 space search link (space.bilibili.com/<mid>/search?keyword=X) without a filter follows with "title has X".
     Returns (subscription id, "new" | "duplicate")."""
     platform, cid, videos = channel_of(url)
+    if not flt and platform == "bilibili":
+        kw = (urllib.parse.parse_qs(urllib.parse.urlsplit(url.strip()).query).get("keyword") or [""])[0]
+        flt = clean_filter({"op": "and", "items": [{"f": "title", "op": "has", "v": kw}]})
     key = f"{platform}:{cid.lower()}"
     row = q("SELECT id FROM subs WHERE owner IS ? AND key=?", (owner, key), one=True)
     if row:
@@ -136,6 +140,14 @@ def matches(f, e):
     if not e.get("duration"):
         return True
     return e["duration"] >= f["v"] * 60 if f["op"] == "gt" else e["duration"] <= f["v"] * 60
+
+
+def search_keyword(f):
+    """A keyword every video passing `f` has in its title (a "title has" at the top, or in a top-level "and"
+    group), or None. B站 searches the space for it, so a big uploader's matching videos aren't looked for among
+    thousands of others (its plain list also stops short of the end on spaces with ~10k videos)."""
+    items = [f] if f and "items" not in f else f["items"] if f and f["op"] == "and" else []
+    return next((x["v"] for x in items if x.get("f") == "title" and x["op"] == "has"), None)
 
 
 def set_filter(sub_id, flt):
@@ -243,7 +255,7 @@ def bili_signed(s, params):
     return {**params, "w_rid": hashlib.md5((urllib.parse.urlencode(params) + s.wbi_key).encode()).hexdigest()}
 
 
-def list_bilibili(mid, limit):
+def list_bilibili(mid, limit, keyword=None):
     s = bili_session(mid)
     card = s.get("https://api.bilibili.com/x/web-interface/card", params={"mid": mid}, timeout=15).json()["data"]
     out, total, pn = [], 0, 1
@@ -253,6 +265,8 @@ def list_bilibili(mid, limit):
                   "dm_img_list": "[]", "dm_img_str": "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ",
                   "dm_cover_img_str": "QU5HTEUgKEludGVsLCBJbnRlbChSKSBIRCBHcmFwaGljcyBEaXJlY3QzRDExIHZzXzVfMCBwc181XzApR29vZ2xlIEluYy4gKEludGVsKQ",
                   "dm_img_inter": '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}'}
+        if keyword:
+            params["keyword"] = keyword
         for attempt in range(6):
             if attempt:
                 # 412 is bound to the fingerprint/session.  Reuse would only
@@ -321,10 +335,11 @@ def list_ytdlp(url, limit):
             "total": info.get("playlist_count") or (None if limit else len(entries)), "entries": entries}
 
 
-def list_channel(sub, limit):
-    """The uploader's videos, newest first (at most `limit`; None = all)."""
+def list_channel(sub, limit, flt=None):
+    """The uploader's videos, newest first (at most `limit`; None = all). B站 only lists the ones whose title
+    may pass `flt` (see search_keyword)."""
     if sub["platform"] == "bilibili":
-        return list_bilibili(sub["key"].split(":", 1)[1], limit)
+        return list_bilibili(sub["key"].split(":", 1)[1], limit, search_keyword(flt))
     return list_ytdlp(sub["url"], limit)
 
 
@@ -346,7 +361,7 @@ def check_sub(sub_id, everything=False):
     limit = (None if everything or (wide and not sub["backfill"]) else
              (max(sub["backfill"], SUB_FILTER_SCAN) if flt else sub["backfill"]) if wide else 30)
     try:
-        res = list_channel(sub, limit)
+        res = list_channel(sub, limit, flt)
     except Exception as e:
         traceback.print_exc()
         q("UPDATE subs SET checked=?, error=? WHERE id=?", (time.time(), str(e)[:300], sub_id))
@@ -357,6 +372,11 @@ def check_sub(sub_id, everything=False):
         passing = passing[:sub["backfill"]]
     if sub["refilter"]:
         drop = {link_key(e["url"]) for e in res["entries"] if not matches(flt, e)}
+        if sub["platform"] == "bilibili" and search_keyword(flt) and len(res["entries"]) >= (res["total"] or 0):
+            # B站 listed every video with the keyword: a queued one it left out no longer passes either
+            listed = {link_key(e["url"]) for e in res["entries"]}
+            drop |= {r["key"] for r in q("SELECT key FROM jobs WHERE source=? AND status IN ('queued','linked')",
+                                         (f"sub:{sub_id}",)) if r["key"] not in listed}
         for r in q("SELECT id, key FROM jobs WHERE source=? AND status IN ('queued','linked')", (f"sub:{sub_id}",)):
             if r["key"] in drop:
                 pipeline.cancel_job(r["id"])
