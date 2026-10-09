@@ -13,6 +13,7 @@ import time
 import traceback
 
 from pathlib import Path
+from .migrations import once
 from .core import (AUDIO_EXT, Cancelled, DOWNLOAD_WORKERS, ENTRY, INCOMPLETE, LLM_API_KEY, MEDIA, SUB_EXT, UA, VIDEO_EXT, bell_mark, bell_wait, check_cancel, db_lock, ffprobe, finishing_touch, human, job_dict, link_key, log_usage, q, ring, safe_name, unique_path, update)
 
 
@@ -81,6 +82,45 @@ def bili_staff(url):
         return [s["name"] for s in (r.json().get("data") or {}).get("staff") or [] if s.get("name")]
     except Exception:
         return []
+
+
+_bangumi = {}  # bvid -> its entry in its B站 番剧 (one season list answers for all of the show's videos)
+
+
+def bili_episode(url):
+    """For a video of a B站 番剧: {"title": the name the page shows ("第193话 慕兰之战17", "慕兰之战第19集预告"),
+    "badge": "会员" / "预告"..., "extra": True when it isn't 正片}; None otherwise. (yt-dlp names an episode
+    "<number> <long title>", so the preview listed as 195 came out as "195 慕兰之战19", like an episode.)"""
+    m = re.search(r"/bangumi/play/ep(\d+)", url or "") or re.search(r"(BV[0-9A-Za-z]{10})", url or "")
+    if not m:
+        return None
+    hdrs = {"User-Agent": UA, "Referer": "https://www.bilibili.com/"}
+    try:
+        ep_id = m.group(1) if m.group(1).isdigit() else None
+        if not ep_id:
+            if m.group(1) in _bangumi:
+                return _bangumi[m.group(1)]
+            r = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": m.group(1)}, timeout=15, headers=hdrs)
+            ep = re.search(r"/bangumi/play/ep(\d+)", (r.json().get("data") or {}).get("redirect_url") or "")
+            if not ep:
+                return None  # an ordinary video
+            ep_id = ep.group(1)
+        res = requests.get("https://api.bilibili.com/pgc/view/web/season", params={"ep_id": ep_id}, timeout=15,
+                           headers=hdrs).json()["result"]
+        found = None
+        for section, eps in [(None, res.get("episodes") or [])] + [(s, s.get("episodes") or []) for s in res.get("section") or []]:
+            for e in eps:
+                info = {"title": e.get("show_title") or " ".join(str(e.get(k) or "") for k in ("title", "long_title")).strip(),
+                        # only 正片's own list says (section_type); sections hold 花絮 and PVs but also old 正片 (2020版)
+                        "badge": e.get("badge") or "", "extra": section is None and e.get("section_type", 0) != 0}
+                if e.get("bvid"):
+                    _bangumi.setdefault(e["bvid"], info)
+                if str(e.get("id")) == ep_id:
+                    found = found or info
+        return found
+    except Exception:
+        traceback.print_exc()
+        return None
 
 
 def add_people_tags(a, names):
@@ -184,11 +224,16 @@ def process(job_id):
         else:
             site_line = meta.pop("_timeline", None) or {}  # (not for the classifier: long lists of numbers)
             staff = bili_staff(meta.get("webpage_url") or url)  # B站 joint videos list everyone who's in them
+            bangumi = bili_episode(meta.get("webpage_url") or url) if "bilibili.com" in (meta.get("webpage_url") or url) else None
+            if bangumi:  # the name its 番剧 page shows, and whether it's 正片
+                meta.update(title=bangumi["title"], bilibili_badge=bangumi["badge"])
             a = llm.classify(job_id, m.name, {**meta, "file": m.name, "size": human(m.stat().st_size),
                                           "duration_s": float(ffprobe(m).get("format", {}).get("duration") or 0),
                                           **({"people_in_it": staff} if staff else {})},
                          guess)
             add_people_tags(a, staff)
+            if bangumi and bangumi["extra"]:
+                a["episode"] = None  # B站 lists it outside 正片 (a preview, PV, 花絮...): not an episode
             if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
                 library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
             if site_line.get("markers"):  # what the site shows along its progress bar (only one video per link)
@@ -255,6 +300,22 @@ def process(job_id):
     for f in final_files:
         if Path(f).suffix.lower() in (VIDEO_EXT | AUDIO_EXT) - library.BROWSER_DIRECT:
             finishing_touch(library.remux_for_browser, Path(f))
+
+
+@once("bangumi_extras", background=True)
+def refile_bangumi_extras():
+    """Once: B站 番剧 videos filed as episodes that the 番剧 lists outside 正片 (a preview named like an episode)
+    become specials of their show, under the name the page shows."""
+    for r in q("SELECT * FROM jobs WHERE status='done' AND ref IS NULL AND url LIKE '%bilibili.com%' "
+               "AND json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.season')!=0"):
+        ep = bili_episode(r["url"])
+        if not ep or not ep["extra"]:
+            continue
+        a = json.loads(r["analysis"])
+        b = library.place_in_show({**a, "title": ep["title"], "episode": None}, r["source"], [ep["title"]])
+        print("bangumi_extras:", library.refile(r, b), flush=True)
+        update(r["id"], title=ep["title"])
+    library.plex_refresh()
 
 
 def run_job(job_id):

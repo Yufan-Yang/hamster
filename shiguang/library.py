@@ -256,26 +256,35 @@ def refile_shows(dry_run=False):
         b = place_in_show(dict(a), r["source"], [str(a.get("title") or ""), r["title"] or ""], shows, taken)
         if all(a.get(k) == b.get(k) for k in ("library", "show", "season", "episode")):
             continue
-        files = json.loads(r["files"] or "[]")
-        media = [Path(f) for f in files if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
-        if len(media) != 1 or not media[0].exists():
-            continue  # several videos from one page keep their numbered names
-        main = media[0]
-        dest_dir, base = destination(b, main.suffix.lower(), main.stem)
-        done.append(f"#{r['id']} {main.relative_to(MEDIA)} -> {(dest_dir / base).relative_to(MEDIA)}{main.suffix}")
-        if dry_run:
-            continue
-        moved = move_with_sidecars(main, dest_dir, base)
-        new = {str(main.with_name(main.stem + p.name[len(moved[0].stem):])): str(p) for p in moved}
-        files = [new.get(f, f) for f in files]
-        thumb = new.get(r["thumb"], r["thumb"])
-        for jid in [r["id"]] + [x["id"] for x in q("SELECT id FROM jobs WHERE ref=?", (r["id"],))]:
-            update(jid, analysis=b, files=files, thumb=thumb)
-        probe_of(str(moved[0]))  # so the list doesn't have to ffprobe it later
+        moved = refile(r, b, dry_run)
+        if moved:
+            done.append(moved)
     if done and not dry_run:
         plex_refresh()
     print("\n".join(["shows_together:", *done]), flush=True)
     return done
+
+
+def refile(r, b, dry_run=False):
+    """Move finished job `r`'s video (and its subtitles, cover) to where analysis `b` files it, and store `b`.
+    Returns "#id old -> new", or None when it has no single video to move."""
+    files = json.loads(r["files"] or "[]")
+    media = [Path(f) for f in files if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
+    if len(media) != 1 or not media[0].exists():
+        return None  # several videos from one page keep their numbered names
+    main = media[0]
+    dest_dir, base = destination(b, main.suffix.lower(), main.stem)
+    line = f"#{r['id']} {main.relative_to(MEDIA)} -> {(dest_dir / base).relative_to(MEDIA)}{main.suffix}"
+    if dry_run:
+        return line
+    moved = move_with_sidecars(main, dest_dir, base)
+    new = {str(main.with_name(main.stem + p.name[len(moved[0].stem):])): str(p) for p in moved}
+    files = [new.get(f, f) for f in files]
+    thumb = new.get(r["thumb"], r["thumb"])
+    for jid in [r["id"]] + [x["id"] for x in q("SELECT id FROM jobs WHERE ref=?", (r["id"],))]:
+        update(jid, analysis=b, files=files, thumb=thumb)
+    probe_of(str(moved[0]))  # so the list doesn't have to ffprobe it later
+    return line
 
 
 def move_with_sidecars(main: Path, dest_dir: Path, base: str):
