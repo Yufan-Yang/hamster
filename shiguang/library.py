@@ -16,6 +16,7 @@ import traceback
 
 from flask import request
 from pathlib import Path
+from .migrations import once
 from .core import (AUDIO_EXT, MEDIA, STATE, SUB_EXT, TRANSCRIBE_MAX_MIN, VIDEO_EXT, VIDEO_FOLDERS, WHISPER_FAST, WHISPER_MODEL, app, check_cancel, ffprobe, heavy_slot, job_dict, log_usage, q, safe_name, unique_path, update)
 
 
@@ -177,7 +178,7 @@ def destination(a, ext, original_stem):
         return d, f"{title} ({a['year']})"
     if lib == "TV" and a.get("show") and a.get("episode") is not None:
         show = safe_name(a["show"])
-        season = int(a.get("season") or 1)
+        season = 1 if a.get("season") is None else int(a["season"])  # 0: the show's specials
         return MEDIA / "TV" / show / f"Season {season:02}", f"{show} - S{season:02}E{int(a['episode']):02}"
     if lib == "Music" and ext in AUDIO_EXT:
         return MEDIA / "Music" / safe_name(a.get("artist") or "Unknown Artist") / safe_name(a.get("album") or "Singles"), title
@@ -185,6 +186,96 @@ def destination(a, ext, original_stem):
         return MEDIA / "Downloads", original_stem
     folder = a.get("folder") if a.get("folder") in VIDEO_FOLDERS else "Other"
     return MEDIA / "Videos" / folder, title
+
+
+# One show, one place. The classifier files each video on its own, so a followed show's episodes went to 剧集 while
+# its trailers, OP/ED and behind-the-scenes clips landed in 片段 / 音乐MV, and some extras became episodes with
+# made-up numbers (B站 numbers a show's extras after its episodes: a PV was "第529集"). A show's web videos are kept
+# together: episodes in their season, everything else of the show in Season 00 (Plex's Specials).
+EXTRA_RE = re.compile(r"预告|花絮|片头曲|片尾曲|主题曲|插曲|导演剪辑|周年|纪念|定档|里程碑|前瞻|先导|彩蛋|幕后|动捕|宣传片|"
+                      r"予告|特報|ノンクレジット|trailer|teaser|(?<![A-Za-z])(?:PV|OP|ED|MV|NCOP|NCED|CM|SP)(?![A-Za-z])", re.I)
+
+
+def tv_shows():
+    """{show: where its episodes came from (sources: "sub:12", "web"...)} for every show in 剧集."""
+    out = {}
+    for r in q("SELECT source, json_extract(analysis, '$.show') show FROM jobs WHERE status='done' "
+               "AND json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.show') IS NOT NULL"):
+        out.setdefault(str(r["show"]), set()).add(r["source"])
+    return out
+
+
+def show_of(a, source, titles, shows):
+    """The show a video belongs to: the one the classifier filed it under; for a followed uploader's video filed
+    elsewhere, a show the same follow already has episodes of in 剧集, named in its title or tags."""
+    if a.get("library") == "TV" and a.get("show"):
+        return str(a["show"])
+    if a.get("library") != "Videos" or not str(source or "").startswith("sub:"):
+        return None
+    text = " ".join([*titles, str(a.get("show") or ""), *map(str, a.get("tags") or [])])
+    return next((s for s in sorted(shows, key=len, reverse=True) if len(s) >= 2 and source in shows[s] and s in text), None)
+
+
+def place_in_show(a, source, titles, shows=None, taken=None):
+    """File a web video with its show (changes `a`). It stays an episode when it is one: the classifier gave it a
+    number, its title doesn't say trailer/OP/花絮..., and the number is in its title or description. Anything else of
+    the show becomes its next special. `taken`: {show: special numbers handed out but not on disk yet}."""
+    show = show_of(a, source, titles, tv_shows() if shows is None else shows)
+    if not show:
+        return a
+    ep = a.get("episode")
+    numbers = {int(x) for x in re.findall(r"\d+", " ".join([*titles, str(a.get("summary") or "")]))}
+    episode = (a.get("library") == "TV" and ep is not None and a.get("season") != 0 and ep in numbers
+               and not any(EXTRA_RE.search(t or "") for t in titles))
+    a.update(library="TV", show=show, folder="Other")
+    if episode:
+        a["season"] = a.get("season") or 1
+        return a
+    used = {int(m.group(1)) for p in (MEDIA / "TV" / safe_name(show) / "Season 00").glob("*")
+            if (m := re.search(r" - S00E(\d+)\b", p.name))}
+    used |= {int(r["e"]) for r in q("SELECT json_extract(analysis, '$.episode') e FROM jobs WHERE status='done' AND "
+                                    "json_extract(analysis, '$.show')=? AND json_extract(analysis, '$.season')=0", (show,))
+             if r["e"] is not None}
+    taken = {} if taken is None else taken
+    n = max(used | taken.setdefault(show, set()), default=0) + 1
+    taken[show].add(n)
+    a.update(season=0, episode=n)
+    return a
+
+
+@once("shows_together")
+def refile_shows(dry_run=False):
+    """Once: put the web videos of shows where place_in_show puts new ones (oldest first, so specials are numbered
+    in the order they came out), moving their files. Returns what was (or with dry_run, would be) moved."""
+    shows, taken, done = tv_shows(), {}, []
+    for r in q("SELECT * FROM jobs WHERE status='done' AND ref IS NULL AND COALESCE(kind, '') NOT IN ('torrent', 'file') "
+               "ORDER BY COALESCE(json_extract(analysis, '$.published'), ''), id"):
+        a = json.loads(r["analysis"] or "{}")
+        if a.get("library") == "TV" and a.get("season") == 0:
+            continue  # already a special
+        b = place_in_show(dict(a), r["source"], [str(a.get("title") or ""), r["title"] or ""], shows, taken)
+        if all(a.get(k) == b.get(k) for k in ("library", "show", "season", "episode")):
+            continue
+        files = json.loads(r["files"] or "[]")
+        media = [Path(f) for f in files if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
+        if len(media) != 1 or not media[0].exists():
+            continue  # several videos from one page keep their numbered names
+        main = media[0]
+        dest_dir, base = destination(b, main.suffix.lower(), main.stem)
+        done.append(f"#{r['id']} {main.relative_to(MEDIA)} -> {(dest_dir / base).relative_to(MEDIA)}{main.suffix}")
+        if dry_run:
+            continue
+        moved = move_with_sidecars(main, dest_dir, base)
+        new = {str(main.with_name(main.stem + p.name[len(moved[0].stem):])): str(p) for p in moved}
+        files = [new.get(f, f) for f in files]
+        thumb = new.get(r["thumb"], r["thumb"])
+        for jid in [r["id"]] + [x["id"] for x in q("SELECT id FROM jobs WHERE ref=?", (r["id"],))]:
+            update(jid, analysis=b, files=files, thumb=thumb)
+        probe_of(str(moved[0]))  # so the list doesn't have to ffprobe it later
+    if done and not dry_run:
+        plex_refresh()
+    print("\n".join(["shows_together:", *done]), flush=True)
+    return done
 
 
 def move_with_sidecars(main: Path, dest_dir: Path, base: str):

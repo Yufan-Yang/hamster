@@ -189,6 +189,8 @@ def process(job_id):
                                           **({"people_in_it": staff} if staff else {})},
                          guess)
             add_people_tags(a, staff)
+            if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
+                library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
             if site_line.get("markers"):  # what the site shows along its progress bar (only one video per link)
                 a["markers"] = {"0": site_line["markers"]}
             if site_line.get("heat"):
