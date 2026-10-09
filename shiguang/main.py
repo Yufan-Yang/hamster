@@ -2,7 +2,7 @@
 import threading
 import time
 
-from . import migrations, board, channels, library, pipeline, search, telegram, usage, web
+from . import migrations, board, channels, heal, library, pipeline, search, telegram, usage, web
 from .core import (DOWNLOAD_WORKERS, EXTERNAL_PORT, INCOMPLETE, NOTE_MAX_UPLOAD, PORT, TG_TOKEN, app, finishing_threads, init_db, listen_bell)
 
 
@@ -11,6 +11,7 @@ def main_web():
     web.setup_app()
     listen_bell("web")
     web.ensure_admin()
+    heal.db_watch("web")
     threading.Thread(target=library.warm_probes, daemon=True).start()
     if (search.CLIP_DIR / "text.onnx").exists():
         threading.Thread(target=search.clip_text, args=("拾光",), daemon=True).start()  # first search needn't wait for it
@@ -25,6 +26,7 @@ def main_worker():
     web.setup_app()
     listen_bell("worker")
     INCOMPLETE.mkdir(parents=True, exist_ok=True)
+    heal.db_watch("worker")
     for _ in range(DOWNLOAD_WORKERS):
         threading.Thread(target=pipeline.worker_loop, daemon=True).start()
     threading.Thread(target=pipeline.sweep_loop, daemon=True).start()

@@ -148,6 +148,7 @@ def share_once():
 
 
 check("分享: one browser per link", share_once)
+check("database files on disk are the ones open (no deleted WAL)", lambda: shiguang.heal.db_files_gone() == [] or 1 / 0)
 check("play (range)", lambda: c.get(some_job["media"][0]["src"], headers={"Range": "bytes=0-99"}).status_code in (200, 206) or 1 / 0)
 check("thumb", lambda: get(f"/thumb/{some_job['id']}", code=200))
 check("save position", lambda: post(f"/api/watch/{some_job['id']}", {"part": 0, "pos": 30, "dur": 100}))

@@ -203,6 +203,8 @@ def complete_task(tid, worker, result):
                   "AND state='running'", (json.dumps(result, ensure_ascii=False), time.time(), tid, worker)):
         return False
     task = q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
+    if not task:  # removed meanwhile (its job was deleted): nothing to follow up
+        return True
     try:
         then = TASK_KINDS.get(task["kind"], {}).get("then")
         if isinstance(then, str):  # a Pi task writes the result into the library

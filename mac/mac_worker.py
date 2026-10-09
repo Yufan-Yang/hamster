@@ -655,7 +655,12 @@ HEAL_SYSTEM = """You fix bugs in 拾光, a home media server on a Raspberry Pi. 
 package, grabber.py (entry), index.html (the page), tests/smoke.py (run before every deploy, on a copy of the real
 database). An error happened in production; its details are below.
 
-Work out the cause from the code (you can read and search; you can't run anything). If it's a bug in this code, fix it
+First read HEALING.md: causes seen before, and how to tell them apart. Below the error comes "Evidence from the Pi":
+real output gathered just now (logs, open database files, disks, memory). Work out the cause from the code and that
+evidence (you can read and search; you can't run anything). Be exact about what you know: quote the line of
+evidence or code each claim rests on, and never name a cause (a failing disk, a power cut, the network, a site) that
+nothing in the evidence or the code points to. When the evidence can't settle it, say which causes remain and what a
+person should check to tell them apart, and give low confidence. If it's a bug in this code, fix it
 with the smallest change that makes it right, in the style of the code around it (comments, naming, idiom). Don't
 touch deploy.sh, mac/ or config; don't weaken or delete tests to make them pass; don't add features or refactor.
 If it isn't a bug in the code (a site down, a broken file, the network, the disk), change nothing.
@@ -663,10 +668,28 @@ If it isn't a bug in the code (a site down, a broken file, the network, the disk
 Your final answer: state "fixed" (you changed code), "diagnosed" (a bug you couldn't fix safely, or it needs a person),
 or "not_a_bug"; diagnosis: 2-5 sentences in Simplified Chinese: the cause, and what you changed or what a person
 should do; summary: one short line in Simplified Chinese; retry: true when the failed tasks should run again now
-(after your fix, or when the cause has passed)."""
-HEAL_SCHEMA = {"type": "object", "required": ["state", "diagnosis", "summary", "retry"], "properties": {
+(after your fix, or when the cause has passed); confidence: high (the evidence or code shows it), medium (fits
+everything seen, but not shown), low (a guess between causes); evidence: the few lines (log, code with file:line)
+the diagnosis rests on."""
+HEAL_SCHEMA = {"type": "object", "required": ["state", "diagnosis", "summary", "retry", "confidence", "evidence"], "properties": {
     "state": {"enum": ["fixed", "diagnosed", "not_a_bug"]}, "diagnosis": {"type": "string"},
-    "summary": {"type": "string"}, "retry": {"type": "boolean"}}}
+    "summary": {"type": "string"}, "retry": {"type": "boolean"},
+    "confidence": {"enum": ["high", "medium", "low"]}, "evidence": {"type": "string"}}}
+CONFIDENCE = {"high": "高", "medium": "中", "low": "低"}
+# Read-only looks at the Pi for the healer (it can't run anything itself): the services' logs around the error, which
+# database files they have open (a deleted WAL shows here), who else has the database open, kernel errors, disks.
+PI_EVIDENCE = r"""
+echo "## deployed: $(cat /opt/grabber/REVISION 2>/dev/null)   up: $(uptime)"
+echo "## services"; systemctl is-active grabber grabber-worker
+echo "## web + worker log (no page requests), last 60 lines"
+journalctl -u grabber -u grabber-worker -n 600 --no-pager -o short-iso 2>/dev/null | grep -v -E '"(GET|POST|HEAD) ' | tail -60
+echo "## database files the services have open"
+for s in grabber grabber-worker; do p=$(systemctl show $s -p MainPID --value); echo "$s ($p):"; sudo -n ls -l /proc/$p/fd 2>/dev/null | grep -o 'grabber\.db.*'; done
+echo "## every process with the database open"; sudo -n fuser -v /mnt/disk1/.grabber/grabber.db* 2>&1 | tail -n +2
+echo "## kernel errors, last day"; journalctl -k -p err --since -1d --no-pager 2>/dev/null | tail -15
+echo "## disks"; cat /run/disk-health.json 2>/dev/null; echo; df -h / /mnt/disk1 /mnt/disk2 2>/dev/null
+echo "## memory"; free -m
+"""
 
 
 def git(*args, cwd=REPO, check=True):
@@ -683,16 +706,26 @@ def deployed_revision():
     return r.stdout.strip()
 
 
-def heal_prompt(p, failed=""):
+def pi_evidence():
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", PI_SSH, PI_EVIDENCE],
+                           capture_output=True, text=True, timeout=60)
+        return (r.stdout + r.stderr)[-9000:].strip() or "(nothing came back)"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"(couldn't reach the Pi: {e})"
+
+
+def heal_prompt(p, failed="", evidence=""):
     ctx = json.dumps(p.get("context") or {}, ensure_ascii=False, indent=1)
     return (f"Where: {p['label']} ({p['kind']}){' — ' + p['about'] if p.get('about') else ''}\n"
             f"Happened {p.get('count', 1)} time(s).\nError: {p['error']}\n\nTraceback:\n{p.get('trace') or '(none: it failed on a remote worker)'}\n\n"
             f"Context:\n{ctx}\n"
+            + (f"\nEvidence from the Pi (gathered now, read-only):\n{evidence}\n" if evidence else "")
             + (f"\nA fix was made for this before ({p['before']}), and it happened again after it.\n" if p.get("before") else "")
             + (f"\nYour fix so far is in the working tree, but the deploy rejected it:\n{failed}\nFix that.\n" if failed else ""))
 
 
-def ask_healer(p, beat, can_edit, failed=""):
+def ask_healer(p, beat, can_edit, failed="", evidence=""):
     """One round of Claude Code in the worktree: read-only when it can't fix (it then only diagnoses)."""
     cmd = [str(CLAUDE), "-p", "--safe-mode", "--no-session-persistence", "--output-format", "json",
            "--model", HEAL_MODEL, "--max-turns", str(HEAL_TURNS),
@@ -703,7 +736,7 @@ def ask_healer(p, beat, can_edit, failed=""):
         stop = threading.Event()
         threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
         try:
-            stdout, stderr = proc.communicate(heal_prompt(p, failed), timeout=1800)
+            stdout, stderr = proc.communicate(heal_prompt(p, failed, evidence), timeout=1800)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -717,7 +750,8 @@ def ask_healer(p, beat, can_edit, failed=""):
     answer = out.get("structured_output")
     if not isinstance(answer, dict):
         if out.get("subtype") == "error_max_turns":
-            return {"state": "diagnosed", "diagnosis": f"对话到了 {HEAL_TURNS} 轮上限，还没找到原因。", "summary": "没查出来", "retry": False}
+            return {"state": "diagnosed", "diagnosis": f"对话到了 {HEAL_TURNS} 轮上限，还没找到原因。", "summary": "没查出来", "retry": False,
+                    "confidence": "low", "evidence": ""}
         raise RuntimeError(f"claude: {str(out.get('result') or out.get('subtype'))[:300]}")
     return answer
 
@@ -734,17 +768,19 @@ def heal(task, beat):
         shutil.rmtree(HEAL_DIR, ignore_errors=True)
     git("worktree", "prune")
     git("worktree", "add", "--detach", str(HEAL_DIR), base)
+    evidence = pi_evidence()
     try:
         failed, rounds = "", 0
         while True:
             rounds += 1
-            answer = ask_healer(p, beat, can_edit, failed)
+            answer = ask_healer(p, beat, can_edit, failed, evidence)
             for line in git("status", "--porcelain", cwd=HEAL_DIR).splitlines():  # outside what a fix may touch: undone
                 path = line[3:].split(" -> ")[-1]
                 if not path.startswith(HEAL_PATHS):
                     git("checkout", "--", path, cwd=HEAL_DIR, check=False) if line[:2] != "??" else (HEAL_DIR / path).unlink(missing_ok=True)
-            out = {"state": answer["state"], "diagnosis": answer["diagnosis"], "summary": answer["summary"],
-                   "retry": bool(answer["retry"]), "rounds": rounds}
+            out = {"state": answer["state"], "summary": answer["summary"], "retry": bool(answer["retry"]), "rounds": rounds,
+                   "diagnosis": f"{answer['diagnosis']}（把握：{CONFIDENCE.get(answer.get('confidence'), '低')}）",
+                   "evidence": str(answer.get("evidence") or "")[:2000]}
             if not can_edit:
                 out["diagnosis"] += "（Pi 上的代码不是已提交的版本，所以这次只诊断、没有改代码。）"
                 return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}

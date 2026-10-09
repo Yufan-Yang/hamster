@@ -8,10 +8,11 @@ The same error over and over is one incident (counted), and healed once: again o
 import json
 import os
 import re
+import threading
 import time
 
 from . import board
-from .core import _write, q
+from .core import DB_PATH, _write, q
 
 HEAL = os.environ.get("HEAL", "1") != "0"
 HEAL_PER_DAY = int(os.environ.get("HEAL_PER_DAY", "6"))
@@ -96,6 +97,42 @@ def task_failed(tid, error, trace="", expected=False):
 def request_failed(method, path, exc, trace):
     """A page / API request crashed (500)."""
     report("web", "页面请求", f"{type(exc).__name__}: {exc}", trace, {"request": f"{method} {path}"}, title=path)
+
+
+def db_files_gone():
+    """The database files this process has open that were deleted under it. That happens when something else opens
+    grabber.db where SQLite's locks don't reach (through the /mnt/media mergerfs view, from another machine): it thinks
+    it is alone and, closing, removes the -wal/-shm the services still write to. Everything they write then lands in
+    a deleted file, and new connections see an older database (2026-10-09)."""
+    out = []
+    try:
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                link = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue
+            if link.startswith(str(DB_PATH)) and link.endswith(" (deleted)"):
+                out.append(link)
+    except OSError:  # no /proc (not Linux)
+        pass
+    return out
+
+
+def db_watch(name):
+    """Checks once a minute that the database files are still the ones on disk; reports it once if not (an incident
+    the healer can't miss: it isn't a bug in the code and the disk is fine)."""
+    def loop():
+        while True:
+            time.sleep(60)
+            gone = db_files_gone()
+            if gone:
+                report("db", "数据库", f"数据库文件在 {name} 进程运行时被删除了：{', '.join(gone)}", "",
+                       {"process": name, "pid": os.getpid(), "deleted": gone,
+                        "meaning": "another program opened grabber.db where SQLite's locks don't reach and removed the "
+                                   "WAL on closing; do NOT restart the services before saving /proc/<pid>/fd copies "
+                                   "of the WAL (see HEALING.md)"})
+                return
+    threading.Thread(target=loop, daemon=True).start()
 
 
 @board.task("heal", "自修复", "mac", remote=True)
