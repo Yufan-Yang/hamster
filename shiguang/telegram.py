@@ -138,7 +138,8 @@ def tg_handle(msg, chat):
             tg("sendMessage", chat_id=chat, text=f"Saved to media/Downloads/{dest.name}")
     for u in urls:
         sent = tg("sendMessage", chat_id=chat, text=f"⏳ queued: {u[:200]}", disable_web_page_preview=True)
-        pipeline.add_job(u, source="telegram", chat_id=chat, msg_id=sent.get("result", {}).get("message_id"))
+        for part in pipeline.bili_parts(u):
+            pipeline.add_job(part, source="telegram", chat_id=chat, msg_id=sent.get("result", {}).get("message_id"))
     if not urls and not doc and not msg.get("video") and text:
         tg("sendMessage", chat_id=chat, text="I didn't find a link in that.")
 

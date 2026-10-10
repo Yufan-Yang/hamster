@@ -650,8 +650,9 @@ def add_get():
     if channels.channel_of(url):
         channels.add_sub(url, g.owner, g.device_label)
         return ADD_PAGE.format(f"开始追更 – {shown}<script>setTimeout(() => close(), 1200)</script>")
-    jid = pipeline.add_job(url, source="web", owner=g.owner, device=g.device_label)
-    return ADD_PAGE.format(f"已加入 #{jid} – {shown}<script>setTimeout(() => close(), 1200)</script>")
+    jids = [pipeline.add_job(part, source="web", owner=g.owner, device=g.device_label) for part in pipeline.bili_parts(url)]
+    added = f"#{jids[0]}" if len(jids) == 1 else f"{len(jids)} 个分P"
+    return ADD_PAGE.format(f"已加入 {added} – {shown}<script>setTimeout(() => close(), 1200)</script>")
 
 
 def internal_link(url):
@@ -712,9 +713,10 @@ def add_post():
                 board.publish("book_import", f"book:{bid}", 80, force=True)
             shelf.append({"id": bid, "how": how})
             continue
-        jid, how = pipeline.add_job_ex(u, source=source, owner=g.owner, device=g.device_label)
-        ids.append(jid)
-        hows.append(how)
+        for part in pipeline.bili_parts(u):  # a B站 video in parts (分P): every part
+            jid, how = pipeline.add_job_ex(part, source=source, owner=g.owner, device=g.device_label)
+            ids.append(jid)
+            hows.append(how)
     if not ids and (subs or shelf):
         if g.shortcut:
             return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",

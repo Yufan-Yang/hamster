@@ -84,6 +84,37 @@ def bili_staff(url):
         return []
 
 
+def bili_parts(url):
+    """A B站 video with several parts (分P: a whole show uploaded as one video): a link to each part, in order, so
+    every part becomes its own job. Any other link: [url]. (The app's share link always says p=1, whichever part
+    was open, so all parts are taken whatever p says.)"""
+    m = re.fullmatch(r"bilibili:(BV\w+|av\d+):p\d+", link_key(url))
+    if not m:
+        return [url]
+    vid = m.group(1)
+    try:
+        r = requests.get("https://api.bilibili.com/x/web-interface/view", timeout=15,
+                         params={"aid": vid[2:]} if vid.lower().startswith("av") else {"bvid": vid},
+                         headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+        pages = (r.json().get("data") or {}).get("pages") or []
+    except Exception:
+        return [url]
+    if len(pages) < 2:
+        return [url]
+    return [f"https://www.bilibili.com/video/{vid}?p={p['page']}" for p in pages]
+
+
+def part_show(key):
+    """The show another part of the same B站 video was filed under (so all its parts end up in one show), or None."""
+    m = re.fullmatch(r"(bilibili:\w+:p)\d+", key or "")
+    if not m:
+        return None
+    r = q("SELECT json_extract(analysis, '$.show') show FROM jobs WHERE key LIKE ? AND key<>? AND status='done' AND "
+          "json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.show') IS NOT NULL "
+          "ORDER BY id LIMIT 1", (m.group(1) + "%", key), one=True)
+    return r["show"] if r else None
+
+
 
 
 def bangumi_season(params):
@@ -259,6 +290,8 @@ def process(job_id):
             add_people_tags(a, staff)
             if bangumi and bangumi["extra"]:
                 a["episode"] = None  # B站 lists it outside 正片 (a preview, PV, 花絮...): not an episode
+            if a.get("library") == "TV" and (sibling := part_show(job["key"])):
+                a["show"] = sibling  # 分P of one video: one show, however the classifier spelt it this time
             if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
                 library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
             if bangumi and bangumi["episode"] is not None:  # 番剧 正片: an episode, numbered as B站 numbers it
