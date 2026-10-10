@@ -84,24 +84,51 @@ def bili_staff(url):
         return []
 
 
+_views = {}  # B站 video id -> its info from the view API (parts, title...); a few per show
+
+
+def bili_view(vid):
+    """What B站's view API says about a video (BV... or av...): {"pages": [{"page", "part"}...], ...}; {} if it
+    can't be read."""
+    if vid not in _views:
+        try:
+            r = requests.get("https://api.bilibili.com/x/web-interface/view", timeout=15,
+                             params={"aid": vid[2:]} if vid.lower().startswith("av") else {"bvid": vid},
+                             headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+            data = r.json().get("data") or {}
+        except Exception:
+            return {}
+        if not data:
+            return {}
+        _views[vid] = data
+        if len(_views) > 200:
+            _views.pop(next(iter(_views)))
+    return _views[vid]
+
+
 def bili_parts(url):
     """A B站 video with several parts (分P: a whole show uploaded as one video): a link to each part, in order, so
     every part becomes its own job. Any other link: [url]. (The app's share link always says p=1, whichever part
     was open, so all parts are taken whatever p says.)"""
     m = re.fullmatch(r"bilibili:(BV\w+|av\d+):p\d+", link_key(url))
-    if not m:
-        return [url]
-    vid = m.group(1)
-    try:
-        r = requests.get("https://api.bilibili.com/x/web-interface/view", timeout=15,
-                         params={"aid": vid[2:]} if vid.lower().startswith("av") else {"bvid": vid},
-                         headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
-        pages = (r.json().get("data") or {}).get("pages") or []
-    except Exception:
-        return [url]
+    pages = bili_view(m.group(1)).get("pages") or [] if m else []
     if len(pages) < 2:
         return [url]
-    return [f"https://www.bilibili.com/video/{vid}?p={p['page']}" for p in pages]
+    return [f"https://www.bilibili.com/video/{m.group(1)}?p={p['page']}" for p in pages]
+
+
+def episode_title(url, key):
+    """An episode's own name as B站 shows it: a 番剧 正片's ("慕兰之战19"), a 分P's part ("第一季04"); None otherwise."""
+    if "bilibili.com" not in (url or ""):
+        return None
+    ep = bili_episode(url)
+    if ep:
+        return (ep.get("name") or "").strip() or None if ep["episode"] is not None else None
+    m = re.fullmatch(r"bilibili:(BV\w+|av\d+):p(\d+)", key or "")
+    pages = bili_view(m.group(1)).get("pages") or [] if m else []
+    if len(pages) < 2:
+        return None
+    return next((str(p.get("part") or "").strip() or None for p in pages if p.get("page") == int(m.group(2))), None)
 
 
 def part_show(key):
@@ -138,7 +165,7 @@ def bangumi_season(params):
                 "id": e.get("id"), "bvid": e.get("bvid"),
                 "url": f"https://www.bilibili.com/video/{e['bvid']}" if e.get("bvid") else f"https://www.bilibili.com/bangumi/play/ep{e.get('id')}",
                 "title": e.get("show_title") or " ".join(str(e.get(k) or "") for k in ("title", "long_title")).strip(),
-                "badge": e.get("badge") or "", "extra": section is None and not main,
+                "name": e.get("long_title") or "", "badge": e.get("badge") or "", "extra": section is None and not main,
                 "episode": int(num) if main and num.isdigit() else None,
                 "date": time.strftime("%Y-%m-%d", time.localtime(e["pub_time"])) if e.get("pub_time") else None,
                 "duration": (e.get("duration") or 0) / 1000 or None})
@@ -159,9 +186,7 @@ def bili_episode(url):
         if not ep_id:
             if m.group(1) in _bangumi:
                 return _bangumi[m.group(1)]
-            r = requests.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": m.group(1)}, timeout=15,
-                             headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
-            ep = re.search(r"/bangumi/play/ep(\d+)", (r.json().get("data") or {}).get("redirect_url") or "")
+            ep = re.search(r"/bangumi/play/ep(\d+)", bili_view(m.group(1)).get("redirect_url") or "")
             if not ep:
                 return None  # an ordinary video
             ep_id = ep.group(1)
@@ -292,6 +317,8 @@ def process(job_id):
                 a["episode"] = None  # B站 lists it outside 正片 (a preview, PV, 花絮...): not an episode
             if a.get("library") == "TV" and (sibling := part_show(job["key"])):
                 a["show"] = sibling  # 分P of one video: one show, however the classifier spelt it this time
+            if a.get("library") == "TV" and (name := episode_title(meta.get("webpage_url") or url, job["key"])):
+                a["episode_title"] = name  # shown with the episode number (拾光, and Plex when it has no name for it)
             if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
                 library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
             if bangumi and bangumi["episode"] is not None:  # 番剧 正片: an episode, numbered as B站 numbers it
@@ -577,3 +604,19 @@ def remove_job(jid, with_files):
 
 # The other modules, imported last: they import this one too, and are only used at run time
 from . import board, channels, core, download, library, llm, search, telegram  # noqa: E402
+
+
+@once("episode_titles", background=True)
+def backfill_episode_titles():
+    """Once: the B站 name of each 剧集 episode downloaded before episode titles were kept (番剧 正片, 分P parts),
+    also written into Plex where Plex has no name for the episode."""
+    plex = []
+    for r in q("SELECT id, url, key, files, analysis FROM jobs WHERE status IN ('done', 'linked') AND url LIKE '%bilibili.com%' "
+               "AND json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.episode_title') IS NULL"):
+        name = episode_title(r["url"], r["key"])
+        if not name:
+            continue
+        a = {**json.loads(r["analysis"]), "episode_title": name}
+        update(r["id"], analysis=a)
+        plex += [(f, a) for f in json.loads(r["files"] or "[]")[:1]]
+    library.plex_set_metadata(plex)

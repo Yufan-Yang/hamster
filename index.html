@@ -202,6 +202,7 @@
   .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
   .tags span { color: var(--blue); cursor: pointer; border: 2px solid var(--blue); padding: 0 6px; }
   .tags span:hover { background: var(--blue); color: var(--bg); }
+  .wsub { color: var(--muted); margin: -4px 0 8px; overflow-wrap: anywhere; }
   .wmeta { color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .wmeta a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
   .parts { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
@@ -886,6 +887,15 @@ function category(j) {
   return a.library === "Videos" ? (a.folder || "Other") : (a.library || "Other");
 }
 function catName(c) { return FOLDERS[c] || LIBS[c] || c; }
+// a 剧集 episode is named as one: "凡人修仙传 第195集 慕兰之战19" (the uploader's title goes under it on the watch page)
+function episodeOf(j) {
+  const a = j.analysis || {};
+  if (!["done", "linked"].includes(j.status) || a.library !== "TV" || !a.show || a.episode == null) return "";
+  const n = +a.season === 0 ? `特别篇 ${a.episode}` : `${+a.season > 1 ? `第${a.season}季 ` : ""}第${a.episode}集`;
+  // its own name, unless that's only numbering again (a 分P named "第一季04")
+  const named = /\S/.test(String(a.episode_title || "").replace(/第?[一二三四五六七八九十百\d]+[季集话話期部]?|[SsEe][Pp]?\d+|[\s.\-_·]/g, ""));
+  return [a.show, n, named ? a.episode_title : ""].filter(Boolean).join(" ");
+}
 function titleOf(j) { return (j.analysis || {}).title || j.title || (j.url.startsWith("torrent-file:") ? "种子文件" : j.url); }
 function subOf(j) {
   const m = /^sub:(\d+)$/.exec(j.source || "");
@@ -962,7 +972,7 @@ function card(j, clearableWatch = false) {
   return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
     ${clear}
     ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
-    <div class="info"><div class="title">${hl(titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
+    <div class="info"><div class="title">${hl(episodeOf(j) || titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
   </div>`;
 }
 
@@ -1752,7 +1762,8 @@ function openWatch(id, part = 0, t = 0) {
       <div class="toggle expand">…展开</div>
     </div>` : "";
   $("#watchBody").innerHTML = `${stage}
-    <div class="wtitle">${hl(titleOf(j))}</div>
+    <div class="wtitle">${hl(episodeOf(j) || titleOf(j))}</div>
+    ${episodeOf(j) ? `<div class="wsub">${hl(titleOf(j))}</div>` : ""}
     ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify("#" + t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
     <div class="wmeta">${meta.map(x => `<span>${x}</span>`).join("")}</div>
     ${parts}

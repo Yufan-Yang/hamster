@@ -327,10 +327,13 @@ def plex_text(a):
 
 
 def plex_set_metadata(items):
-    """Write our summary/tags into Plex for videos in the Videos library (Plex has no metadata source
-    for those; films and series get Plex's own). items: [(file path, analysis)]. Waits for the scan."""
+    """Write our summary/tags into Plex for videos in the Videos library (Plex has no metadata source for those;
+    films and series get Plex's own), and the name and summary of 剧集 episodes Plex has nothing for (a new
+    episode its database doesn't list yet shows as "Episode 195"). items: [(file path, analysis)]. Waits for the scan."""
     token = os.environ.get("PLEX_TOKEN", "").strip()
-    items = [(str(f), a) for f, a in items if str(f).startswith(str(MEDIA / "Videos")) and plex_text(a)]
+    videos, tv = str(MEDIA / "Videos"), str(MEDIA / "TV")
+    items = [(str(f), a) for f, a in items if str(f).startswith(videos) and plex_text(a)
+             or str(f).startswith(tv) and (plex_text(a) or a.get("episode_title"))]
     if not token or not items:
         return
     base, hdrs = "http://127.0.0.1:32400", {"X-Plex-Token": token, "Accept": "application/json"}
@@ -338,25 +341,39 @@ def plex_set_metadata(items):
         time.sleep(6)
         try:
             sections = requests.get(f"{base}/library/sections", headers=hdrs, timeout=10).json()["MediaContainer"]["Directory"]
-            sec = next(d for d in sections if any(l["path"] == str(MEDIA / "Videos") for l in d.get("Location", [])))
-            videos = requests.get(f"{base}/library/sections/{sec['key']}/all", headers=hdrs, timeout=30).json()["MediaContainer"].get("Metadata", [])
+            by_file = {}  # file -> (section, item)
+            for root, kind in ((videos, 1), (tv, 4)):
+                if not any(f.startswith(root) for f, _ in items):
+                    continue
+                sec = next(d for d in sections if any(loc["path"] == root for loc in d.get("Location", [])))
+                listed = requests.get(f"{base}/library/sections/{sec['key']}/all", params={"type": kind}, headers=hdrs,
+                                      timeout=60).json()["MediaContainer"].get("Metadata", [])
+                by_file.update({part["file"]: (sec["key"], v) for v in listed for m in v.get("Media", []) for part in m.get("Part", [])})
         except Exception:
             continue
-        by_file = {part["file"]: v["ratingKey"] for v in videos for m in v.get("Media", []) for part in m.get("Part", [])}
         pending = []
         for f, a in items:
-            key = by_file.get(f)
-            if not key:
+            if f not in by_file:
                 pending.append((f, a))
                 continue
-            params = {"type": 1, "id": key, "summary.value": plex_text(a), "summary.locked": 1}
-            if a.get("year"):
-                params.update({"year.value": a["year"], "year.locked": 1})
-            for i, t in enumerate(a.get("tags", [])[:10]):
-                params[f"genre[{i}].tag.tag"] = t
-            if a.get("tags"):
-                params["genre.locked"] = 1
-            requests.put(f"{base}/library/sections/{sec['key']}/all", params=params, headers=hdrs, timeout=10)
+            sec, v = by_file[f]
+            if f.startswith(tv):
+                if not str(v.get("guid", "")).startswith("local://"):
+                    continue  # Plex knows this episode: its own name and summary
+                params = {"type": 4, "id": v["ratingKey"]}
+                if a.get("episode_title"):
+                    params.update({"title.value": a["episode_title"], "title.locked": 1})
+                if plex_text(a):
+                    params.update({"summary.value": plex_text(a), "summary.locked": 1})
+            else:
+                params = {"type": 1, "id": v["ratingKey"], "summary.value": plex_text(a), "summary.locked": 1}
+                if a.get("year"):
+                    params.update({"year.value": a["year"], "year.locked": 1})
+                for i, t in enumerate(a.get("tags", [])[:10]):
+                    params[f"genre[{i}].tag.tag"] = t
+                if a.get("tags"):
+                    params["genre.locked"] = 1
+            requests.put(f"{base}/library/sections/{sec}/all", params=params, headers=hdrs, timeout=10)
         items = pending
         if not items:
             return
