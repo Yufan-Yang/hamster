@@ -507,7 +507,10 @@ def probe_of(path):
     time) and survive restarts; the first page load after a restart used to take minutes."""
     seen = _mtimes.get(path)
     if not seen or time.time() - seen[0] > LISTING_TTL:  # (a stat through mergerfs costs a few ms)
-        seen = _mtimes[path] = (time.time(), Path(path).stat().st_mtime)
+        try:
+            seen = _mtimes[path] = (time.time(), Path(path).stat().st_mtime)
+        except FileNotFoundError:  # gone since its folder was listed (folder_names keeps a listing LISTING_TTL)
+            return 0.0, None
     key = (path, seen[1])
     if key in _probes:
         return _probes[key]
