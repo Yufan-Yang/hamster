@@ -581,6 +581,47 @@ def bilibili_short_uploader_link():
 check("B站 b23.tv short uploader links are followed", bilibili_short_uploader_link)
 
 
+def bilibili_parts():
+    pl = shiguang.pipeline
+    class Reply:
+        status_code = 200
+        def __init__(self, body): self.body = body
+        def json(self): return self.body
+    replies = []
+    old_get, old_sleep, old_max = pl.requests.get, pl.time.sleep, pl.PARTS_MAX
+    try:
+        pl.requests.get = lambda *a, **k: replies.pop(0)
+        pl.time.sleep = lambda s: None
+        pl._views.clear()
+        # B站 turns the first asks away (412), then answers: every part, in order
+        replies[:] = [Reply({"code": -412}), Reply({"code": 0, "data": {"pages": [{"page": n, "part": f"第{n}集"} for n in (1, 2, 3)]}})]
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1aaaaaaaaa?p=1") == [
+            f"https://www.bilibili.com/video/BV1aaaaaaaaa?p={n}" for n in (1, 2, 3)]
+        # never answers when the link comes: just the link (the worker looks again), and the worker notes it
+        replies[:] = [Reply({"code": -412})] * 6
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1bbbbbbbbb") == ["https://www.bilibili.com/video/BV1bbbbbbbbb"]
+        job, a = {"key": "bilibili:BV1bbbbbbbbb:p1", "owner": "user:nobody-parts"}, {}
+        pl.check_parts(job, a)
+        assert a == {"parts": {"total": None}}, a
+        # more parts than PARTS_MAX: only the one sent; its page offers the rest
+        pl.PARTS_MAX = 2
+        replies[:] = [Reply({"code": 0, "data": {"pages": [{"page": n, "part": ""} for n in (1, 2, 3)]}})]
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1ccccccccc") == ["https://www.bilibili.com/video/BV1ccccccccc"]
+        assert pl.part_count("https://www.bilibili.com/video/BV1ccccccccc") == 3
+        a = {}
+        pl.check_parts({"key": "bilibili:BV1ccccccccc:p1", "owner": "user:nobody-parts"}, a)
+        assert a == {"parts": {"total": 3}}, a
+        # a deleted video isn't asked about again and again
+        replies[:] = [Reply({"code": -404})]
+        assert pl.bili_view("BV1ddddddddd") == {} and not replies
+    finally:
+        pl.requests.get, pl.time.sleep, pl.PARTS_MAX = old_get, old_sleep, old_max
+        pl._views.clear()
+
+
+check("B站 分P: every part, retried when B站 says 412, too many asks first", bilibili_parts)
+
+
 def bilibili_412_restarts_session():
     ch = shiguang.channels
     class Reply:

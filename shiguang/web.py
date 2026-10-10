@@ -697,7 +697,7 @@ def add_post():
         flt = channels.clean_filter(json.loads(flt) if isinstance(flt, str) else flt) if flt else None
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    hows, subs, shelf = [], [], []
+    hows, subs, shelf, many = [], [], [], []
     blocked = []
     for u in find_urls(text):
         if (bad := internal_link(u)):
@@ -713,10 +713,13 @@ def add_post():
                 board.publish("book_import", f"book:{bid}", 80, force=True)
             shelf.append({"id": bid, "how": how})
             continue
-        for part in pipeline.bili_parts(u):  # a B站 video in parts (分P): every part
+        parts = pipeline.bili_parts(u)  # a B站 video in parts (分P): every part
+        for part in parts:
             jid, how = pipeline.add_job_ex(part, source=source, owner=g.owner, device=g.device_label)
             ids.append(jid)
             hows.append(how)
+        if len(parts) == 1 and (pipeline.part_count(u) or 0) > 1:
+            many.append(pipeline.part_count(u))
     if not ids and (subs or shelf):
         if g.shortcut:
             return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",
@@ -743,9 +746,10 @@ def add_post():
         msg = "，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主" if subs else "", f"{len(shelf)} 本电子书加到书架了" if shelf else "",
                                     f"开始下载 {new} 个" if new else "",
                                     f"{len(linked)} 个别人已经下过，直接加进来了" if linked else "",
-                                    f"{len(dupes)} 个已经在拾光里了" if dupes else "") if x)
+                                    f"{len(dupes)} 个已经在拾光里了" if dupes else "",
+                                    f"有个视频有 {many[0]} 个分P，只下了这一个，要全部下载在拾光里打开它点「下载全部分P」" if many else "") if x)
         return Response(msg, mimetype="text/plain")
-    return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs, books=shelf)
+    return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs, books=shelf, many_parts=many)
 
 
 def owner_label(o):
@@ -1843,6 +1847,8 @@ def job_action(jid, action):
         return jsonify(msg=pipeline.cancel_job(jid))
     if action == "retry":
         return jsonify(msg=pipeline.retry_job(jid))
+    if action == "parts":  # the video page's offer: all the 分P of this B站 video
+        return jsonify(msg=pipeline.take_parts(jid))
     if action == "delete":
         with_files = bool((request.get_json(silent=True) or {}).get("files"))
         result, files = pipeline.remove_job(jid, with_files)

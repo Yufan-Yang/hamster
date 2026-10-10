@@ -1,4 +1,5 @@
 """A download job from link to library, the worker that runs jobs, job control."""
+import fcntl
 import glob
 import hashlib
 import json
@@ -85,36 +86,136 @@ def bili_staff(url):
 
 
 _views = {}  # B站 video id -> its info from the view API (parts, title...); a few per show
+PARTS_MAX = int(os.environ.get("PARTS_MAX", "50"))  # a video with more parts than this asks before taking them all
+PART_KEY = re.compile(r"(bilibili:(BV\w+|av\d+):p)(\d+)")
 
 
-def bili_view(vid):
-    """What B站's view API says about a video (BV... or av...): {"pages": [{"page", "part"}...], ...}; {} if it
-    can't be read."""
-    if vid not in _views:
+def bili_view(vid, tries=4):
+    """What B站's view API says about a video (BV... or av...): {"pages": [{"page", "part"}...], ...}. {} when B站
+    says there is no such video; None when it didn't answer (it turns some requests away with 412: tried again a
+    few times, a little later each time)."""
+    if vid in _views:
+        return _views[vid]
+    for i in range(tries):
+        if i:
+            time.sleep(2 * i)
         try:
             r = requests.get("https://api.bilibili.com/x/web-interface/view", timeout=15,
                              params={"aid": vid[2:]} if vid.lower().startswith("av") else {"bvid": vid},
                              headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
-            data = r.json().get("data") or {}
+            body = r.json() if r.status_code == 200 else {}
         except Exception:
+            continue
+        if body.get("code") == 0 and body.get("data"):
+            _views[vid] = body["data"]
+            if len(_views) > 200:
+                _views.pop(next(iter(_views)))
+            return body["data"]
+        if body.get("code") in (-404, 62002, 62004, 62012):  # gone, hidden, under review: no point asking again
             return {}
-        if not data:
-            return {}
-        _views[vid] = data
-        if len(_views) > 200:
-            _views.pop(next(iter(_views)))
-    return _views[vid]
+    return None
+
+
+def part_link(vid, n):
+    return f"https://www.bilibili.com/video/{vid}?p={n}"
 
 
 def bili_parts(url):
     """A B站 video with several parts (分P: a whole show uploaded as one video): a link to each part, in order, so
-    every part becomes its own job. Any other link: [url]. (The app's share link always says p=1, whichever part
-    was open, so all parts are taken whatever p says.)"""
-    m = re.fullmatch(r"bilibili:(BV\w+|av\d+):p\d+", link_key(url))
-    pages = bili_view(m.group(1)).get("pages") or [] if m else []
-    if len(pages) < 2:
+    every part becomes its own job. Any other link, or one with more than PARTS_MAX parts (the video's page in 拾光
+    offers the rest), or when B站 doesn't answer (the worker looks again): [url]. (The app's share link always says
+    p=1, whichever part was open, so all parts are taken whatever p says.)"""
+    m = PART_KEY.fullmatch(link_key(url))
+    pages = ((bili_view(m.group(2), tries=2) or {}).get("pages") or []) if m else []  # (someone's waiting)
+    if not 2 <= len(pages) <= PARTS_MAX:
         return [url]
-    return [f"https://www.bilibili.com/video/{m.group(1)}?p={p['page']}" for p in pages]
+    return [part_link(m.group(2), p["page"]) for p in pages]
+
+
+def part_count(url):
+    """How many parts B站 lists for this video (from the cache bili_parts filled), None if it isn't one we know."""
+    m = PART_KEY.fullmatch(link_key(url))
+    return len((_views.get(m.group(2)) or {}).get("pages") or []) or None if m else None
+
+
+def queue_parts(job, pages):
+    """Queue every part of `job`'s video for its owner, as if they'd sent each one (parts they have are kept)."""
+    vid = PART_KEY.fullmatch(job["key"]).group(2)
+    return [add_job_ex(part_link(vid, p["page"]), source=job["source"] or "web", owner=job["owner"], device=job["device"])
+            for p in pages]
+
+
+def check_parts(job, a):
+    """A B站 video just downloaded: when it has parts and none of its other parts are in 拾光 (B站 didn't answer
+    when the link came, or a follow brought it), queue them. Too many to just take, or B站 still not answering:
+    noted in `a` ("parts"), so its page can offer them."""
+    m = PART_KEY.fullmatch(job["key"] or "")
+    if not m or q("SELECT 1 FROM jobs WHERE key LIKE ? AND key<>? AND owner IS ? LIMIT 1",
+                  (m.group(1) + "%", job["key"], job["owner"]), one=True):
+        return
+    view = bili_view(m.group(2))
+    pages = (view or {}).get("pages") or []
+    if view is None:
+        a["parts"] = {"total": None}
+    elif len(pages) > PARTS_MAX:
+        a["parts"] = {"total": len(pages)}
+    elif len(pages) > 1:
+        queue_parts(job, pages)
+
+
+def take_parts(jid):
+    """The video page's button: queue all the parts of job `jid`'s video. Returns what to tell the user."""
+    job = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+    m = PART_KEY.fullmatch(job["key"] or "") if job else None
+    if not m:
+        return "这不是 B站 视频"
+    view = bili_view(m.group(2))
+    if view is None:
+        return "B站 暂时没回应，过一会儿再试"
+    pages = view.get("pages") or []
+    a = json.loads(job["analysis"] or "{}")
+    a.pop("parts", None)
+    update(jid, analysis=a)
+    if len(pages) < 2:
+        return "这个视频只有一个分P"
+    new = sum(how != "duplicate" for _, how in queue_parts(dict(job), pages))
+    return f"开始下载其余 {new} 个分P" if new else "所有分P 都已经在拾光里了"
+
+
+@once("part_specials")
+def part_specials_now():
+    """Once: the specials of 分P videos already downloaded go into part order."""
+    videos = {}
+    for r in q("SELECT key FROM jobs WHERE key LIKE 'bilibili:%:p%' AND json_extract(analysis, '$.season')=0"):
+        if (m := PART_KEY.fullmatch(r["key"])):
+            videos.setdefault(m.group(1), r["key"])
+    for key in videos.values():
+        renumber_part_specials(key)
+
+
+def renumber_part_specials(key):
+    """分P of one video that ended up as specials (小剧场, 番外...) get their show's numbers in part order, not in
+    the order their downloads happened to finish."""
+    m = PART_KEY.fullmatch(key or "")
+    if not m:
+        return
+    (core.STATE / "locks").mkdir(parents=True, exist_ok=True)
+    with open(core.STATE / "locks" / "part-specials.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # two parts finishing at once
+        rows = sorted(q("SELECT * FROM jobs WHERE key LIKE ? AND status='done' AND ref IS NULL AND "
+                        "json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.season')=0 AND "
+                        "json_extract(analysis, '$.episode') IS NOT NULL", (m.group(1) + "%",)),
+                      key=lambda r: int(PART_KEY.fullmatch(r["key"]).group(3)))
+        numbers = sorted(json.loads(r["analysis"])["episode"] for r in rows)
+        wrong = [(r["id"], n) for r, n in zip(rows, numbers) if json.loads(r["analysis"])["episode"] != n]
+        # through numbers nobody uses first, so two that trade places don't land on each other
+        for step in ("aside", "home"):
+            for i, (jid, n) in enumerate(wrong):
+                r = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+                a = json.loads(r["analysis"])
+                print("part_specials:", library.refile(r, {**a, "episode": 9000 + i if step == "aside" else n}), flush=True)
+    if wrong:
+        library.plex_refresh()
 
 
 def episode_title(url, key):
@@ -124,11 +225,11 @@ def episode_title(url, key):
     ep = bili_episode(url)
     if ep:
         return (ep.get("name") or "").strip() or None if ep["episode"] is not None else None
-    m = re.fullmatch(r"bilibili:(BV\w+|av\d+):p(\d+)", key or "")
-    pages = bili_view(m.group(1)).get("pages") or [] if m else []
+    m = PART_KEY.fullmatch(key or "")
+    pages = ((bili_view(m.group(2)) or {}).get("pages") or []) if m else []
     if len(pages) < 2:
         return None
-    return next((str(p.get("part") or "").strip() or None for p in pages if p.get("page") == int(m.group(2))), None)
+    return next((str(p.get("part") or "").strip() or None for p in pages if p.get("page") == int(m.group(3))), None)
 
 
 def part_show(key):
@@ -186,7 +287,7 @@ def bili_episode(url):
         if not ep_id:
             if m.group(1) in _bangumi:
                 return _bangumi[m.group(1)]
-            ep = re.search(r"/bangumi/play/ep(\d+)", bili_view(m.group(1)).get("redirect_url") or "")
+            ep = re.search(r"/bangumi/play/ep(\d+)", (bili_view(m.group(1)) or {}).get("redirect_url") or "")
             if not ep:
                 return None  # an ordinary video
             ep_id = ep.group(1)
@@ -319,6 +420,8 @@ def process(job_id):
                 a["show"] = sibling  # 分P of one video: one show, however the classifier spelt it this time
             if a.get("library") == "TV" and (name := episode_title(meta.get("webpage_url") or url, job["key"])):
                 a["episode_title"] = name  # shown with the episode number (拾光, and Plex when it has no name for it)
+            if "bilibili.com" in (meta.get("webpage_url") or url):
+                check_parts(job, a)  # its other 分P, if it has some that weren't queued when the link came
             if kind not in ("torrent", "file"):  # a show's trailers, OP/ED... go with its episodes, not in 片段
                 library.place_in_show(a, job["source"], [str(a.get("title") or ""), meta.get("title") or "", job["title"] or ""])
             if bangumi and bangumi["episode"] is not None:  # 番剧 正片: an episode, numbered as B站 numbers it
@@ -373,6 +476,8 @@ def process(job_id):
         analysis = {**results[0], "episodes": len(results)}
     update(job_id, status="done", stage="", progress=100, files=final_files, analysis=analysis,
            title=analysis.get("title") or job["title"], thumb=thumb_url)
+    if analysis.get("library") == "TV" and analysis.get("season") == 0:
+        renumber_part_specials(job["key"])  # a 分P that became a special: in part order with its video's others
     log_usage("download", kind, job_id, amount=sum(Path(f).stat().st_size for f in final_files if Path(f).exists()))
     try:  # its slow work goes on the task board: links you sent first, older videos of followed uploaders last
         board.publish_job_work(job_id, 10 if job.get("backfill") else 50, force=True)

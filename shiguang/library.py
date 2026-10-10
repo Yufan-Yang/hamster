@@ -237,6 +237,7 @@ def place_in_show(a, source, titles, shows=None, taken=None):
                                     "json_extract(analysis, '$.show')=? AND json_extract(analysis, '$.season')=0", (show,))
              if r["e"] is not None}
     taken = {} if taken is None else taken
+    used = {u for u in used if u < 9000}  # (9000+: specials being renumbered just now, see renumber_part_specials)
     n = max(used | taken.setdefault(show, set()), default=0) + 1
     taken[show].add(n)
     a.update(season=0, episode=n)
