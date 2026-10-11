@@ -372,6 +372,12 @@ def list_channel(sub, limit, flt=None):
 AVATARS = STATE / "avatars"
 
 
+def video_of(key):
+    """A job key without its 分P number: one B站 video, whichever part."""
+    m = pipeline.PART_KEY.fullmatch(key or "")
+    return m.group(1) if m else key
+
+
 def check_sub(sub_id, everything=False):
     """Queue the uploader's videos not seen yet that pass its filter. First check: the newest `backfill` (0 = all)
     of them, looking up to SUB_FILTER_SCAN back when there's a filter; later checks only look at the newest 30;
@@ -397,15 +403,18 @@ def check_sub(sub_id, everything=False):
     if wide and not everything and sub["backfill"]:
         passing = passing[:sub["backfill"]]
     if sub["refilter"]:
-        drop = {link_key(e["url"]) for e in res["entries"] if not matches(flt, e)}
+        # (by video: the other 分P of one the follow brought are queued under its source too, with keys B站's list
+        # never shows)
+        drop = {video_of(link_key(e["url"])) for e in res["entries"] if not matches(flt, e)}
         if sub["platform"] == "bilibili" and search_keyword(flt) and len(res["entries"]) >= (res["total"] or 0):
             # B站 listed every video with the keyword: a queued one it left out no longer passes either
-            listed = {link_key(e["url"]) for e in res["entries"]}
-            drop |= {r["key"] for r in q("SELECT key FROM jobs WHERE source=? AND status IN ('queued','linked')",
-                                         (f"sub:{sub_id}",)) if r["key"] not in listed}
+            listed = {video_of(link_key(e["url"])) for e in res["entries"]}
+            drop |= {video_of(r["key"]) for r in q("SELECT key FROM jobs WHERE source=? AND status IN ('queued','linked')",
+                                                   (f"sub:{sub_id}",)) if video_of(r["key"]) not in listed}
         for r in q("SELECT id, key FROM jobs WHERE source=? AND status IN ('queued','linked')", (f"sub:{sub_id}",)):
-            if r["key"] in drop:
+            if video_of(r["key"]) in drop:
                 pipeline.cancel_job(r["id"])
+        drop |= {k for k in seen if video_of(k) in drop}
         seen = [k for k in seen if k not in drop]
     seen_set = set(seen)
     new = [e for e in passing if link_key(e["url"]) not in seen_set]

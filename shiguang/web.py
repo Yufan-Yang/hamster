@@ -650,9 +650,11 @@ def add_get():
     if channels.channel_of(url):
         channels.add_sub(url, g.owner, g.device_label)
         return ADD_PAGE.format(f"开始追更 – {shown}<script>setTimeout(() => close(), 1200)</script>")
-    jids = [pipeline.add_job(part, source="web", owner=g.owner, device=g.device_label) for part in pipeline.bili_parts(url)]
+    parts, count = pipeline.bili_parts(url)
+    jids = [pipeline.add_job(part, source="web", owner=g.owner, device=g.device_label) for part in parts]
     added = f"#{jids[0]}" if len(jids) == 1 else f"{len(jids)} 个分P"
-    return ADD_PAGE.format(f"已加入 {added} – {shown}<script>setTimeout(() => close(), 1200)</script>")
+    note = f"<p>{html.escape(pipeline.parts_left_note(count))}</p>" if len(parts) == 1 and (count or 0) > 1 else ""
+    return ADD_PAGE.format(f"已加入 {added} – {shown}{note}<script>setTimeout(() => close(), {4000 if note else 1200})</script>")
 
 
 def internal_link(url):
@@ -713,13 +715,13 @@ def add_post():
                 board.publish("book_import", f"book:{bid}", 80, force=True)
             shelf.append({"id": bid, "how": how})
             continue
-        parts = pipeline.bili_parts(u)  # a B站 video in parts (分P): every part
+        parts, count = pipeline.bili_parts(u)  # a B站 video in parts (分P): every part
         for part in parts:
             jid, how = pipeline.add_job_ex(part, source=source, owner=g.owner, device=g.device_label)
             ids.append(jid)
             hows.append(how)
-        if len(parts) == 1 and (pipeline.part_count(u) or 0) > 1:
-            many.append(pipeline.part_count(u))
+        if len(parts) == 1 and (count or 0) > 1:
+            many.append(count)
     if not ids and (subs or shelf):
         if g.shortcut:
             return Response("，".join(x for x in (f"开始追更 {len(subs)} 个 UP 主，新视频会自动下载" if subs else "",
@@ -747,7 +749,7 @@ def add_post():
                                     f"开始下载 {new} 个" if new else "",
                                     f"{len(linked)} 个别人已经下过，直接加进来了" if linked else "",
                                     f"{len(dupes)} 个已经在拾光里了" if dupes else "",
-                                    f"有个视频有 {many[0]} 个分P，只下了这一个，要全部下载在拾光里打开它点「下载全部分P」" if many else "") if x)
+                                    pipeline.parts_left_note(many[0]) if many else "") if x)
         return Response(msg, mimetype="text/plain")
     return jsonify(ids=ids, duplicates=dupes, linked=linked, subs=subs, books=shelf, many_parts=many)
 

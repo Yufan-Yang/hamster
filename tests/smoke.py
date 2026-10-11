@@ -593,33 +593,76 @@ def bilibili_parts():
         pl.requests.get = lambda *a, **k: replies.pop(0)
         pl.time.sleep = lambda s: None
         pl._views.clear()
+        pl._unanswered.clear()
         # B站 turns the first asks away (412), then answers: every part, in order
         replies[:] = [Reply({"code": -412}), Reply({"code": 0, "data": {"pages": [{"page": n, "part": f"第{n}集"} for n in (1, 2, 3)]}})]
-        assert pl.bili_parts("https://www.bilibili.com/video/BV1aaaaaaaaa?p=1") == [
-            f"https://www.bilibili.com/video/BV1aaaaaaaaa?p={n}" for n in (1, 2, 3)]
-        # never answers when the link comes: just the link (the worker looks again), and the worker notes it
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1aaaaaaaaa?p=1") == (
+            [f"https://www.bilibili.com/video/BV1aaaaaaaaa?p={n}" for n in (1, 2, 3)], 3)
+        # never answers when the link comes: just the link (the worker looks again), and the worker notes it;
+        # meanwhile it isn't asked again and again about the same video
         replies[:] = [Reply({"code": -412})] * 6
-        assert pl.bili_parts("https://www.bilibili.com/video/BV1bbbbbbbbb") == ["https://www.bilibili.com/video/BV1bbbbbbbbb"]
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1bbbbbbbbb") == (["https://www.bilibili.com/video/BV1bbbbbbbbb"], None)
+        assert len(replies) == 4
         job, a = {"key": "bilibili:BV1bbbbbbbbb:p1", "owner": "user:nobody-parts"}, {}
         pl.check_parts(job, a)
         assert a == {"parts": {"total": None}}, a
+        assert len(replies) == 4, "asked B站 again within UNANSWERED_FOR"
+        pl._unanswered.clear()
         # more parts than PARTS_MAX: only the one sent; its page offers the rest
         pl.PARTS_MAX = 2
         replies[:] = [Reply({"code": 0, "data": {"pages": [{"page": n, "part": ""} for n in (1, 2, 3)]}})]
-        assert pl.bili_parts("https://www.bilibili.com/video/BV1ccccccccc") == ["https://www.bilibili.com/video/BV1ccccccccc"]
-        assert pl.part_count("https://www.bilibili.com/video/BV1ccccccccc") == 3
+        assert pl.bili_parts("https://www.bilibili.com/video/BV1ccccccccc") == (["https://www.bilibili.com/video/BV1ccccccccc"], 3)
         a = {}
         pl.check_parts({"key": "bilibili:BV1ccccccccc:p1", "owner": "user:nobody-parts"}, a)
         assert a == {"parts": {"total": 3}}, a
-        # a deleted video isn't asked about again and again
+        # a deleted video, or one B站 won't give (region, login): not asked about again and again, and not offered
         replies[:] = [Reply({"code": -404})]
         assert pl.bili_view("BV1ddddddddd") == {} and not replies
+        replies[:] = [Reply({"code": -403, "message": "访问权限不足"})]
+        assert pl.bili_view("BV1eeeeeeeee") == {} and not replies
+        a = {}
+        pl.check_parts({"key": "bilibili:BV1eeeeeeeee:p1", "owner": "user:nobody-parts"}, a)
+        assert a == {}, a
     finally:
         pl.requests.get, pl.time.sleep, pl.PARTS_MAX = old_get, old_sleep, old_max
         pl._views.clear()
+        pl._unanswered.clear()
+
+
+def parts_offer_shared():
+    """The 下载全部分P offer goes from every entry of the video, not just the clicked one."""
+    pl = shiguang.pipeline
+    ids = []
+    try:
+        for owner in ("user:nobody-a", "user:nobody-b"):  # the second entry links to the first
+            G.q("INSERT INTO jobs (url, key, source, owner, status, created, updated, ref) VALUES (?,?,?,?,?,?,?,?)",
+                ("https://www.bilibili.com/video/BV1ffffffff?p=1", "bilibili:BV1ffffffff:p1", "web", owner, "done",
+                 time.time(), time.time(), ids[0] if ids else None))
+            ids.append(G.q("SELECT MAX(id) id FROM jobs", one=True)["id"])
+            shiguang.core.update(ids[-1], analysis={"title": "x", "library": "TV", "parts": {"total": 60}})
+        old_view = pl.bili_view
+        pl.bili_view = lambda vid, tries=4: {"pages": [{"page": 1, "part": ""}]}
+        try:
+            assert pl.take_parts(ids[1]) == "这个视频只有一个分P"
+        finally:
+            pl.bili_view = old_view
+        for jid in ids:
+            assert "parts" not in json.loads(G.q("SELECT analysis FROM jobs WHERE id=?", (jid,), one=True)["analysis"]), jid
+    finally:
+        for jid in ids:
+            G.q("DELETE FROM jobs WHERE id=?", (jid,))
+
+
+def refilter_keeps_parts():
+    """A follow's refilter drops videos by video: the other 分P of one it listed stay queued."""
+    ch = shiguang.channels
+    assert ch.video_of("bilibili:BV1ggggggggg:p7") == "bilibili:BV1ggggggggg:p"
+    assert ch.video_of("youtube:abc") == "youtube:abc"
 
 
 check("B站 分P: every part, retried when B站 says 412, too many asks first", bilibili_parts)
+check("B站 分P: the offer leaves every entry of the video", parts_offer_shared)
+check("B站追更 refilter judges by video, not by 分P", refilter_keeps_parts)
 
 
 def bilibili_412_restarts_session():

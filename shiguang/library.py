@@ -216,6 +216,15 @@ def show_of(a, source, titles, shows):
     return next((s for s in sorted(shows, key=len, reverse=True) if len(s) >= 2 and source in shows[s] and s in text), None)
 
 
+@contextlib.contextmanager
+def specials_lock():
+    """Held while a show's special numbers are read or reassigned (job processes run side by side)."""
+    (STATE / "locks").mkdir(parents=True, exist_ok=True)
+    with open(STATE / "locks" / "part-specials.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def place_in_show(a, source, titles, shows=None, taken=None):
     """File a web video with its show (changes `a`). It stays an episode when it is one: the classifier gave it a
     number, its title doesn't say trailer/OP/花絮..., and the number is in its title or description. Anything else of
@@ -231,13 +240,14 @@ def place_in_show(a, source, titles, shows=None, taken=None):
     if episode:
         a["season"] = a.get("season") or 1
         return a
-    used = {int(m.group(1)) for p in (MEDIA / "TV" / safe_name(show) / "Season 00").glob("*")
-            if (m := re.search(r" - S00E(\d+)\b", p.name))}
-    used |= {int(r["e"]) for r in q("SELECT json_extract(analysis, '$.episode') e FROM jobs WHERE status='done' AND "
-                                    "json_extract(analysis, '$.show')=? AND json_extract(analysis, '$.season')=0", (show,))
-             if r["e"] is not None}
+    with specials_lock():  # not while renumber_part_specials has some parked at 9000+
+        used = {int(m.group(1)) for p in (MEDIA / "TV" / safe_name(show) / "Season 00").glob("*")
+                if (m := re.search(r" - S00E(\d+)\b", p.name))}
+        used |= {int(r["e"]) for r in q("SELECT json_extract(analysis, '$.episode') e FROM jobs WHERE status='done' AND "
+                                        "json_extract(analysis, '$.show')=? AND json_extract(analysis, '$.season')=0", (show,))
+                 if r["e"] is not None}
     taken = {} if taken is None else taken
-    used = {u for u in used if u < 9000}  # (9000+: specials being renumbered just now, see renumber_part_specials)
+    used = {u for u in used if u < 9000}  # (9000+: left by a renumbering that didn't finish)
     n = max(used | taken.setdefault(show, set()), default=0) + 1
     taken[show].add(n)
     a.update(season=0, episode=n)

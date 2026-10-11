@@ -1,5 +1,4 @@
 """A download job from link to library, the worker that runs jobs, job control."""
-import fcntl
 import glob
 import hashlib
 import json
@@ -85,17 +84,23 @@ def bili_staff(url):
         return []
 
 
-_views = {}  # B站 video id -> its info from the view API (parts, title...); a few per show
+_views = {}  # B站 video id -> its info from the view API (parts, title...), {} for one B站 won't give; a few per show
+_unanswered = {}  # B站 video id -> when B站 last failed to answer about it (not asked again for a while)
+UNANSWERED_FOR = 300
 PARTS_MAX = int(os.environ.get("PARTS_MAX", "50"))  # a video with more parts than this asks before taking them all
 PART_KEY = re.compile(r"(bilibili:(BV\w+|av\d+):p)(\d+)")
+BILI_BUSY = (-412, -352, -509, -799)  # request intercepted, risk control, rate limited: may answer a little later
 
 
 def bili_view(vid, tries=4):
     """What B站's view API says about a video (BV... or av...): {"pages": [{"page", "part"}...], ...}. {} when B站
-    says there is no such video; None when it didn't answer (it turns some requests away with 412: tried again a
-    few times, a little later each time)."""
+    won't give it (no such video, hidden, under review, not for this region or account); None when it didn't answer
+    (it turns some requests away with 412: tried again a few times, a little later each time, and not asked again
+    for UNANSWERED_FOR seconds)."""
     if vid in _views:
         return _views[vid]
+    if time.time() - _unanswered.get(vid, 0) < UNANSWERED_FOR:
+        return None
     for i in range(tries):
         if i:
             time.sleep(2 * i)
@@ -106,13 +111,17 @@ def bili_view(vid, tries=4):
             body = r.json() if r.status_code == 200 else {}
         except Exception:
             continue
-        if body.get("code") == 0 and body.get("data"):
+        code = body.get("code")
+        if code == 0 and body.get("data"):
             _views[vid] = body["data"]
-            if len(_views) > 200:
-                _views.pop(next(iter(_views)))
-            return body["data"]
-        if body.get("code") in (-404, 62002, 62004, 62012):  # gone, hidden, under review: no point asking again
-            return {}
+        elif code is not None and code not in BILI_BUSY:  # B站 answered: this video isn't to be had
+            _views[vid] = {}
+        else:
+            continue
+        if len(_views) > 200:
+            _views.pop(next(iter(_views)))
+        return _views[vid]
+    _unanswered[vid] = time.time()
     return None
 
 
@@ -121,21 +130,23 @@ def part_link(vid, n):
 
 
 def bili_parts(url):
-    """A B站 video with several parts (分P: a whole show uploaded as one video): a link to each part, in order, so
-    every part becomes its own job. Any other link, or one with more than PARTS_MAX parts (the video's page in 拾光
-    offers the rest), or when B站 doesn't answer (the worker looks again): [url]. (The app's share link always says
-    p=1, whichever part was open, so all parts are taken whatever p says.)"""
+    """A B站 video with several parts (分P: a whole show uploaded as one video): (a link to each part in order, so
+    every part becomes its own job, how many parts B站 lists). Any other link: ([url], None); one with more than
+    PARTS_MAX parts (the video's page in 拾光 offers the rest): ([url], the count); when B站 doesn't answer (the
+    worker looks again): ([url], None). (The app's share link always says p=1, whichever part was open, so all
+    parts are taken whatever p says.)"""
     m = PART_KEY.fullmatch(link_key(url))
     pages = ((bili_view(m.group(2), tries=2) or {}).get("pages") or []) if m else []  # (someone's waiting)
-    if not 2 <= len(pages) <= PARTS_MAX:
-        return [url]
-    return [part_link(m.group(2), p["page"]) for p in pages]
+    if len(pages) < 2:
+        return [url], None
+    if len(pages) > PARTS_MAX:
+        return [url], len(pages)
+    return [part_link(m.group(2), p["page"]) for p in pages], len(pages)
 
 
-def part_count(url):
-    """How many parts B站 lists for this video (from the cache bili_parts filled), None if it isn't one we know."""
-    m = PART_KEY.fullmatch(link_key(url))
-    return len((_views.get(m.group(2)) or {}).get("pages") or []) or None if m else None
+def parts_left_note(count):
+    """What to tell whoever sent a link to a video with more parts than were taken."""
+    return f"有个视频有 {count} 个分P，只下了这一个，要全部下载在拾光里打开它点「下载全部分P」"
 
 
 def queue_parts(job, pages):
@@ -173,39 +184,41 @@ def take_parts(jid):
     if view is None:
         return "B站 暂时没回应，过一会儿再试"
     pages = view.get("pages") or []
-    a = json.loads(job["analysis"] or "{}")
-    a.pop("parts", None)
-    update(jid, analysis=a)
+    root = job["ref"] or jid  # the offer was copied to every entry of this video: gone from all of them
+    for r in q("SELECT id, analysis FROM jobs WHERE id=? OR ref=?", (root, root)):
+        a = json.loads(r["analysis"] or "{}")
+        if "parts" in a:
+            a.pop("parts")
+            update(r["id"], analysis=a)
     if len(pages) < 2:
         return "这个视频只有一个分P"
     new = sum(how != "duplicate" for _, how in queue_parts(dict(job), pages))
     return f"开始下载其余 {new} 个分P" if new else "所有分P 都已经在拾光里了"
 
 
-@once("part_specials")
+@once("part_specials", background=True)
 def part_specials_now():
-    """Once: the specials of 分P videos already downloaded go into part order."""
+    """Once, in the background: the specials of 分P videos already downloaded go into part order."""
     videos = {}
     for r in q("SELECT key FROM jobs WHERE key LIKE 'bilibili:%:p%' AND json_extract(analysis, '$.season')=0"):
         if (m := PART_KEY.fullmatch(r["key"])):
             videos.setdefault(m.group(1), r["key"])
-    for key in videos.values():
-        renumber_part_specials(key)
+    if any([renumber_part_specials(key) for key in videos.values()]):
+        library.plex_refresh()
 
 
 def renumber_part_specials(key):
     """分P of one video that ended up as specials (小剧场, 番外...) get their show's numbers in part order, not in
-    the order their downloads happened to finish."""
+    the order their downloads happened to finish. Returns whether any moved (Plex then needs a refresh)."""
     m = PART_KEY.fullmatch(key or "")
     if not m:
-        return
-    (core.STATE / "locks").mkdir(parents=True, exist_ok=True)
-    with open(core.STATE / "locks" / "part-specials.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)  # two parts finishing at once
-        rows = sorted(q("SELECT * FROM jobs WHERE key LIKE ? AND status='done' AND ref IS NULL AND "
-                        "json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.season')=0 AND "
-                        "json_extract(analysis, '$.episode') IS NOT NULL", (m.group(1) + "%",)),
-                      key=lambda r: int(PART_KEY.fullmatch(r["key"]).group(3)))
+        return False
+    with library.specials_lock():  # two parts finishing at once, or one being placed meanwhile
+        rows = [r for r in q("SELECT * FROM jobs WHERE key LIKE ? AND status='done' AND ref IS NULL AND "
+                             "json_extract(analysis, '$.library')='TV' AND json_extract(analysis, '$.season')=0 AND "
+                             "json_extract(analysis, '$.episode') IS NOT NULL", (m.group(1) + "%",))
+                if PART_KEY.fullmatch(r["key"])]
+        rows.sort(key=lambda r: int(PART_KEY.fullmatch(r["key"]).group(3)))
         numbers = sorted(json.loads(r["analysis"])["episode"] for r in rows)
         wrong = [(r["id"], n) for r, n in zip(rows, numbers) if json.loads(r["analysis"])["episode"] != n]
         # through numbers nobody uses first, so two that trade places don't land on each other
@@ -214,8 +227,7 @@ def renumber_part_specials(key):
                 r = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
                 a = json.loads(r["analysis"])
                 print("part_specials:", library.refile(r, {**a, "episode": 9000 + i if step == "aside" else n}), flush=True)
-    if wrong:
-        library.plex_refresh()
+    return bool(wrong)
 
 
 def episode_title(url, key):
@@ -477,7 +489,10 @@ def process(job_id):
     update(job_id, status="done", stage="", progress=100, files=final_files, analysis=analysis,
            title=analysis.get("title") or job["title"], thumb=thumb_url)
     if analysis.get("library") == "TV" and analysis.get("season") == 0:
-        renumber_part_specials(job["key"])  # a 分P that became a special: in part order with its video's others
+        try:  # a 分P that became a special: in part order with its video's others (the job is done whatever happens here)
+            renumber_part_specials(job["key"])
+        except Exception:
+            traceback.print_exc()
     log_usage("download", kind, job_id, amount=sum(Path(f).stat().st_size for f in final_files if Path(f).exists()))
     try:  # its slow work goes on the task board: links you sent first, older videos of followed uploaders last
         board.publish_job_work(job_id, 10 if job.get("backfill") else 50, force=True)
