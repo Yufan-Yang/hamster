@@ -2,8 +2,8 @@
 // (away from home). Browsers run service workers only over https or on localhost — on the LAN's plain http the page
 // never registers it. The network always comes first; the cached page and static files are used only when the
 // network fails. The API, videos and books never go through it (books are cached by the page, in IndexedDB).
-const CACHE = "shiguang-shell-v1";
-const SHELL = ["/", "/static/pixel.woff2", "/static/pdfjs/pdf.min.mjs", "/static/pdfjs/pdf.worker.min.mjs"];
+const CACHE = "shiguang-shell-v2";
+const SHELL = ["/", "/static/live.js", "/static/live.css", "/static/pixel.woff2", "/static/pdfjs/pdf.min.mjs", "/static/pdfjs/pdf.worker.min.mjs"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -187,9 +187,9 @@ USAGE_NAMES = {("llm", "classify"): "AI 分类（看标题和简介）", ("llm",
                ("ocr", "picture"): "识别图中文字", ("clip", "cover"): "识别封面", ("clip", "frames"): "识别视频画面"}
 
 
-# the same requests answered by Claude on the Mac (the subscription: no price per call)
+# Historical Claude usage remains visible after switching providers.
 USAGE_NAMES.update({("claude", p): n.replace("AI ", "Claude · ", 1) for (k, p), n in list(USAGE_NAMES.items()) if k == "llm"})
-# and by Codex on the Mac when Claude can't (the ChatGPT subscription: no price per call either)
+# Codex on the Mac (the ChatGPT subscription: no price per call).
 USAGE_NAMES.update({("codex", p): n.replace("AI ", "Codex · ", 1) for (k, p), n in list(USAGE_NAMES.items()) if k == "llm"})
 
 

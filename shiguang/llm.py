@@ -1,4 +1,4 @@
-"""The LLM: Claude through the Mac mini first, DeepSeek as the backup; classification, summaries, tags, pricing."""
+"""The LLM: Codex through the Mac mini first, DeepSeek as the backup; classification, summaries, tags, pricing."""
 import fcntl
 import functools
 import json
@@ -113,42 +113,32 @@ def record_balance():
             kv_set("balance_logged", time.time())
 
 
-# ---- Claude through the Mac mini
-#
-# The Mac's Claude Code is logged in with the Claude subscription, so asking it costs nothing per call (it uses the
-# subscription's limits). A request becomes an `llm` task on the board; a claim loop on the Mac (mac_worker.py) runs
-# `claude -p` on it and hands back the JSON; when Claude fails or its limits are used up, the Mac's Codex
-# (`codex exec`, the ChatGPT subscription) answers instead. When the Mac isn't there (off, asleep, both limits used
-# up: it then says it's paused) or doesn't take the request within CLAUDE_CLAIM_WAIT seconds, DeepSeek answers.
-CLAUDE_VIA_MAC = os.environ.get("CLAUDE_VIA_MAC", "1") != "0"
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
-CLAUDE_MODEL_LIGHT = os.environ.get("CLAUDE_MODEL_LIGHT", "haiku")  # short mechanical answers
-CLAUDE_LIGHT = {"classify", "tags", "failure", "notes", "search"}
-# someone is looking at the screen (the search box, 问拾光): first in line on the Mac, and DeepSeek after 20 s
-CLAUDE_URGENT = {"search", "ask"}
-CLAUDE_SKIP = set(x for x in os.environ.get("CLAUDE_SKIP", "").split(",") if x)  # kinds that go to DeepSeek first
-CLAUDE_CLAIM_WAIT = int(os.environ.get("CLAUDE_CLAIM_WAIT", "90"))
-CLAUDE_RUN_WAIT = 1200  # once the Mac has it (Claude up to 10 min, then Codex up to 5)
+# ---- Codex through the Mac mini; DeepSeek when unavailable or unsuccessful.
+# Keep the old enable/wait environment settings as fallbacks for existing installs.
+CODEX_VIA_MAC = os.environ.get("CODEX_VIA_MAC", os.environ.get("CLAUDE_VIA_MAC", "1")) != "0"
+CODEX_URGENT = {"search", "ask", "live-curator"}
+CODEX_CLAIM_WAIT = int(os.environ.get("CODEX_CLAIM_WAIT", os.environ.get("CLAUDE_CLAIM_WAIT", "90")))
+CODEX_RUN_WAIT = 360  # the Mac CLI times out after 300 seconds
 
 
-def claude_ready():
-    """A Claude claim loop on the Mac asked for work lately and isn't paused (limits used up)."""
-    if not CLAUDE_VIA_MAC:
+def codex_ready():
+    """A Codex claim loop on the Mac asked for work lately and isn't paused (limits used up)."""
+    if not CODEX_VIA_MAC:
         return False
-    return any("claude" in json.loads(r["caps"]) and not r["paused"]
+    return any({"llm", "codex"}.issubset(json.loads(r["caps"])) and not r["paused"]
                for r in q("SELECT caps, paused FROM workers WHERE seen > ?", (time.time() - 300,)))
 
 
-def claude_json(system, user, fields, purpose, job_id, usage, think):
-    """The request answered by Claude (or Codex) on the Mac, or None (it wasn't taken in time, or failed): DeepSeek then."""
+def codex_json(system, user, fields, purpose, job_id, usage, think):
+    """The request answered by Codex on the Mac, or None (it wasn't taken in time, or failed): DeepSeek then."""
     from . import board
     now = time.time()
     q("DELETE FROM tasks WHERE kind='llm' AND state != 'running' AND created < ?", (now - 3600,))  # askers that died
     payload = {"system": system, "user": user, "fields": list(fields), "purpose": purpose, "title": purpose,
-               "model": CLAUDE_MODEL_LIGHT if purpose in CLAUDE_LIGHT else CLAUDE_MODEL, "effort": "medium" if think else "low"}
+               "effort": "medium" if think else "low"}
     tid = board.publish("llm", f"llm:{purpose}:{secrets.token_hex(6)}",
-                        90 if purpose in CLAUDE_URGENT else 60 if purpose == "classify" else 50, payload=payload)
-    claim_wait = 20 if purpose in CLAUDE_URGENT else CLAUDE_CLAIM_WAIT
+                        90 if purpose in CODEX_URGENT else 60 if purpose == "classify" else 50, payload=payload)
+    claim_wait = 20 if purpose in CODEX_URGENT else CODEX_CLAIM_WAIT
     try:
         checked = now
         while True:
@@ -158,27 +148,27 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
             if row["state"] == "done":
                 res = json.loads(row["result"] or "{}")
                 out = res.get("out")
-                if not isinstance(out, dict):
+                if res.get("engine") != "codex" or not isinstance(out, dict):
                     return None
                 usage["calls"] = usage.get("calls", 0) + 1
                 usage["tokens"] = usage.get("tokens", 0) + int(res.get("tokens_in") or 0) + int(res.get("tokens_out") or 0)
-                engine = "codex" if res.get("engine") == "codex" else "claude"
+                engine = "codex"
                 usage[engine] = usage.get(engine, 0) + 1
                 log_usage(engine, purpose, job_id, amount=1, tokens_in=int(res.get("tokens_in") or 0),
                           tokens_out=int(res.get("tokens_out") or 0), seconds=float(res.get("seconds") or 0),
                           cache_hit=int(res.get("cache_read") or 0))
-                # Claude sometimes writes "null" as text where the prompt allows null ("show": "null")
+                # Models sometimes write "null" as text where the prompt allows null ("show": "null")
                 return {k: None if isinstance(out.get(k), str) and out[k].strip().lower() in ("null", "none") else out.get(k)
                         for k in fields}
             if row["state"] == "failed":
                 print(f"Mac AI {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
                 return None
             late = time.time() - now
-            if row["state"] == "queued" and (late > claim_wait or (time.time() - checked > 15 and not claude_ready())):
+            if row["state"] == "queued" and (late > claim_wait or (time.time() - checked > 15 and not codex_ready())):
                 if board._write("UPDATE tasks SET state='failed', error='not taken in time' WHERE id=? AND state='queued'", (tid,)):
                     return None
                 continue  # taken just now
-            if late > claim_wait + CLAUDE_RUN_WAIT:
+            if late > claim_wait + CODEX_RUN_WAIT:
                 board._write("UPDATE tasks SET state='failed', error='took too long' WHERE id=?", (tid,))
                 return None
             if time.time() - checked > 15:
@@ -189,32 +179,24 @@ def claude_json(system, user, fields, purpose, job_id, usage, think):
 
 
 def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, think=True):
-    """One request with a JSON answer: Claude on the Mac when it's there, then its Codex (see claude_json), else DeepSeek.
+    """One request with a JSON answer: Codex on the Mac first, then DeepSeek.
     max_tokens includes the model's reasoning tokens; only tokens actually used are billed.
     think=False: no reasoning at all, for mechanical work (translating lines, matching tags) where it only costs:
     thinking took ~5,000 of the ~6,000 output tokens of a 60-line subtitle batch."""
     system = system.format(lang=SUMMARY_LANG, fields=json.dumps(fields, ensure_ascii=False, indent=1))
-    if purpose not in CLAUDE_SKIP and claude_ready():
+    if codex_ready():
         try:
-            out = claude_json(system, user, fields, purpose, job_id, usage, think)
+            out = codex_json(system, user, fields, purpose, job_id, usage, think)
             if out is not None:
                 return out
         except Exception:
             traceback.print_exc()
-    try:
-        return deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think)
-    except Exception:
-        # the quick kinds (search, 问拾光) try DeepSeek first; when it can't answer (no balance left...), Claude does
-        if purpose in CLAUDE_SKIP and claude_ready():
-            out = claude_json(system, user, fields, purpose, job_id, usage, False)
-            if out is not None:
-                return out
-        raise
+    return deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think)
 
 
 def deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think):
     if not LLM_API_KEY:
-        raise RuntimeError("Claude / Codex on the Mac didn't answer and there's no DeepSeek key")
+        raise RuntimeError("Codex on the Mac didn't answer and there's no DeepSeek key")
     thinking = ({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}) if think else \
         ({"thinking": {"type": "disabled"}} if "deepseek" in LLM_BASE_URL else {})
     r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
@@ -568,10 +550,10 @@ def apply_summary(a, out):
 
 
 def offpeak_from(when=None):
-    """The next moment DeepSeek charges half (see llm_cost); `when` itself if it already does, or when Claude on the
+    """The next moment DeepSeek charges half (see llm_cost); `when` itself if it already does, or when Codex on the
     Mac is there to do the work (no price to wait for)."""
     t = when or time.time()
-    if claude_ready():
+    if codex_ready():
         return t
     while (lambda g: g.tm_wday < 5 and (1 <= g.tm_hour < 4 or 6 <= g.tm_hour < 10))(time.gmtime(t)):
         t += 900

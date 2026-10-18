@@ -87,6 +87,14 @@
            border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); transition: transform .08s, box-shadow .08s; }
   .card:hover .cover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
   .card:active .cover { transform: translate(4px, 4px); box-shadow: none; }
+  .series { min-width: 0; border: 2px solid var(--ink); background: var(--panel); box-shadow: 4px 4px 0 var(--ink); }
+  .series[open] { grid-column: 1 / -1; }
+  .series > summary { cursor: pointer; padding: 12px; overflow-wrap: anywhere; }
+  .series > summary:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+  .series > summary .meta { display: block; margin-top: 6px; }
+  .series-cover { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; margin: 10px 0; background: var(--soft); }
+  .series[open] .series-cover { display: none; }
+  .series-grid { padding: 12px 16px 20px; }
   .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .cover .ph { position: absolute; inset: 0; display: grid; place-items: center; font-size: 36px; color: var(--faint); }
   .badge { position: absolute; right: 0; bottom: 0; background: var(--ink); color: var(--bg); padding: 0 6px;
@@ -632,7 +640,11 @@
     .sheet-bg.closing .sheet { animation: sheetDown .17s steps(4) forwards; }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+button.link, a.link, .chip, .btn, .seg button, #bookTabs .t {min-height: 40px; min-width: 40px;}
+button.link, a.link {padding: 8px 6px;}
+a.link {display: inline-block; max-width: 100%;}
 </style>
+<link rel="stylesheet" href="/static/live.css?v=20261019-management-v1">
 </head>
 <body>
 <div class="topbar">
@@ -660,6 +672,7 @@
   <div class="grid" id="grid"></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
   <div class="subs" id="subs" hidden></div>
+  <div id="liveWorkspace" hidden></div>
   <div class="notes" id="notes" hidden>
     <div class="px compose">
       <textarea id="noteText" placeholder="随手记点什么… 文字、照片、视频、语音都行" rows="3"></textarea>
@@ -707,7 +720,7 @@
   <div class="sheet">
     <h2 id="removeTitle">移除</h2>
     <p class="hint" id="removeHint"></p>
-    <label class="check"><input type="checkbox" id="removeFiles"> 同时从硬盘删除文件<span>删除后无法恢复，Plex 里也会消失</span></label>
+    <label class="check"><input type="checkbox" id="removeFiles"> 同时从硬盘删除文件<span>删除后无法恢复</span></label>
     <div class="row" style="margin-top:16px">
       <button class="btn plain" onclick="hide($('#removeSheet'))">取消</button>
       <button class="btn" id="removeGo">移除</button>
@@ -723,7 +736,7 @@
     <form id="addForm">
       <input type="text" id="addText" placeholder="https://… 或 magnet:?…" autocomplete="off">
       <div class="row">
-        <button class="btn">开始下载</button>
+        <button type="submit" class="btn">开始下载</button>
         <button type="button" class="btn plain" onclick="$('#file').click()">选择 .torrent</button>
       </div>
       <input type="file" id="file" accept=".torrent" hidden multiple>
@@ -840,7 +853,10 @@ let privacyToken = null, privacyTimer = null, hiddenSince = 0;
 const _fetch = window.fetch.bind(window);
 window.fetch = (url, opts = {}) => {
   if (privacyToken) opts = {...opts, headers: {...(opts.headers || {}), "X-Privacy-Token": privacyToken}};
-  return _fetch(url, opts);
+  const owner = storageOwner;
+  if (opts.method && !['GET','HEAD'].includes(opts.method.toUpperCase()) && !/\/api\/(?:login|register|logout)(?:$|\?)/.test(String(url)) && owner !== 'unidentified' && !owner.startsWith('signed-out-'))
+    opts = {...opts, headers: {...(opts.headers || {}), 'X-Storage-Owner': owner}};
+  return _fetch(url, opts).then(response => { if(owner !== storageOwner) throw Error('账号已切换'); return response; });
 };
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const FOLDERS = {"Music Videos": "音乐MV", "Tutorials": "教程", "Talks": "演讲", "News": "新闻", "Gaming": "游戏",
@@ -856,6 +872,43 @@ let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watc
 let castQueue = Promise.resolve();
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
 let videoSort = lsGet("videoSort", "added");
+let storageOwner = lsGet("shiguangOwner", "unidentified"), refreshEpoch = 0, notesEpoch = 0, booksEpoch = 0;
+const privateKey = (key, owner = storageOwner) => `${key}:${owner}`;
+function setStorageOwner(owner) {
+  if (!owner || owner === storageOwner) return;
+  lsSet(privateKey('noteDraft'), $('#noteText').value);
+  storageOwner = owner; lsSet('shiguangOwner', owner);
+  ++notesEpoch; ++booksEpoch; ++watchOpenEpoch;
+  if (rd.id) rdClose(true, true);
+  watching = null; casting = null; clearTimeout(castTimer);
+  $('#watchBody').querySelectorAll('video,audio').forEach(el => {el.pause();el.removeAttribute('src');});
+  $('#watch').hidden = true;
+  if (recorder) recorder.stop();
+  noteFiles.forEach(a => URL.revokeObjectURL(a.url)); noteFiles = []; editingNote = null; renderAtt();
+  $('#noteText').value = lsGet(privateKey('noteDraft'), '');
+  notesState = {notes: [], more: false, q: null}; notesBody = '';
+  booksState = {books: [], q: null, offline: false, loaded: false}; booksBody = '';
+  cacheIndex.clear(); coverUrls.forEach(u => URL.revokeObjectURL(u)); coverUrls.clear();
+  $('#noteList').innerHTML = ''; $('#noteList').dataset.html = '';
+  $('#bookGrid').innerHTML = ''; $('#bookGrid').dataset.html = '';
+  liveData = null; ++liveEpoch; clearTimeout(livePoll); lvClose();
+  $('#liveWorkspace').innerHTML = ''; delete $('#liveWorkspace').dataset.html;
+  digestState = {digests: [], pending: false, at: 0}; digestPick = 0; fltOpen = fltDraft = null;
+  $('#subs').innerHTML = ''; $('#subs').dataset.html = '';
+  for (const id of ['usageBody','weeklyBody','bookSheetBody','privacyBody','askOut','accountBody','biliLoginBody']) $('#'+id).innerHTML = '';
+  $('#askText').value = ''; $('#noteWhen').value = ''; whenChanged(); $('#bookUp').innerHTML = ''; pickFor = replacing = null;
+  $('#lightbox').hidden = true; lb.list = []; $('#lightbox').querySelectorAll('img,video').forEach(el => el.removeAttribute('src'));
+  saving = false; $('#noteGo').disabled = false; $('#upState').textContent = '';
+  privacyToken = null; selected.clear(); selecting = false; lastBody = ''; cardHtml = [];
+  state = {jobs: [], user: null, admin: false}; $('#grid').innerHTML = ''; $('#grid').dataset.ids = '';
+  for (const el of document.querySelectorAll('.sheet-bg:not([hidden])')) hide(el);
+}
+window.addEventListener('storage', e => {
+  if (e.key === 'shiguangOwner' && e.newValue && e.newValue !== storageOwner) {
+    setStorageOwner(e.newValue); ++refreshEpoch; refresh();
+  }
+});
+const openSeries = new Set();
 
 // Close a sheet / the watch page with a short exit animation instead of vanishing
 function hide(el, after) {
@@ -903,6 +956,62 @@ function subOf(j) {
   const m = /^sub:(\d+)$/.exec(j.source || "");
   return m ? (state.subs || []).find(s => s.id === +m[1]) : null;
 }
+// Only explicit show names, followed bangumi, or titles with episode numbering form a series.
+// Ordinary uploader subscriptions can contain many unrelated shows.
+function seriesName(name) {
+  return String(name || "").normalize("NFKC").trim()
+    .replace(/\s*(?:第[一二三四五六七八九十百\d]+[季部期]|season\s*\d+|s\d+)\s*$/i, "").trim();
+}
+function numberedSeriesName(title) {
+  const text = String(title || "").normalize("NFKC").trim();
+  // Match re before E, so "新三国re07" stays a separate re series rather than "新三国r".
+  const explicit = text.match(/^(.{2,}?)\s*(?:第[一二三四五六七八九十百零〇\d]+[集话話期]|[Ss]\d+\s*[Ee]\d+|([Rr][Ee])\s*\d+|[Ee][Pp]?\s*\d+)(?:\b|\s|[：:·.\-]|$|[^\x00-\x7F])/);
+  if (explicit) return seriesName(explicit[1] + (explicit[2] ? "re" : ""));
+  // Numbered uploader titles often omit 第/集: "三国杀up锐评新三国290：…".
+  // Require the number to end the title or precede a colon, rather than any number in prose.
+  const numbered = text.match(/^(.+?[^\d\s])\s*\d{1,4}\s*(?::|$)/);
+  return numbered ? seriesName(numbered[1]) : "";
+}
+function seriesOf(j) {
+  if (typeof j.series === "string") return j.series;
+  const a = j.analysis || {}, sub = subOf(j);
+  if (a.library === "TV" && a.show) return seriesName(a.show);
+  if (sub && sub.platform === "bangumi") return seriesName(sub.name) || j.source;
+  if (a.library && !["TV", "Videos"].includes(a.library)) return "";
+  return numberedSeriesName(titleOf(j)) || numberedSeriesName(j.title);
+}
+function seriesItems(jobs) {
+  const groups = new Map(), items = [];
+  for (const j of jobs) {
+    const name = seriesOf(j), key = name.toLocaleLowerCase("zh-CN").replace(/[\s·:：\-_]/g, "");
+    if (!key) { items.push({j}); continue; }
+    if (!groups.has(key)) {
+      const group = {key, name, jobs: []};
+      groups.set(key, group); items.push({group});
+    }
+    groups.get(key).jobs.push(j);
+  }
+  return items.map(x => x.group && x.group.jobs.length === 1 ? {j: x.group.jobs[0]} : x);
+}
+function toggleSeries(el) {
+  if (el.open) openSeries.add(el.dataset.series);
+  else openSeries.delete(el.dataset.series);
+}
+function seriesCard(g) {
+  const first = g.jobs[0], done = g.jobs.filter(j => j.watch && j.watch.done).length;
+  const jobs = [...g.jobs].sort((a, b) => {
+    const aa = a.analysis || {}, ba = b.analysis || {};
+    // Specials follow the numbered seasons; unnumbered entries use natural title order.
+    return ((+aa.season === 0 ? 9999 : +aa.season || 1) - (+ba.season === 0 ? 9999 : +ba.season || 1))
+      || ((aa.episode ?? Infinity) - (ba.episode ?? Infinity))
+      || titleOf(a).localeCompare(titleOf(b), "zh-CN", {numeric: true}) || a.id - b.id;
+  });
+  return `<details class="series" data-series="${esc(g.key)}"${openSeries.has(g.key) ? " open" : ""} ontoggle="toggleSeries(this)">
+    <summary>${esc(g.name)}${first.thumb ? `<img class="series-cover" src="/thumb/${first.id}" alt="" loading="lazy">` : ""}
+      <span class="meta">${g.jobs.length} 个视频${done ? ` · 已看完 ${done} 个` : ""} · 展开 / 收起</span></summary>
+    <div class="grid series-grid">${jobs.map(j => card(j)).join("")}</div>
+  </details>`;
+}
 function phone(j) {
   const d = j.device || ((j.source || "").startsWith("shortcut:") ? j.source.slice(9) : null);
   return d ? d.replace(/^📱\s*/, "") : null;
@@ -915,7 +1024,7 @@ function renderChips() {
   if (!state.cats) state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
   const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
   const failed = state.jobs.filter(j => j.status === "failed").length;
-  const list = [["all", "全部"], ["notes", `随记${state.notes ? " " + state.notes : ""}`], ["books", `书架${state.books ? " " + state.books : ""}`]];
+  const list = [["all", "全部"], ["live", "直播切片"], ["notes", `随记${state.notes ? " " + state.notes : ""}`], ["books", `书架${state.books ? " " + state.books : ""}`]];
   if (deviceFilter) list.push(["device", `设备：${deviceFilter} ✕`]);
   list.push(["subs", `追更${(state.subs || []).length ? " " + state.subs.length : ""}`]);
   const sf = chip.startsWith("sub:") && (state.subs || []).find(s => "sub:" + s.id === chip);
@@ -926,7 +1035,7 @@ function renderChips() {
   all.sort((a, b) => (counts[b] || 0) - (counts[a] || 0)).forEach(c => list.push([c, catName(c)]));
   if (failed) list.push(["failed", `失败 ${failed}`]);
   if (!list.some(([k]) => k === chip)) chip = "all";
-  const sort = !["notes", "books", "subs"].includes(chip) ? `<label class="chip sort-chip">排序
+  const sort = !["notes", "books", "subs", "live"].includes(chip) ? `<label class="chip sort-chip">排序
     <select onchange="setVideoSort(this.value)">${[["published", "网页创建时间"], ["added", "添加时间"], ["title", "标题"], ["author", "作者"]]
       .map(([k, n]) => `<option value="${k}"${k === videoSort ? " selected" : ""}>${n}</option>`).join("")}</select></label>` : "";
   const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${counts[k] === undefined && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("") + sort;
@@ -937,8 +1046,10 @@ function setChip(k) {
   if (k === "all") deviceFilter = null;
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
   const isCat = x => !!(FOLDERS[x] || LIBS[x]);
-  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || isCat(k) || isCat(chip);
-  chip = k; render();
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || k === "live" || chip === "live" || isCat(k) || isCat(chip);
+  chip = k; saveNavigation(true); render();
+  updateSearchOptions();
+  if (k === "live") loadLive();
   $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : k === "books" ? "搜索书名、作者、书里的文字…" : "搜索标题、简介、标签、字幕…";
   if (refetch) { lastBody = ""; refresh(); }
   if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
@@ -969,7 +1080,7 @@ function card(j, clearableWatch = false) {
   // how far you got (on any device): a bar along the bottom, or 已看完
   const w = j.watch;
   if (w && w.done) over += `<span class="badge tr">已看完</span>`;
-  else if (w && w.dur && w.pos > 15) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
+  else if (w && w.dur && w.pos >= 5) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
   const clear = clearableWatch ? `<button class="clear-watch" title="清除观看记录" aria-label="清除观看记录" onclick="event.stopPropagation(); clearWatch(${j.id})">×</button>` : "";
   return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
     ${clear}
@@ -1003,12 +1114,14 @@ function openNote(id) { focusNote = id; setChip("notes"); window.scrollTo(0, 0);
 
 function render() {
   renderChips();
-  const notes = chip === "notes", shelf = chip === "books", list = chip === "subs" || notes || shelf;
+  const notes = chip === "notes", shelf = chip === "books", list = chip === "subs" || chip === "live" || notes || shelf;
+  $("#liveWorkspace").hidden = chip !== "live";
   $("#subs").hidden = chip !== "subs";
   $("#notes").hidden = !notes;
   $("#books").hidden = !shelf;
   $("#grid").hidden = list;
-  $("#manageBtn").hidden = notes || shelf;
+  $("#manageBtn").hidden = notes || shelf || chip === "live";
+  if (chip === "live") renderLive();
   if (chip === "subs") renderSubs();
   if (notes) renderNotes();
   if (shelf) renderBooks();
@@ -1019,7 +1132,7 @@ function render() {
   $("#understood").hidden = !(query && state.understood);
   $("#understood").innerHTML = state.understood ? `按 ${esc(state.understood)} 找${state.partial
     ? "<br><b>没有同时符合的</b>，下面是符合其中一部分的（卡片上写着符合了哪些）" : ""} · <button class="link" onclick="searchExact()">按原文搜索</button>` : "";
-  const jobs = list ? [] : state.jobs.filter(j =>
+  const jobs = list ? [] : state.jobs.filter(j => !j.resume_only).filter(j =>
     // 首页 skips 追更 videos still waiting in line (hundreds after a backfill); they're under 下载中 and the UP chip
     chip === "all" ? !(j.status === "queued" && (j.source || "").startsWith("sub:")) :
     chip.startsWith("sub:") ? j.source === chip :
@@ -1038,7 +1151,7 @@ function render() {
   if (!query || videoSort !== "added") jobs.sort(videoSorts[videoSort] || videoSorts.added);
   shown = jobs;
   const resume = chip === "all" && !query && !selecting
-    ? state.jobs.filter(j => j.watch && !j.watch.done && j.watch.pos > 15 && j.status === "done").sort((a, b) => b.watch.at - a.watch.at).slice(0, 8) : [];
+    ? state.jobs.filter(j => j.watch && !j.watch.done && j.watch.pos >= 5 && j.status === "done").sort((a, b) => b.watch.at - a.watch.at).slice(0, 8) : [];
   $("#continue").hidden = !resume.length;
   const contHtml = resume.map(j => card(j, true)).join("");
   if ($("#controw").dataset.html !== contHtml) { $("#controw").innerHTML = contHtml; $("#controw").dataset.html = contHtml; }
@@ -1052,9 +1165,9 @@ function render() {
   // Patch only the cards that changed, so covers don't reload and the page doesn't flash
   const items = mixNotes ? [...(state.book_hits || []).map(b => ({b})),
                            ...[...jobs.map(j => ({j, t: j.created})), ...hits.map(n => ({n, t: n.created}))].sort((a, b) => b.t - a.t)]
-                         : jobs.map(j => ({j}));
-  const grid = $("#grid"), htmls = items.map(x => x.j ? card(x.j) : x.b ? bookGridCard(x.b) : noteGridCard(x.n)),
-        ids = items.map(x => x.j ? x.j.id : x.b ? "b" + x.b.id : "n" + x.n.id).join(",");
+                         : query || selecting ? jobs.map(j => ({j})) : seriesItems(jobs);
+  const grid = $("#grid"), htmls = items.map(x => x.group ? seriesCard(x.group) : x.j ? card(x.j) : x.b ? bookGridCard(x.b) : noteGridCard(x.n)),
+        ids = JSON.stringify(items.map(x => x.group ? "s:" + x.group.key : x.j ? x.j.id : x.b ? "b" + x.b.id : "n" + x.n.id));
   if (grid.dataset.ids !== ids) {
     grid.innerHTML = htmls.join("");
     [...grid.children].forEach((el, i) => { el.classList.add("enter"); el.style.setProperty("--i", Math.min(i, 12)); });
@@ -1073,6 +1186,8 @@ function render() {
     : state.admin ? "所有人的内容（管理员）"
     : state.user ? `${state.user} 的内容（登录过这个账号的所有设备）`
     : "只显示这台设备添加的内容 · 登录后，同一账号在不同设备上的内容会合并";
+  const voice = $('#recBtn');
+  if (!recorder) {voice.textContent = navigator.mediaDevices && window.MediaRecorder ? '语音' : '导入语音';voice.title = navigator.mediaDevices ? '录制语音' : '选择音频文件，或使用键盘语音输入';}
   renderAvatar();
 }
 function renderAvatar() {
@@ -1085,25 +1200,38 @@ function renderAvatar() {
 }
 
 async function refresh() {
+  const epoch = ++refreshEpoch;
   try {
-    const params = new URLSearchParams();
-    if (query && chip !== "books") params.set("q", query);  // on 书架 the search is in the books (loadBooks)
+    const params = new URLSearchParams({compact:"1"});
+    if (chip === 'live') params.set('metadata', '1');
+    if (query && !["books","notes","live"].includes(chip)) params.set("q", query);  // on 书架 the search is in the books (loadBooks)
+    if (!query && !selecting) params.set("grouped", "1");
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
     if (FOLDERS[chip] || LIBS[chip]) params.set("cat", chip);  // the whole category, not a page of the newest
     if (videoSort !== "added") params.set("sort", videoSort);
     if (query && smartSearch && !exactSearch) params.set("nl", "1");
     if (pageLimit > 100) params.set("limit", pageLimit);
+    if (visualSearch) params.set('visual', '1');
+    const response = await fetch("/api/jobs" + (params.size ? "?" + params : ""));
+    if (!response.ok) throw Error('加载失败');
+    const body = await response.text();
+    if (epoch !== refreshEpoch) return;
+    const next = JSON.parse(body);
+    setStorageOwner(next.storage_owner);
     if (chip === "notes") loadNotes();
     if (chip === "books") loadBooks();
-    const body = await (await fetch("/api/jobs" + (params.size ? "?" + params : ""))).text();
     if (body !== lastBody) {  // nothing changed: leave the page alone
       lastBody = body;
-      state = JSON.parse(body);
+      state = next;
       render();
+      updateSearchOptions();
+      if (chip === "live" && !liveData) await loadLive();
       // From outside the home network everything needs an account: go straight to the login form
       if (state.login_required && $("#accountSheet").hidden) openAccount();
     }
   } catch (e) {
+    if (epoch !== refreshEpoch) return;
+    if (chip === 'books') { await loadBooks(); render(); schedule(); return; }
     // no Pi: if this device has books cached, the shelf still works
     if (!state.jobs.length && chip !== "books" && !wentOffline) {
       wentOffline = true;
@@ -1115,12 +1243,13 @@ async function refresh() {
   schedule();
 }
 let wentOffline = false;
-// Finished items come 100 at a time (unfinished ones are always all there); 加载更多 asks for the next 100
+// Finished entries come 100 at a time; a complete series occupies one entry. Unfinished jobs are always sent.
 let pageLimit = 100;
 function loadMore() { pageLimit += 100; $("#more").disabled = true; refresh().finally(() => $("#more").disabled = false); }
 function setVideoSort(sort) {
   videoSort = ["published", "added", "title", "author"].includes(sort) ? sort : "added";
   lsSet("videoSort", videoSort);
+  saveNavigation();
   pageLimit = 100;
   lastBody = "";
   refresh();
@@ -1243,7 +1372,8 @@ function subRow(s) {
 /* 追更周报 */
 let digestState = {digests: [], pending: false, at: 0}, digestPick = 0;
 async function loadDigests() {
-  try { digestState = {...(await (await fetch("/api/digests")).json()), at: Date.now()}; } catch (e) { return; }
+  const owner = storageOwner;
+  try { const data = await (await fetch("/api/digests")).json(); if(owner!==storageOwner)return; digestState = {...data, at: Date.now()}; } catch (e) { return; }
   if (chip === "subs") { $("#subs").dataset.html = ""; renderSubs(); }
   if (digestState.pending) setTimeout(loadDigests, 5000);  // being written: look again soon
 }
@@ -1366,12 +1496,17 @@ function hhmm(t) { const d = new Date(t * 1000); return String(d.getHours()).pad
 function noteHtml(s, marks) { return hl(s, marks).replace(/https?:\/\/[^\s<>"']+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`); }
 
 async function loadNotes(older) {
+  const epoch = ++notesEpoch, owner = storageOwner, requestedQuery = query;
   const p = new URLSearchParams();
   if (query) p.set("q", query);
+  if (visualSearch) p.set("visual", "1");
   const last = notesState.notes[notesState.notes.length - 1];
   if (older && last) { p.set("before", last.created); p.set("before_id", last.id); }
   try {
-    const body = await (await fetch("/api/notes" + (p.size ? "?" + p : ""))).text();
+    const response = await fetch("/api/notes" + (p.size ? "?" + p : ""));
+    if (!response.ok) throw Error('加载失败');
+    const body = await response.text();
+    if (epoch !== notesEpoch || owner !== storageOwner || requestedQuery !== query) return;
     if (older) {
       const r = JSON.parse(body);
       notesState = {...notesState, notes: [...notesState.notes, ...r.notes], more: r.more};
@@ -1387,7 +1522,7 @@ async function loadNotes(older) {
                     onthisday: r.onthisday || [], places: r.places || [], recap: r.recap || null};
     }
     if (chip === "notes") { renderNotes(); schedule(); }
-  } catch (e) { toast("连不上 Pi"); }
+  } catch (e) { if (epoch === notesEpoch && owner === storageOwner) toast("随记加载失败，联网后会自动恢复"); }
 }
 
 function noteMedia(n) {
@@ -1575,8 +1710,8 @@ function zoomAt(s, px, py, anim) {
 })();
 
 // composing
-try { $("#noteText").value = localStorage.getItem("noteDraft") || ""; } catch (e) {}
-$("#noteText").oninput = () => { try { localStorage.setItem("noteDraft", $("#noteText").value); } catch (e) {} };
+try { $("#noteText").value = localStorage.getItem(privateKey("noteDraft")) || ""; } catch (e) {}
+$("#noteText").oninput = () => { try { localStorage.setItem(privateKey("noteDraft"), $("#noteText").value); } catch (e) {} };
 $("#noteText").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveNote(); };
 // picked files go into the note being written, or straight onto an existing note being edited
 let pickFor = null;
@@ -1586,14 +1721,18 @@ $("#noteFile").onchange = () => {
   if (pickFor) uploadToNote(pickFor, files); else addNoteFiles(files);
 };
 async function uploadToNote(id, files) {
+  const owner = storageOwner;
   const f = new FormData();
   for (const file of files) if (kindOf(file)) f.append("media", kindOf(file) === "image" ? await shrink(file) : file, file.name);
   if (!f.has("media")) { toast("只能加照片、视频或音频"); return; }
   const text = $("#edit" + id) ? $("#edit" + id).value : null;
   const xhr = new XMLHttpRequest();
+  if (owner !== storageOwner) return;
   xhr.open("POST", `/api/notes/${id}/media`);
+  xhr.setRequestHeader("X-Storage-Owner", owner);
   xhr.upload.onprogress = e => { if (e.lengthComputable) toast(`上传中 ${Math.floor(e.loaded / e.total * 100)}%`); };
   xhr.onload = xhr.onerror = async () => {
+    if (owner !== storageOwner) return;
     if (xhr.status !== 200) { toast(xhr.status === 413 ? "文件太大了" : "没加上，再试一次"); return; }
     toast("加上了");
     if (text !== null && text !== (notesState.notes.find(n => n.id === id) || {}).text) await noteApi(id, {text});  // keep what was typed
@@ -1637,6 +1776,7 @@ async function shrink(file) {
 }
 let saving = false;
 async function saveNote() {
+  const owner = storageOwner;
   if (saving) return;
   if (recorder) { toast("先停止录音"); return; }
   const text = $("#noteText").value.trim();
@@ -1646,13 +1786,16 @@ async function saveNote() {
   if ($("#noteWhen").value) f.append("created", new Date($("#noteWhen").value).getTime() / 1000);
   for (const a of noteFiles) f.append("media", a.kind === "image" ? await shrink(a.file) : a.file, a.file.name);
   const xhr = new XMLHttpRequest();
+  if (owner !== storageOwner) return;
   xhr.open("POST", "/api/notes");
+  xhr.setRequestHeader("X-Storage-Owner", owner);
   if (privacyToken) xhr.setRequestHeader("X-Privacy-Token", privacyToken);
   xhr.upload.onprogress = e => { if (e.lengthComputable && noteFiles.length) $("#upState").textContent = `上传中 ${Math.floor(e.loaded / e.total * 100)}%`; };
   xhr.onload = xhr.onerror = () => {
+    if (owner !== storageOwner) return;
     saving = false; $("#noteGo").disabled = false; $("#upState").textContent = "";
     if (xhr.status !== 200) { toast(xhr.status === 413 ? "文件太大了" : "没记上，再试一次"); return; }
-    $("#noteText").value = ""; try { localStorage.removeItem("noteDraft"); } catch (e) {}
+    $("#noteText").value = ""; try { localStorage.removeItem(privateKey("noteDraft")); } catch (e) {}
     $("#noteWhen").value = ""; whenChanged();
     noteFiles.forEach(a => URL.revokeObjectURL(a.url)); noteFiles = []; renderAtt();
     toast("记下了"); notesBody = ""; lastBody = ""; refresh();
@@ -1665,19 +1808,20 @@ let recorder = null, recStart = 0, recTimer = null;
 async function toggleRec() {
   if (recorder) { recorder.stop(); return; }
   if (!navigator.mediaDevices || !window.MediaRecorder) {
-    toast("这个地址不是 https，浏览器不让网页录音；可以选一个录好的音频，或者用键盘上的语音输入");
+    toast("选择音频即可记录语音，也可以使用键盘的语音输入");
     pickNoteFiles("audio/*"); return;
   }
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); } catch (e) { toast("没有麦克风权限"); return; }
   const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t)) || "";
-  const chunks = [];
+  const chunks = [], owner = storageOwner;
   recorder = new MediaRecorder(stream, type ? {mimeType: type} : {});
   recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
   recorder.onstop = () => {
     stream.getTracks().forEach(t => t.stop()); clearInterval(recTimer);
     const secs = (Date.now() - recStart) / 1000, mime = recorder.mimeType || type || "audio/webm";
     recorder = null; $("#recBtn").classList.remove("rec"); $("#recBtn").textContent = "语音";
+    if (owner !== storageOwner) return;
     const blob = new Blob(chunks, {type: mime.split(";")[0]});
     const file = new File([blob], `语音.${/mp4/.test(mime) ? "m4a" : "webm"}`, {type: blob.type});
     noteFiles.push({file, kind: "audio", url: URL.createObjectURL(file), secs}); renderAtt();
@@ -1720,12 +1864,26 @@ async function deleteNote(id) {
 }
 
 /* ---------- watch page ---------- */
-function openWatch(id, part = 0, t = 0) {
+let watchOpenEpoch = 0;
+async function openWatch(id, part = 0, t = 0) {
+  const openEpoch = ++watchOpenEpoch, owner = storageOwner;
+  let item = state.jobs.find(x => x.id === id);
+  if (item?.compact) {
+    try {
+      const response = await fetch(`/api/jobs?only=1&ids=${id}`);
+      if (!response.ok) throw Error();
+      const result = await response.json();
+      if (openEpoch !== watchOpenEpoch || owner !== storageOwner) return;
+      item = result.jobs.find(x => x.id === id);
+      if (!item) {toast('这个视频不见了');return;}
+      state.jobs = state.jobs.map(j => j.id === id ? item : j);
+    } catch(e) {toast('视频详情加载失败，请重试');return;}
+  }
   const explicitTime = arguments.length >= 3;
   const j = state.jobs.find(x => x.id === id); if (!j) return;
   stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
   // opened from the list (not from a search hit or a part button): carry on where you left off, on any device
-  const w = j.watch, resumed = arguments.length < 2 && w && !w.done && w.pos > 15 && (j.media || [])[w.part];
+  const w = j.watch, resumed = arguments.length < 2 && w && !w.done && w.pos >= 5 && (j.media || [])[w.part];
   if (resumed) { part = w.part; t = w.pos; toast(`从 ${dur(w.pos)} 接着播放`); }
   if (arguments.length < 2 && casting && casting.id === id) { part = casting.part; t = casting.position; }
   watching = {id, part};
@@ -1738,7 +1896,7 @@ function openWatch(id, part = 0, t = 0) {
            <audio ${casting ? 'preload="none"' : 'controls autoplay'} src="${m.src}${t ? "#t=" + t.toFixed(1) : ""}"></audio><div class="castOverlay" id="castOverlay" hidden></div></div>`
       : `<div class="stage" id="stage">${videoTag(j, m, t)}<div class="castOverlay" id="castOverlay" hidden></div></div>`;
     if (!m.audio && ["vp9", "av1"].includes(m.vcodec) && /iPhone|iPad/.test(navigator.userAgent))
-      stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用电脑或 Plex 看。</div>`;
+      stage += `<div class="warn">这个视频是 ${m.vcodec.toUpperCase()} 格式，部分 iPhone 放不了，可以用支持该编码的播放器观看。</div>`;
   } else {
     stage = `<div class="stage"><div class="msg" id="wstatus"></div></div>`;
   }
@@ -1903,10 +2061,10 @@ function saveWatch(ended) {
   const pos = ended ? el.duration : el.currentTime, secs = Math.round(watchSecs);
   watchSecs -= secs;
   fetch(`/api/watch/${watching.id}`, {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-    body: JSON.stringify({part: watching.part, pos, dur: el.duration, ended: !!ended, secs})}).catch(() => {});
+    body: JSON.stringify({part: watching.part, pos, dur: el.duration, ended: !!ended, secs, storage_owner: storageOwner})}).catch(() => {});
   const j = state.jobs.find(x => x.id === watching.id);
   if (j) j.watch = {part: watching.part, pos, dur: el.duration, at: Date.now() / 1000,
-                    done: !!ended || !!(j.watch && j.watch.done) || pos > el.duration - 30};
+                    done: !!ended || !!(j.watch && j.watch.done) || pos >= el.duration - Math.min(30, el.duration * .05)};
 }
 async function clearWatch(id) {
   try {
@@ -2047,10 +2205,10 @@ function saveCastWatch(c) {
   if (!c.ready || !c.duration || c.position < 5) return;
   const secs = Math.floor(c.secs || 0); c.secs = (c.secs || 0) - secs;
   fetch(`/api/watch/${c.id}`, {method: "POST", headers: {"Content-Type": "application/json"}, keepalive: true,
-    body: JSON.stringify({part: c.part, pos: c.position, dur: c.duration, ended: false, secs})}).catch(() => {});
+    body: JSON.stringify({part: c.part, pos: c.position, dur: c.duration, ended: false, secs, storage_owner: storageOwner})}).catch(() => {});
   const j = state.jobs.find(x => x.id === c.id);
   if (j) j.watch = {part: c.part, pos: c.position, dur: c.duration, at: Date.now() / 1000,
-    done: !!(j.watch && j.watch.done) || c.position > c.duration - 30};
+    done: !!(j.watch && j.watch.done) || c.position >= c.duration - Math.min(30, c.duration * .05)};
   c.savedAt = Date.now();
 }
 async function startCast(id, part, device, position = null) {
@@ -2180,11 +2338,12 @@ function updateWatchStatus() {
   const j = state.jobs.find(x => x.id === watching.id); if (!j) return;
   if (j.status === "done" && (j.media || []).length) { openWatch(j.id); return; }  // just finished: show the player
   el.innerHTML = j.status === "queued" ? "排队中…" : j.status === "failed" ? "下载失败" : j.status === "cancelled" ? "已取消"
-    : j.missing ? "文件已经从硬盘上删除了（可能是在 Plex 或共享文件夹里删的）"
+    : j.missing ? "文件已经从硬盘上删除了（可能是从共享文件夹里删除的）"
     : j.status === "done" ? "这个任务没有可以播放的文件"
     : `${esc(STAGES[j.stage] || j.stage || "处理中")} ${j.progress ? j.progress.toFixed(0) + "%" : ""}<br>${esc(j.speed || "")}`;
 }
 function closeWatch() {
+  ++watchOpenEpoch;
   stopMedia();
   watching = null; document.body.style.overflow = "";
   hide($("#watch"), () => { $("#watchBody").innerHTML = ""; });
@@ -2197,16 +2356,40 @@ async function act(id, action, close) {
   await refresh();
   if (watching) openWatch(watching.id, watching.part);
 }
-document.addEventListener("keydown", e => {
-  if (e.key !== "Escape") return;
-  if (!$("#privacySheet").hidden) hide($("#privacySheet"));
-  else if (!$("#addSheet").hidden) hide($("#addSheet"));
-  else if (!$("#androidSheet").hidden) hide($('#androidSheet'));
-  else if (!$("#removeSheet").hidden) hide($("#removeSheet"));
-  else if (!$("#accountSheet").hidden) hide($("#accountSheet"));
-  else if (watching) closeWatch();
-  else if (selecting) toggleSelect();
-});
+const modalFocus = new WeakMap();
+const visibleModals = () => [...document.querySelectorAll('.sheet-bg:not([hidden])')].filter(el => !el.classList.contains('closing'));
+new MutationObserver(records => {
+  for (const change of records) {
+    const candidates = change.type === 'childList' ? [...change.addedNodes].filter(n => n.nodeType === 1 && n.matches('.sheet-bg')) : [change.target];
+    for (const el of candidates) {
+      if (!el.matches('.sheet-bg')) continue;
+      if (!el.hidden && !modalFocus.has(el)) {
+        modalFocus.set(el, document.activeElement);
+        const panel = el.querySelector('.sheet') || el; panel.setAttribute('role','dialog'); panel.setAttribute('aria-modal','true');
+        const h = panel.querySelector('h2'); if (h) {h.id ||= el.id + 'Title';panel.setAttribute('aria-labelledby',h.id);}
+        queueMicrotask(() => { if (!el.hidden && !el.contains(document.activeElement)) (el.querySelector('[autofocus],input:not([type=hidden]),textarea,button,a[href],select') || panel).focus(); });
+      } else if (el.hidden && modalFocus.has(el)) {
+        const previous = modalFocus.get(el); modalFocus.delete(el); if (previous?.isConnected) previous.focus();
+      }
+    }
+    if (change.type === 'childList') for (const el of change.removedNodes) {
+      if (modalFocus.has(el)) {const previous = modalFocus.get(el);modalFocus.delete(el);if(previous?.isConnected) previous.focus();}
+    }
+  }
+}).observe(document.body, {attributes:true,attributeFilter:['hidden'],childList:true,subtree:true});
+document.addEventListener('keydown', e => {
+  const modal = visibleModals().at(-1);
+  if (modal && e.key === 'Tab') {
+    const items = [...modal.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex="0"]')].filter(el => el.getClientRects().length);
+    if (!items.length) {e.preventDefault(); return;}
+    if (e.shiftKey && (document.activeElement === items[0] || !modal.contains(document.activeElement))) {e.preventDefault();items.at(-1).focus();}
+    else if (!e.shiftKey && (document.activeElement === items.at(-1) || !modal.contains(document.activeElement))) {e.preventDefault();items[0].focus();}
+  }
+  if (e.key !== 'Escape') return;
+  if (modal) {e.preventDefault();e.stopImmediatePropagation();modal.id === 'liveModal' ? lvClose() : hide(modal);}
+  else if (watching && !rd.id) closeWatch();
+  else if (selecting && !rd.id) toggleSelect();
+}, true);
 
 /* ---------- privacy mode (hidden menu: tap the avatar three times) ---------- */
 // Triple tap, or press and hold for a second, opens the privacy menu; a single tap opens the account menu
@@ -2305,6 +2488,7 @@ function toggleSelect() {
   selecting = !selecting; selected.clear();
   $("#manageBtn").textContent = selecting ? "完成" : "批量管理";
   render();
+  refresh();
 }
 function togglePick(id) { selected.has(id) ? selected.delete(id) : selected.add(id); render(); }
 function selectAll() {
@@ -2323,7 +2507,7 @@ function askRemove(ids) {
   const busy = ids.filter(id => ACTIVE.includes((state.jobs.find(j => j.id === id) || {}).status)).length;
   $("#removeTitle").textContent = one ? "移除这个内容？" : `移除 ${ids.length} 个内容？`;
   $("#removeHint").textContent = (one ? `「${titleOf(one)}」` : "") + "会从列表里移除。"
-    + (busy ? `其中 ${busy} 个还在下载，会先停止。` : "") + "不勾选下面的选项，硬盘上的文件会保留，Plex 里也还在。";
+    + (busy ? `其中 ${busy} 个还在下载，会先停止。` : "") + "不勾选下面的选项，硬盘上的文件会保留，可以继续通过共享文件夹访问。";
   $("#removeFiles").checked = false;
   $("#removeGo").textContent = "移除";
   $("#removeFiles").onchange = () => $("#removeGo").textContent = $("#removeFiles").checked ? "移除并删除文件" : "移除";
@@ -2412,6 +2596,7 @@ function openAdd() {
   $("#addSheet").hidden = false; setTimeout(() => $("#addText").focus(), 50);
 }
 async function send(body) {
+  try {
   const r = await fetch("/api/add", {method: "POST", body});
   const j = await r.json();
   const dup = (j.duplicates || []).length, link = (j.linked || []).length, fresh = (j.ids || []).length - dup - link;
@@ -2427,10 +2612,17 @@ async function send(body) {
   if (r.ok) { hide($("#addSheet")); chip = (j.subs || []).length && !(j.ids || []).length ? "subs" : (j.books || []).length && !(j.ids || []).length ? "books" : "all"; }
   refresh();
   return r.ok;
+  } catch (e) { toast('连接失败，内容已保留，联网后可重试'); return false; }
 }
 function sendText(t) { const f = new FormData(); f.append("text", t); return send(f); }
 function sendFile(file) { const f = new FormData(); f.append("torrent", file); return send(f); }
-$("#addForm").onsubmit = e => { e.preventDefault(); const t = $("#addText").value.trim(); if (t) { sendText(t); $("#addText").value = ""; } };
+$("#addForm").onsubmit = async e => {
+  e.preventDefault(); const t = $("#addText").value.trim(), button = e.target.querySelector('[type=submit]');
+  if (!t || button.disabled) return;
+  const label = button.textContent; button.disabled = true; button.textContent = '正在添加…';
+  try { if (await sendText(t)) { if ($('#addText').value.trim() === t) $('#addText').value = ''; } }
+  finally { button.disabled = false; button.textContent = label; }
+};
 $("#file").onchange = () => { for (const f of $("#file").files) sendFile(f); $("#file").value = ""; };
 
 let dragDepth = 0;
@@ -2475,6 +2667,7 @@ function pctStr(p) { return (p >= 0.995 ? 100 : p * 100 < 10 ? (p * 100).toFixed
 function wan(n) { return n >= 10000 ? (n / 10000).toFixed(n >= 100000 ? 0 : 1) + " 万" : String(Math.round(n)); }
 
 async function loadBooks() {
+  const epoch = ++booksEpoch, owner = storageOwner, requestedQuery = query;
   const p = new URLSearchParams();
   if (query) p.set("q", query);
   let body = null;
@@ -2482,7 +2675,9 @@ async function loadBooks() {
     const r = await fetch("/api/books" + (p.size ? "?" + p : ""));
     if (r.ok) body = await r.text();
   } catch (e) {}
+  if (epoch !== booksEpoch || owner !== storageOwner || requestedQuery !== query) return;
   await refreshCacheIndex();
+  if (epoch !== booksEpoch || owner !== storageOwner || requestedQuery !== query) return;
   if (body !== null) {
     flushPendingProgress();
     if (body === booksBody && booksState.q === query && !booksState.offline && booksState.loaded) { if (chip === "books") renderBooks(); return; }
@@ -2565,6 +2760,7 @@ function bookGridCard(b) {
 function openBookHit(id, ch, match, nth) { openReader(id, {hit: {ch, match, nth}}); }
 
 function uploadBooks(files) {
+  const owner = storageOwner;
   files = [...files];
   const ok = files.filter(f => BOOK_EXT.test(f.name));
   if (!ok.length) { toast("不是电子书（支持 EPUB、PDF、TXT、MOBI、AZW3）"); return; }
@@ -2575,8 +2771,10 @@ function uploadBooks(files) {
   box.innerHTML = `<div class="sub">正在上传 ${ok.length} 本（${bytes(total)}）…</div><div class="upbar"><div style="width:0"></div></div>`;
   const x = new XMLHttpRequest();
   x.open("POST", "/api/books");
+  x.setRequestHeader("X-Storage-Owner", owner);
   x.upload.onprogress = e => { const bar = box.querySelector(".upbar div"); if (bar && e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + "%"; };
   x.onload = () => {
+    if(owner !== storageOwner)return;
     box.innerHTML = "";
     let j = {};
     try { j = JSON.parse(x.responseText); } catch (e) {}
@@ -2584,7 +2782,7 @@ function uploadBooks(files) {
                               (j.bad || []).length ? `${j.bad.length} 个不是电子书` : ""].filter(Boolean).join("，") : (j.error || "上传失败"));
     booksBody = ""; loadBooks();
   };
-  x.onerror = () => { box.innerHTML = ""; toast("上传失败：连不上 Pi"); };
+  x.onerror = () => { if(owner !== storageOwner)return; box.innerHTML = ""; toast("上传失败：连不上 Pi"); };
   x.send(fd);
 }
 $("#bookFile").onchange = () => { uploadBooks($("#bookFile").files); $("#bookFile").value = ""; };
@@ -2673,14 +2871,18 @@ async function uncacheBook(id) { await cacheDrop(id).catch(() => {}); hide($("#b
    Books you open are cached automatically (oldest dropped past the limit); 缓存到本机 keeps one for good. */
 const cacheIndex = new Map(), coverUrls = new Map();
 const idb = {
-  p: null,
+  connections: new Map(),
+  forOwner(owner = storageOwner) { return Object.assign(Object.create(this), {owner}); },
   open() {
-    return this.p || (this.p = new Promise((ok, no) => {
-      const r = indexedDB.open("shiguang-books", 1);
+    const owner = this.owner || storageOwner;
+    if (this.connections.has(owner)) return this.connections.get(owner);
+    const promise = new Promise((ok, no) => {
+      const r = indexedDB.open("shiguang-books:" + encodeURIComponent(owner), 1);
       r.onupgradeneeded = () => { for (const n of ["meta", "data", "res"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
       r.onsuccess = () => ok(r.result);
-      r.onerror = () => no(r.error);
-    }));
+      r.onerror = () => {this.connections.delete(owner);no(r.error);};
+    });
+    this.connections.set(owner, promise); return promise;
   },
   async run(store, mode, fn) {
     const d = await this.open();
@@ -2698,29 +2900,36 @@ const idb = {
 const autoCache = () => lsGet("bookAutoCache", "1") === "1";
 const cacheLimitMB = () => +lsGet("bookCacheLimit", "1024");
 async function refreshCacheIndex() {
+  const owner = storageOwner, store = idb.forOwner(owner);
   let metas = [];
-  try { metas = await idb.all("meta"); } catch (e) { return; }
+  try { metas = await store.all("meta"); } catch (e) { return; }
+  if (owner !== storageOwner) return;
   cacheIndex.clear();
   metas.forEach(m => cacheIndex.set(m.id, m));
 }
 async function offlineCovers() {
+  const owner = storageOwner, store = idb.forOwner(owner);
   for (const m of cacheIndex.values()) {
     if (coverUrls.has(m.id) || !m.book.cover) continue;
-    const bl = await idb.get("res", `${m.id}|cover`).catch(() => null);
+    const bl = await store.get("res", `${m.id}|cover`).catch(() => null);
+    if (owner !== storageOwner) return;
     if (bl) coverUrls.set(m.id, URL.createObjectURL(bl));
   }
 }
 const resUrl = (b, p) => `/bookres/${b.id}?p=${encodeURIComponent(p)}&v=${b.version}`;
 let caching = {};
 async function cacheBook(b, {pinned = false, pack = null} = {}) {
-  if (caching[b.id]) return caching[b.id];
-  return caching[b.id] = (async () => {
+  const owner = storageOwner, store = idb.forOwner(owner), cacheKey = `${owner}:${b.id}`;
+  if (caching[cacheKey]) return caching[cacheKey];
+  const checkOwner = () => {if (owner !== storageOwner) throw Error('账号已切换');};
+  return caching[cacheKey] = (async () => {
     try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
     if (!pack) {
       const r = await fetch(`/api/books/${b.id}/pack`);
       if (!r.ok) throw new Error("书还没准备好");
       pack = await r.json();
     }
+    checkOwner();
     const old = cacheIndex.get(b.id), data = {pack};
     let size = new Blob([JSON.stringify(pack)]).size;
     if (pack.view === "pdf") {
@@ -2729,34 +2938,38 @@ async function cacheBook(b, {pinned = false, pack = null} = {}) {
       data.file = await r.blob();
       size += data.file.size;
     }
-    if (old && old.v !== b.version) await cacheDrop(b.id);
-    await idb.put("data", b.id, data);
+    if (old && old.v !== b.version) await cacheDrop(b.id, owner);
+    await store.put("data", b.id, data);
     const book = {...b}; delete book.hits;
     const meta = {id: b.id, v: b.version, size, pinned: pinned || !!(old && old.pinned && old.v === b.version), cached: Date.now(),
                   used: Date.now(), complete: false, book};
-    await idb.put("meta", b.id, meta);
-    cacheIndex.set(b.id, meta);
+    await store.put("meta", b.id, meta);
+    checkOwner(); cacheIndex.set(b.id, meta);
     // the pictures and the cover too, so the book reads the same without the Pi
     for (const p of [...(pack.res || []), ...(b.cover ? ["cover"] : [])]) {
-      if (await idb.get("res", `${b.id}|${p}`).catch(() => null)) continue;
+      checkOwner();
+      if (await store.get("res", `${b.id}|${p}`).catch(() => null)) continue;
       try {
         const r = await fetch(p === "cover" ? `/bookcover/${b.id}?v=${b.version}` : resUrl(b, p));
         if (!r.ok) continue;
         const bl = await r.blob();
-        await idb.put("res", `${b.id}|${p}`, bl);
+        await store.put("res", `${b.id}|${p}`, bl);
         meta.size += bl.size;
       } catch (e) {}
     }
+    checkOwner();
     meta.complete = true;
-    await idb.put("meta", b.id, meta);
+    await store.put("meta", b.id, meta);
     await evictCache(b.id);
     return meta;
-  })().finally(() => { delete caching[b.id]; if (chip === "books") renderBooks(); });
+  })().finally(() => { delete caching[cacheKey]; if (owner === storageOwner && chip === "books") renderBooks(); });
 }
-async function cacheDrop(id) {
-  await idb.del("meta", id);
-  await idb.del("data", id);
-  await idb.run("res", "readwrite", s => s.delete(IDBKeyRange.bound(`${id}|`, `${id}|￿`)));
+async function cacheDrop(id, owner = storageOwner) {
+  const store = idb.forOwner(owner);
+  await store.del("meta", id);
+  await store.del("data", id);
+  await store.run("res", "readwrite", s => s.delete(IDBKeyRange.bound(`${id}|`, `${id}|￿`)));
+  if (owner !== storageOwner) return;
   cacheIndex.delete(id);
   if (coverUrls.has(id)) { URL.revokeObjectURL(coverUrls.get(id)); coverUrls.delete(id); }
 }
@@ -2778,7 +2991,8 @@ async function openCacheSheet() {
   try { const e = await navigator.storage.estimate(); est = `浏览器给这个网页的空间约 ${bytes(e.quota)}，已用 ${bytes(e.usage)}。`; } catch (e) {}
   const lim = cacheLimitMB();
   $("#bookSheetBody").innerHTML = `<h2>本机缓存</h2>
-    <p class="hint">书缓存在这台设备的浏览器里，打开时不用再从 Pi 下载；不在家、连不上 Pi 也能读（进度联网后同步）。${est}</p>
+    <p class="hint">缓存按拾光账号分开保存。${window.isSecureContext ? '已缓存的书支持离线阅读，进度联网后同步。' : '当前为 HTTP 地址：请保持本页打开，断网后仍可读缓存；离线重新打开网页需使用 HTTPS 地址。'}${est}</p>
+    ${!window.isSecureContext && state.secure_url ? `<p><a class="link" href="${esc(state.secure_url)}">使用安全地址打开拾光 ↗</a></p>` : ''}
     <label class="check" style="margin-bottom:10px"><input type="checkbox" ${autoCache() ? "checked" : ""} onchange="lsSet('bookAutoCache', this.checked ? '1' : '0')"> 打开过的书自动缓存</label>
     <div class="rd-row" style="margin-bottom:10px"><span class="sub">自动缓存最多占</span>
       <div class="seg">${[[512, "512 MB"], [1024, "1 GB"], [4096, "4 GB"], [0, "不限"]].map(([v, t]) =>
@@ -2786,7 +3000,7 @@ async function openCacheSheet() {
     <div class="devs">${metas.map(m => `<div class="dev"><div class="dev-main"><b>${esc(m.book.title)}</b><div class="sub">${bytes(m.size)} · ${m.pinned ? "手动缓存" : "自动缓存"} · ${esc(ago(m.used / 1000))}打开${m.complete ? "" : " · 没缓存完"}</div></div>
       <button class="btn plain" onclick="cacheDrop(${m.id}).then(openCacheSheet).then(renderBooks)">删除</button></div>`).join("") || '<p class="sub">还没有缓存的书。</p>'}</div>
     <div class="row" style="margin-top:14px">
-      ${metas.length ? `<button class="btn plain" onclick="if (confirm('删除这台设备上缓存的所有书？书架上的书不受影响。')) Promise.all([...cacheIndex.keys()].map(cacheDrop)).then(openCacheSheet).then(renderBooks)">全部删除 ${bytes(total)}</button>` : ""}
+      ${metas.length ? `<button class="btn plain" onclick="if (confirm('删除这台设备上缓存的所有书？书架上的书不受影响。')) Promise.all([...cacheIndex.keys()].map(id => cacheDrop(id))).then(openCacheSheet).then(renderBooks)">全部删除 ${bytes(total)}</button>` : ""}
       ${booksState.offline ? "" : `<button class="btn plain" onclick="cacheAll()">缓存全部书</button>`}
       <button class="btn" onclick="hide($('#bookSheet'))">好</button>
     </div>`;
@@ -2804,21 +3018,22 @@ async function cacheAll() {
 }
 
 /* ---------- reading progress: saved to the Pi (every device carries on where you are), queued while offline ---------- */
-function pendingAll() { try { return JSON.parse(localStorage.getItem("bookPending") || "{}"); } catch (e) { return {}; } }
-function queueProgress(id, body) {
-  const q = pendingAll(), old = q[id];
+function pendingAll(owner = storageOwner) { try { return JSON.parse(localStorage.getItem(privateKey("bookPending", owner)) || "{}"); } catch (e) { return {}; } }
+function queueProgress(id, body, owner = storageOwner) {
+  const q = pendingAll(owner), old = q[id];
   q[id] = {...body, secs: ((old && old.secs) || 0) + (body.secs || 0), at: body.at || Date.now() / 1000};
-  lsSet("bookPending", JSON.stringify(q));
+  lsSet(privateKey("bookPending", owner), JSON.stringify(q));
 }
 function postProgress(id, body) {
+  const owner = storageOwner; body = {...body, storage_owner: owner};
   fetch(`/api/books/${id}/progress`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), keepalive: true})
     .then(r => { if (r.status >= 500 || r.status === 0) throw new Error(); })
-    .catch(() => queueProgress(id, body));
+    .catch(() => queueProgress(id, body, owner));
 }
 function flushPendingProgress() {
   const q = pendingAll();
   if (!Object.keys(q).length) return;
-  try { localStorage.removeItem("bookPending"); } catch (e) {}
+  try { localStorage.removeItem(privateKey("bookPending")); } catch (e) {}
   for (const [id, body] of Object.entries(q)) postProgress(+id, body);
 }
 window.addEventListener("online", flushPendingProgress);
@@ -2838,6 +3053,7 @@ function rdApplyPrefs() {
   r.style.setProperty("--rd-lh", rdPrefs.lh);
 }
 async function openReader(id, at = null) {
+  const owner = storageOwner;
   let b = bookById(id);
   if (!b || !b.version) {
     try { const r = await fetch(`/api/books/${id}`); if (r.ok) b = (await r.json()).book; } catch (e) {}
@@ -2858,14 +3074,14 @@ async function openReader(id, at = null) {
   $("#rdLoad").hidden = false; $("#rdLoad").textContent = `正在打开《${b.title}》…`;
   el.hidden = false;
   document.body.style.overflow = "hidden";
-  if (!(history.state && history.state.reader)) history.pushState({reader: id}, "", "#book=" + id);
-  else history.replaceState({reader: id}, "", "#book=" + id);
+  if (!(history.state && history.state.reader)) history.pushState({...history.state, reader: id}, "", "#book=" + id);
+  else history.replaceState({...history.state, reader: id}, "", "#book=" + id);
   let data;
   try { data = await bookData(b); }
   catch (e) { if (rd.id === id) $("#rdLoad").textContent = "打不开：连不上 Pi，这本书也没有缓存在这台设备上。"; return; }
-  if (rd.id !== id) return;
+  if (rd.id !== id || owner !== storageOwner) return;
   rd.pack = data.pack; rd.file = data.file || null; rd.cached = !!data.cached;
-  fetch(`/api/books/${id}`).then(r => r.json()).then(j => { if (rd.id === id) { rd.marks = j.book.marks || []; rdUpdate(); } }).catch(() => {});
+  fetch(`/api/books/${id}`).then(r => r.json()).then(j => { if (rd.id === id && owner === storageOwner) { rd.marks = j.book.marks || []; rdUpdate(); } }).catch(() => {});
   // where to start: a search hit, else where you were (a save made offline on this device if it's newer)
   const pend = pendingAll()[id];
   const pos = (at && at.pos) || (pend && (!b.read || pend.at > (b.read.at || 0)) ? pend.pos : b.read && b.read.pos) || null;
@@ -2881,15 +3097,16 @@ async function openReader(id, at = null) {
   if (rd.id === id && pos && !at && (pos.ch || pos.page || pos.f)) toast(`接着上次读：${pctStr(rdPct())}`);
 }
 async function bookData(b) {
+  const owner = storageOwner, store = idb.forOwner(owner);
   const m = cacheIndex.get(b.id);
   if (m && (m.v === b.version || booksState.offline)) {
-    const d = await idb.get("data", b.id).catch(() => null);
-    if (d) { m.used = Date.now(); idb.put("meta", b.id, m).catch(() => {}); return {...d, cached: true}; }
+    const d = await store.get("data", b.id).catch(() => null);
+    if (d) { m.used = Date.now(); store.put("meta", b.id, m).catch(() => {}); return {...d, cached: true}; }
   }
   const r = await fetch(`/api/books/${b.id}/pack`);
   if (!r.ok) throw new Error("pack " + r.status);
   const pack = await r.json();
-  if (autoCache() || (m && m.pinned)) setTimeout(() => cacheBook(b, {pack, pinned: !!(m && m.pinned)}).catch(() => {}), 1500);
+  if (autoCache() || (m && m.pinned)) setTimeout(() => { if (owner === storageOwner) cacheBook(b, {pack, pinned: !!(m && m.pinned)}).catch(() => {}); }, 1500);
   return {pack, cached: false};
 }
 function closeReader() {
@@ -2897,9 +3114,9 @@ function closeReader() {
   else rdClose();
 }
 window.addEventListener("popstate", () => { if (rd.id && !(history.state && history.state.reader)) rdClose(); });
-function rdClose(instant) {
+function rdClose(instant, discard = false) {
   if (!rd.id) return;
-  rdSave();
+  if (!discard) rdSave();
   rdRevoke();
   if (rd.io) rd.io.disconnect();
   if (rd.pdfTask) rd.pdfTask.destroy().catch(() => {});
@@ -2910,7 +3127,7 @@ function rdClose(instant) {
   const done = () => { $("#rdFlow").innerHTML = ""; $("#rdPdf").innerHTML = ""; };
   if (instant) { $("#reader").hidden = true; done(); } else hide($("#reader"), done);
   booksBody = ""; lastBody = "";
-  if (chip === "books") loadBooks(); else refresh();
+  if (!discard) { if (chip === "books") loadBooks(); else refresh(); }
 }
 function rdRevoke() { (rd.urls || []).forEach(u => URL.revokeObjectURL(u)); if (rd.urls) rd.urls = []; }
 
@@ -2959,15 +3176,18 @@ async function rdRender(i, opts = {}) {
   rdGo(n, false);
 }
 async function rdImages(root) {
+  const owner = storageOwner, reader = rd, store = idb.forOwner(owner);
   const imgs = [...root.querySelectorAll("img[data-res]")];
   await Promise.all(imgs.map(async img => {
     const p = img.dataset.res;
     let src = null;
     if (cacheIndex.has(rd.id)) {
-      const bl = await idb.get("res", `${rd.id}|${p}`).catch(() => null);
-      if (bl) { src = URL.createObjectURL(bl); rd.urls.push(src); }
+      const bl = await store.get("res", `${reader.id}|${p}`).catch(() => null);
+      if (owner !== storageOwner || reader !== rd) return;
+      if (bl) { src = URL.createObjectURL(bl); reader.urls.push(src); }
     }
-    img.src = src || resUrl(rd.b, p);
+    if (owner !== storageOwner || reader !== rd) return;
+    img.src = src || resUrl(reader.b, p);
     if (img.complete) return;
     const loaded = new Promise(r => { img.onload = img.onerror = r; });
     // a slow picture: lay out without it, then again once it's there
@@ -3537,6 +3757,14 @@ async function ask(e) {
 function askOpenNote(id) { hide($("#askSheet")); focusNote = id; setChip("notes"); }
 
 /* ---------- 资源使用 ---------- */
+async function retryTask(id) {
+  try {
+    const response=await fetch(`/api/tasks/${id}/retry`,{method:'POST'}), data=await response.json();
+    if(!response.ok)throw Error(data.error||'重试失败');
+    toast('已重新排队'); if(chip==='live')loadLive();
+    if(!$('#usageSheet').hidden)openUsage();
+  } catch(e){toast(e.message||'连接失败，请稍后重试');}
+}
 let usageDays = 7;
 function bytes(n) {
   n = n || 0;
@@ -3547,16 +3775,17 @@ function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 1
 const HEAL_STATES = {new: "待诊断", healing: "诊断中", back: "修复后又出现", fixed: "已修复", diagnosed: "已诊断",
   not_a_bug: "不是代码问题", error: "诊断出错"};
 function workerName(n) {
-  const c = /^mac.*-claude-(\d+)$/i.exec(n || "");
+  const c = /^mac.*-(?:claude|codex)-(\d+)$/i.exec(n || "");
   return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n]
-    || (c ? `Mac（Claude ${c[1]}）` : /^mac.*-pic$/i.test(n || "") ? "Mac（闲时·图片）" : /mac/i.test(n || "") ? "Mac mini" : n || "");
+    || (c ? `Mac（${/-codex-/i.test(n) ? "Codex" : "Claude"} ${c[1]}）` : /^mac.*-pic$/i.test(n || "") ? "Mac（闲时·图片）" : /mac/i.test(n || "") ? "Mac mini" : n || "");
 }
-// The Mac's on-demand loops: the picture one while nobody uses the Mac, Claude 3+ while AI requests pile up
-function workerOnDemand(n) { const c = /^mac.*-claude-(\d+)$/i.exec(n || ""); return /^mac.*-pic$/i.test(n || "") || (c && +c[1] > 2); }
+// The Mac's on-demand loops: the picture one while nobody uses the Mac, Codex 3+ while AI requests pile up
+function workerOnDemand(n) { const c = /^mac.*-(?:claude|codex)-(\d+)$/i.exec(n || ""); return /^mac.*-pic$/i.test(n || "") || (c && +c[1] > 2); }
 function num(n) { n = Math.round(n || 0); return n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function hours(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : Math.round(sec / 60) + " 分钟"; }
 const SPACE_NAMES = {Videos: "视频", Movies: "电影", TV: "剧集", Music: "音乐", Downloads: "下载（种子等）", ".books": "书架",
-                     ".notes": "随记", ".grabber": "拾光数据库", ".incomplete": "下载中 / 临时文件", ".cache": "缓存"};
+                     ".notes": "随记", ".grabber": "拾光数据库", ".incomplete": "下载中 / 临时文件", ".cache": "缓存",
+                     ".trash": "回收暂存", ".backups": "备份", ".live-clips": "直播切片与录播缓存"};
 async function openUsage(days) {
   if (days) usageDays = days;
   $("#usageSheet").hidden = false;
@@ -3634,7 +3863,7 @@ async function openUsage(days) {
       ${proc.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.count)}</td><td>${
         w.kind === "whisper" || w.kind === "encode" ? hours(w.amount) + "音视频" : num(w.amount) + " 张"}</td><td>${hours(w.seconds)}</td></tr>`).join("")}
     </table></div>` : '<p class="hint">这段时间还没有。</p>'}
-    <div class="usec"><b>AI tokens 和花费</b><span class="sub">先用 Mac 上的 Claude（订阅），不行再用 Codex（订阅），都不在时用 DeepSeek（按量计费）</span></div>
+    <div class="usec"><b>AI tokens 和花费</b><span class="sub">先用 Mac 上的 Codex（订阅），不可用或失败时用 DeepSeek（按量计费）</span></div>
     ${llm.length ? `<div class="uscroll"><table class="ut"><tr><th>用途</th><th>调用</th><th>输入<br>（缓存命中）</th><th>输出</th><th>花费</th></tr>
       ${llm.map(w => `<tr><td>${esc(w.name)}</td><td>${num(w.purpose === "earlier" ? w.amount : w.count)}</td>
         <td>${num(w.tokens_in)}${w.cache_hit ? `<br>（${num(w.cache_hit)}）` : ""}</td><td>${w.purpose === "earlier" ? "–" : num(w.tokens_out)}</td>
@@ -3652,8 +3881,8 @@ async function openUsage(days) {
       : `<p style="margin:6px 0">${board.busy ? "有下载在处理，Pi 先让它" : "现在没有任务在跑"}</p>`}
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
       ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
-    ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 60))}`).join("；")}</p>` : ""}
-    ${(board.heal || []).length ? `<div class="usec"><b>自修复</b><span class="sub">报错交给 Mac 上的 Claude 诊断；改了代码、测试通过就自动上线</span></div>
+    ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 160))}${f.retryable?` <button class="link" onclick="retryTask(${f.id})">重试此步骤</button>`:""}`).join("；")}</p>` : ""}
+    ${(board.heal || []).length ? `<div class="usec"><b>自修复</b><span class="sub">报错交给 Mac 上的 Codex 诊断；改了代码、测试通过就自动上线</span></div>
       ${board.heal.map(h => `<p style="margin:6px 0"><b>${esc(HEAL_STATES[h.state] || h.state)}</b> ${esc(h.label)}${h.title ? "「" + esc(h.title.slice(0, 20)) + "」" : ""}${h.count > 1 ? `（${num(h.count)} 次）` : ""} · ${esc(ago(h.last))}<br>
         <span class="hint">${esc(h.diagnosis || h.why || h.error.slice(0, 120))}${h.commit ? " · 提交 " + esc(h.commit) : ""}</span></p>`).join("")}` : ""}
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
@@ -3781,6 +4010,7 @@ function renderAuth(mode, keep = {}) {
         body: JSON.stringify({name: n, password: p})});
       const j = await r.json();
       if (r.ok) {
+        ++refreshEpoch; setStorageOwner("user:" + n);
         hide($("#accountSheet"));
         toast(reg ? `欢迎，${n}！这台设备已加入账号` : `欢迎回来，${n}`);
         await refresh();
@@ -3808,27 +4038,73 @@ async function removeDevice(id, current) {
   await refresh();
   if (state.user) openAccount(); else hide($("#accountSheet"));
 }
-async function logout() { await fetch("/api/logout", {method: "POST"}); hide($("#accountSheet")); toast("已退出"); refresh(); }
+async function logout() {
+  try {
+    if (rd.id) rdSave();
+    const response = await fetch("/api/logout", {method: "POST"});
+    if (!response.ok) throw Error();
+    ++refreshEpoch; setStorageOwner('signed-out-' + Date.now());
+    render(); toast("已退出"); refresh();
+  } catch(e) {toast('退出失败，请联网后重试');}
+}
 
 /* ---------- search ---------- */
-function searchFor(t) { closeWatch(); $("#search").value = t; query = t; refresh(); window.scrollTo(0, 0); }
+function searchFor(t) { closeWatch(); $("#search").value = t; query = t; visualSearch = false; saveNavigation(); refresh(); window.scrollTo(0, 0); }
 let searchTimer;
 // A sentence ("上个月小王讲伊朗、画面里有地图的片段") is read by the AI once typing pauses; words search right away
-let smartSearch = false, exactSearch = false;
+let smartSearch = false, exactSearch = false, visualSearch = false;
+function updateSearchOptions() {
+  let el = $('#searchOptions');
+  if (!el) {el = document.createElement('div');el.id = 'searchOptions';el.className = 'hint';$('#chips').after(el);}
+  el.hidden = !query || ['books','live'].includes(chip) || query.startsWith('#');
+  el.innerHTML = `<span>${visualSearch ? '文字与画面搜索' : chip === 'notes' ? '文字搜索：随记、语音和图片文字' : '文字搜索：标题、简介、标签、字幕'}</span> <button class="link" onclick="visualSearch=!visualSearch;refresh()">${visualSearch?'只看文字结果':chip === 'notes' ? '补充图片结果（较慢）' : '补充画面结果（较慢）'}</button>`;
+}
+let restoringNavigation = false;
+function saveNavigation(push = false) {
+  if (restoringNavigation) return;
+  const url = new URL(location.href);
+  for (const [k,v] of Object.entries({tab: chip === 'all' ? '' : chip, q: query, sort: videoSort === 'added' ? '' : videoSort,
+                                    live: chip === 'live' ? liveTab : '', status: chip === 'live' && liveStatus !== 'all' ? liveStatus : ''})) {
+    if (v) url.searchParams.set(k,v); else url.searchParams.delete(k);
+  }
+  if (url.href === location.href) return;
+  history.replaceState({...history.state, scrollY: window.scrollY}, '', location.href);
+  history[push ? 'pushState' : 'replaceState']({...history.state, scrollY: 0}, '', url);
+}
+function restoreNavigation() {
+  const p = new URLSearchParams(location.search);
+  query = p.get('q') || ''; $('#search').value = query;
+  videoSort = ['published','added','title','author'].includes(p.get('sort')) ? p.get('sort') : 'added';
+  const tab = p.get('tab') || 'all';
+  chip = ['all','notes','books','live','subs','active','failed','device',...Object.keys(FOLDERS),...Object.keys(LIBS)].includes(tab) || /^sub:\d+$/.test(tab) ? tab : 'all';
+  liveTab = ['highlight','topic','sources','recordings','calibration'].includes(p.get('live')) ? p.get('live') : 'highlight';
+  liveStatus = Object.hasOwn(LV_STATES, p.get('status')) ? p.get('status') : 'all';
+  smartSearch = false; lastBody = '';
+}
+window.addEventListener('popstate', async () => {
+  restoringNavigation = true; restoreNavigation();
+  const y = history.state?.scrollY || 0;
+  await refresh(); if (chip === 'live') loadLive();
+  if (history.state?.reader && !rd.id) openReader(history.state.reader);
+  window.scrollTo(0,y); restoringNavigation = false;
+});
 function looksLikeSentence(t) { return !/^[#＃]/.test(t) && t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
   const t = $("#search").value.trim();
   exactSearch = false;
-  searchTimer = setTimeout(() => { query = t; smartSearch = looksLikeSentence(t); refresh(); }, looksLikeSentence(t) ? 900 : 250);
+  searchTimer = setTimeout(() => { query = t; visualSearch = false; smartSearch = looksLikeSentence(t); saveNavigation(); refresh(); }, looksLikeSentence(t) ? 900 : 250);
 };
 function searchExact() { exactSearch = true; lastBody = ""; refresh(); }
 
+window.addEventListener("DOMContentLoaded", () => {
+restoreNavigation(); render();
 refresh().then(() => {
   // a link to a book (#book=12) opens it; so does reloading the page while reading
   const m = /^#book=(\d+)$/.exec(location.hash);
   if (m) openReader(+m[1]);
   sendTimings();
+});
 });
 // How long opening the page took on this device, step by step (in the web log): finding the Pi, getting the
 // page, first paint, the list shown
@@ -3837,7 +4113,7 @@ function sendTimings() {
     const listed = performance.now();
     const n = performance.getEntriesByType("navigation")[0] || {}, r = x => Math.round(x || 0);
     const paint = Object.fromEntries(performance.getEntriesByType("paint").map(p => [p.name, r(p.startTime)]));
-    const fetches = performance.getEntriesByType("resource").filter(e => /\/api\/jobs|pixel\.woff2/.test(e.name))
+    const fetches = performance.getEntriesByType("resource").filter(e => /\/api\/(?:jobs|live)|pixel\.woff2/.test(e.name))
       .map(e => `${e.name.replace(location.origin, "")} ${r(e.startTime)}+${r(e.duration)}ms ${r(e.transferSize / 1024)}KB`);
     navigator.sendBeacon("/api/timings", JSON.stringify({
       host: location.host, redirect: r(n.redirectEnd - n.redirectStart), dns: r(n.domainLookupEnd - n.domainLookupStart),
@@ -3849,5 +4125,6 @@ refreshCacheIndex();
 // over https (from outside) the page itself is kept too, so cached books open without the Pi
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
+<script src="/static/live.js?v=20261019-management-v1"></script>
 </body>
 </html>

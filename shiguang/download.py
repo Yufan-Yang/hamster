@@ -5,6 +5,7 @@ import requests
 import subprocess
 import time
 import urllib.parse
+from html.parser import HTMLParser
 from .core import (CHROMIUM, COOKIES, Cancelled, FORMAT_SORT, STATE, UA, cancel_requested, check_cancel, heavy_slot, human, update)
 
 
@@ -210,6 +211,44 @@ def media_in_page(html_text, base):
     return players, others
 
 
+def lazy_dplayer_media(html_text, base, session):
+    """Resolve the public play-url API used by this DPlayer placeholder plugin."""
+    if '/usr/plugins/DPlayer/assets/player.js' not in html_text:
+        return []
+
+    class Players(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.players = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            video = attrs.get('data-video-id') or ''
+            index = attrs.get('data-player-index') or '0'
+            if ('dplayer' in (attrs.get('class') or '').split() and
+                    re.fullmatch(r'[0-9]+', video) and re.fullmatch(r'[0-9]+', index)):
+                self.players.append((video, index))
+
+    parser = Players()
+    parser.feed(html_text)
+    media = []
+    for video, index in list(dict.fromkeys(parser.players))[:10]:
+        endpoint = urllib.parse.urljoin(base, f'/play-url/{video}.json?i={index}')
+        try:
+            response = session.get(endpoint, headers={'Referer': base, 'User-Agent': UA}, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            data = data.get('data') if isinstance(data, dict) and data.get('code') == 0 else None
+            url = data.get('url') if isinstance(data, dict) else None
+            if isinstance(url, str) and url.strip():
+                url = urllib.parse.urljoin(response.url, url)
+                if urllib.parse.urlsplit(url).scheme in ('http', 'https'):
+                    media.append(url)
+        except (requests.RequestException, ValueError):
+            continue
+    return dedupe_media(media)
+
+
 AD_HOSTS = re.compile(r"doubleclick|googlesyndication|googleads|adservice|adsystem|imasdk|moatads|criteo|taboola")
 
 
@@ -239,6 +278,25 @@ CF_BLOCKED = ("这个网站开了 Cloudflare 人机验证，拾光的下载器�
 CF_TITLE = re.compile(r"^(Just a moment|Attention Required|请稍候|請稍候)", re.I)
 
 
+def activate_player_placeholders(page):
+    """Click visible player controls, scrolling lazy players into view first."""
+    clicked = False
+    for frame in page.frames:
+        try:
+            controls = frame.query_selector_all(
+                '.dplayer[data-video-id], .dplayer-start, .vjs-big-play-button, .jw-icon-display')
+            for control in controls[:10]:
+                try:
+                    if control.is_visible():
+                        control.click(timeout=3000)
+                        clicked = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return clicked
+
+
 def sniff_page(job_id, url):
     """Find the video on a page yt-dlp doesn't know. Fast path: the player config in the page's HTML
     (no browser). Otherwise open it in headless Chromium, start playback and catch the media requests.
@@ -246,18 +304,19 @@ def sniff_page(job_id, url):
     update(job_id, stage="looking for the video on the page")
     challenged = False
     try:
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
-        challenged = r.headers.get("cf-mitigated") == "challenge"
-        players, _ = media_in_page(r.text, r.url)
-        media = dedupe_media(players)
-        if media:
-            import html as htmllib
-            m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.S | re.I)
-            title = htmllib.unescape(m.group(1)).strip() if m else ""
-            cookie_file = STATE / f"cookies-{job_id}.txt"
-            write_cookie_file(cookie_file, [{"domain": c.domain, "path": c.path, "secure": c.secure,
-                                             "expires": c.expires, "name": c.name, "value": c.value} for c in r.cookies])
-            return {"media_urls": media[:10], "title": title, "cookiefile": str(cookie_file)}
+        with requests.Session() as session:
+            r = session.get(url, headers={"User-Agent": UA}, timeout=30)
+            challenged = r.headers.get("cf-mitigated") == "challenge"
+            players, _ = media_in_page(r.text, r.url)
+            media = dedupe_media(players) or lazy_dplayer_media(r.text, r.url, session)
+            if media:
+                import html as htmllib
+                m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.S | re.I)
+                title = htmllib.unescape(m.group(1)).strip() if m else ""
+                cookie_file = STATE / f"cookies-{job_id}.txt"
+                write_cookie_file(cookie_file, [{"domain": c.domain, "path": c.path, "secure": c.secure,
+                                                 "expires": c.expires, "name": c.name, "value": c.value} for c in session.cookies])
+                return {"media_urls": media[:10], "title": title, "cookiefile": str(cookie_file)}
     except requests.RequestException:
         pass
     from playwright.sync_api import sync_playwright
@@ -298,15 +357,15 @@ def sniff_page(job_id, url):
                     pass
             # Many players only load the stream after a click on the player
             try:
-                box = None
-                for v in page.query_selector_all("video, iframe"):
-                    b = v.bounding_box()
-                    if b and b["width"] > 200 and (not box or b["width"] * b["height"] > box["width"] * box["height"]):
-                        box = b
-                if box:
-                    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                else:
-                    page.mouse.click(640, 400)
+                if not activate_player_placeholders(page):
+                    player = None
+                    area = 0
+                    for v in page.query_selector_all("video, iframe"):
+                        b = v.bounding_box()
+                        if b and b["width"] > 200 and b["width"] * b["height"] > area:
+                            player, area = v, b["width"] * b["height"]
+                    if player:
+                        player.click(timeout=3000)
             except Exception:
                 pass
             page.wait_for_timeout(6000)

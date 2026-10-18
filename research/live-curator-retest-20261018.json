@@ -1,0 +1,441 @@
+[
+  {
+    "source": "勇哥餐饮原创",
+    "count": 8,
+    "valid_count": 8,
+    "spearman_with_age_adjusted_views": 0.31,
+    "videos": [
+      {
+        "bvid": "BV1rLYy62EeQ",
+        "title": "60万开中式茶馆！环境很美 年轻人却不来！一天只卖300块！",
+        "published": 1789423920,
+        "duration": 898,
+        "views": 42841,
+        "likes": 574,
+        "favorites": 65,
+        "score": 76.8,
+        "dimensions": {
+          "id": 0,
+          "topic": 84,
+          "traffic": 78,
+          "fun": 67,
+          "completeness": 91,
+          "actual_clip": true,
+          "reason": "60万园林茶馆、日销约300元与“环境好却没人来”的反差很具体，面向餐饮创业受众有强诊断需求。主播从成本、位置、客群、产品到推广完整盘账并给出调整方向；中段较长、重复看环境，戏剧性主要来自经营困境而非表达本身。"
+        },
+        "age_days": 33.3
+      },
+      {
+        "bvid": "BV1eSYC6eEvS",
+        "title": "单亲妈妈负债10W开卤味！结果每天都亏钱！勇哥：免费教你技术，美团给你出设备！",
+        "published": 1789365600,
+        "duration": 1393,
+        "views": 21564,
+        "likes": 351,
+        "favorites": 36,
+        "score": 83.8,
+        "dimensions": {
+          "id": 1,
+          "topic": 89,
+          "traffic": 88,
+          "fun": 73,
+          "completeness": 94,
+          "actual_clip": true,
+          "reason": "单亲妈妈负债、菜场搬迁后卤味店下滑，再到是否转早餐，是受众高度关心且有明确决策点的话题。标题中的免费教学和设备支持在正文后段有对应内容，具有人物处境、算账、现场看商圈和明确方案，讨论与分享动机都强；但前半段街区勘察较长。"
+        },
+        "age_days": 34.0
+      },
+      {
+        "bvid": "BV1izYr6YEZc",
+        "title": "板前爆炒+日式啤酒 厨师表演炒菜！勇哥：你来个䮻啊！",
+        "published": 1789350377,
+        "duration": 788,
+        "views": 14487,
+        "likes": 255,
+        "favorites": 43,
+        "score": 70.4,
+        "dimensions": {
+          "id": 2,
+          "topic": 66,
+          "traffic": 70,
+          "fun": 76,
+          "completeness": 87,
+          "actual_clip": true,
+          "reason": "“板前爆炒+日式啤酒”概念有新鲜感，主播连续追问卖点、客群和推广，最后揭示创业者几乎没想清楚，形成一定反差和吐槽感。具体经营信息完整，但可执行的正向信息增量有限，核心结论偏重复：先想清楚产品与推广再开。"
+        },
+        "age_days": 34.2
+      },
+      {
+        "bvid": "BV1X5Ye6iEuL",
+        "title": "负债开麻辣烫！刚开业4天就懵了！勇哥:看人拉s钩子痒",
+        "published": 1789337580,
+        "duration": 1189,
+        "views": 37549,
+        "likes": 528,
+        "favorites": 76,
+        "score": 83.7,
+        "dimensions": {
+          "id": 3,
+          "topic": 82,
+          "traffic": 86,
+          "fun": 83,
+          "completeness": 93,
+          "actual_clip": true,
+          "reason": "开业4天、负债9万、日亏约400元的即时危机，以及“围炉麻辣烫只是形式、缺少氛围和流量能力”的诊断，切中本频道受众的常见误区。标题钩子在正文有充分支撑，现场顾客观察和一个月试错期限让故事推进清楚；表达冲突感强，但部分训话与重复压缩后会更利落。"
+        },
+        "age_days": 34.3
+      },
+      {
+        "bvid": "BV1i2Ye6yESN",
+        "title": "销售被顾客反销售！接盘倒闭烧烤店月亏1万5！",
+        "published": 1789289258,
+        "duration": 767,
+        "views": 19389,
+        "likes": 365,
+        "favorites": 38,
+        "score": 82.0,
+        "dimensions": {
+          "id": 4,
+          "topic": 80,
+          "traffic": 85,
+          "fun": 81,
+          "completeness": 90,
+          "actual_clip": true,
+          "reason": "餐饮SaaS销售反被客户“销售”了一家倒闭烧烤店，是很强且少见的反转开头。后续用月亏约1.5万、低入住率商圈和接手旧招牌的风险支撑标题，故事完整、适合评论“接盘能不能做”；具体改造方案相对简略，且部分吸引力依赖这层身份反转。"
+        },
+        "age_days": 34.9
+      },
+      {
+        "bvid": "BV1zBYa6GEEQ",
+        "title": "20万开肉酱米线，把小伙心气都亏没了！说话有气无力的  @勇哥餐饮原创",
+        "published": 1789277876,
+        "duration": 692,
+        "views": 21732,
+        "likes": 393,
+        "favorites": 47,
+        "score": 70.3,
+        "dimensions": {
+          "id": 5,
+          "topic": 75,
+          "traffic": 72,
+          "fun": 63,
+          "completeness": 88,
+          "actual_clip": true,
+          "reason": "20万投入、日亏约300元的肉酱米线店，问题落在产品、商圈匹配与经营者状态，餐饮受众能看懂且有现实参考。标题的“心气都亏没了”与转写中的低沉状态基本一致，但主体是常规盘账与劝转品，缺少更鲜明的现场反转或独特方法，因此传播驱动力中等。"
+        },
+        "age_days": 35.0
+      },
+      {
+        "bvid": "BV1fcYe6LEaL",
+        "title": "33万开鸭掌王火锅鸡 日亏1千！勇哥：卖啥的？",
+        "published": 1789267119,
+        "duration": 1008,
+        "views": 19442,
+        "likes": 351,
+        "favorites": 34,
+        "score": 77.4,
+        "dimensions": {
+          "id": 6,
+          "topic": 83,
+          "traffic": 79,
+          "fun": 69,
+          "completeness": 92,
+          "actual_clip": true,
+          "reason": "33万投入、日亏约1000元，同时菜单塞入火锅鸡、烤鱼、鸭掌火锅等多个大单品，问题非常具体。主播用“顾客两个人到底怎么选”解释菜单逻辑和低复购，信息增量扎实；标题对应正文，但开头算账、反复追问和长菜单讨论拖慢节奏。"
+        },
+        "age_days": 35.1
+      },
+      {
+        "bvid": "BV1w8YX6uEaW",
+        "title": "美女投50万 在回民区开烧鸟店！月亏1万6怎么办？  @勇哥餐饮原创",
+        "published": 1789250580,
+        "duration": 838,
+        "views": 23763,
+        "likes": 417,
+        "favorites": 55,
+        "score": 79.2,
+        "dimensions": {
+          "id": 7,
+          "topic": 86,
+          "traffic": 82,
+          "fun": 68,
+          "completeness": 94,
+          "actual_clip": true,
+          "reason": "50万烧鸟店在旅游区/回民区、停车受限且月亏约1.6万，具有清晰且少见的选址与品类冲突。后半段从套餐、美团点评、种草到直播转化给出连贯运营链条，完整度很高；标题的“美女”本身不增加正文价值，真正的观看点是第二家店失速与具体补救路径。"
+        },
+        "age_days": 35.3
+      }
+    ],
+    "provisional": true,
+    "note": "Exploratory retest on previously examined samples; not held out. Excludes non-source clips from correlation. No rubric activation or claim of predicting views.",
+    "prompt_sha256": "921ee7877c98c833a48cf2fa3f44f5f7c47d023869cc7e66575a02039d3ccac6",
+    "evaluated_on": "2026-10-18",
+    "held_out": false
+  },
+  {
+    "source": "新西兰三妹Summer",
+    "count": 8,
+    "valid_count": 8,
+    "spearman_with_age_adjusted_views": 0.048,
+    "videos": [
+      {
+        "bvid": "BV1yapw6BEvF",
+        "title": "蔡康永事件持续发酵，郭正亮：他和小S完全不一样，有点对不起零跑汽车，蒋万安团队不如三妹团队。",
+        "published": 1791286457,
+        "duration": 443,
+        "views": 335775,
+        "likes": 1660,
+        "favorites": 515,
+        "score": 76.9,
+        "dimensions": {
+          "id": 0,
+          "topic": "78",
+          "traffic": "80",
+          "fun": "72",
+          "completeness": "82",
+          "actual_clip": true,
+          "reason": "围绕蔡康永涉政治活动后的商业与舆论后果展开，且有“与小S不同”“对品牌合作方失礼”“竞选团队不如三妹团队”等多个具体讨论点。开头即承接事件，人物关系和反差足够带评论；后段团队调侃也有轻松感。内容较完整，但对事件细节多为嘉宾个人判断，不能视作已核实事实。"
+        },
+        "age_days": 11.8
+      },
+      {
+        "bvid": "BV1qyp36HE8P",
+        "title": "沈逸：既然今天三妹问到 那我就回答一下这个郭正亮不敢答的问题",
+        "published": 1791709200,
+        "duration": 420,
+        "views": 44055,
+        "likes": 416,
+        "favorites": 77,
+        "score": 73.9,
+        "dimensions": {
+          "id": 1,
+          "topic": "71",
+          "traffic": "82",
+          "fun": "68",
+          "completeness": "76",
+          "actual_clip": true,
+          "reason": "以观众向郭正亮提出、沈逸接答的两岸战争后果问题为核心，具体且高冲突，开头问题本身有强停留动力。表达中的反讽、夸张画面和立场碰撞能带来讨论，但后半转入另一位政治人物的评价，主线略散。涉及现实政治与未来情境的说法应视为发言者观点。"
+        },
+        "age_days": 6.9
+      },
+      {
+        "bvid": "BV1n5H46PEEi",
+        "title": "关于星巴克在新疆开店。来自沈逸教授与三妹观察",
+        "published": 1791198958,
+        "duration": 340,
+        "views": 25714,
+        "likes": 439,
+        "favorites": 63,
+        "score": 74.0,
+        "dimensions": {
+          "id": 2,
+          "topic": "75",
+          "traffic": "74",
+          "fun": "73",
+          "completeness": "86",
+          "actual_clip": true,
+          "reason": "从“星巴克在新疆开店且排队”切入，解释嘉宾所认为的美国强迫劳动叙事动机，并延伸到殖民历史与商业竞争，信息链条清楚。品牌、地区和反差有点击点，嘉宾的口语化比喻提升可看性；但论证立场鲜明且部分指控未在转写中独立证实，应作为其观点呈现。"
+        },
+        "age_days": 12.8
+      },
+      {
+        "bvid": "BV12qau6DEgs",
+        "title": "沈逸亮哥三妹笑谈川普国宴名单首桌皆AI巨头!未来管控AI发展何去何从",
+        "published": 1790311922,
+        "duration": 479,
+        "views": 20636,
+        "likes": 263,
+        "favorites": 79,
+        "score": 78.2,
+        "dimensions": {
+          "id": 3,
+          "topic": "84",
+          "traffic": "76",
+          "fun": "74",
+          "completeness": "88",
+          "actual_clip": true,
+          "reason": "把AI巨头国宴照片、中美科技互依、AI误判风险和国际治理机制连成一个明确议题，对关注该频道国际政治与科技的人有较高信息增量。开头“首桌皆AI巨头”有画面和反差，中段用“超级智能体攻击基础设施”的情境增强代入。篇幅长、术语和转写错词较多，普通观众理解门槛偏高；具体政策判断属嘉宾观点。"
+        },
+        "age_days": 23.0
+      },
+      {
+        "bvid": "BV1Uvpk6ZEPe",
+        "title": "三妹和郭正亮感叹革命的不易，佩服中国共产党在非常困难的情况，还把革命搞成功了。",
+        "published": 1791939615,
+        "duration": 134,
+        "views": 1778,
+        "likes": 32,
+        "favorites": 13,
+        "score": 52.6,
+        "dimensions": {
+          "id": 4,
+          "topic": "56",
+          "traffic": "48",
+          "fun": "54",
+          "completeness": "58",
+          "actual_clip": true,
+          "reason": "是围绕两岸实力变化与“以拖待变”的短段感叹，受众能听懂核心立场，但具体新增信息有限，较像既有政治观点的延伸。标题的“革命不易”与正文重点不完全一致，且转写在论点展开前后都有跳跃。亮点主要是两人互相接话的熟人感。"
+        },
+        "age_days": 4.2
+      },
+      {
+        "bvid": "BV1BBHx6ZEDW",
+        "title": "三妹惊讶小野猫也在天安门站岗，沈逸：这就是它的家啊",
+        "published": 1791208905,
+        "duration": 188,
+        "views": 8059,
+        "likes": 113,
+        "favorites": 13,
+        "score": 77.8,
+        "dimensions": {
+          "id": 5,
+          "topic": "69",
+          "traffic": "78",
+          "fun": "88",
+          "completeness": "91",
+          "actual_clip": true,
+          "reason": "一只在执勤官兵脚边熟睡的猫，是低门槛、强画面且适合分享的话题；嘉宾从猫的肢体语言推演“把士兵当宠物”，生动、有连续笑点和代入感。由视频现象、行为解释到个人救助野猫经历，结尾回到安全感，结构完整。相较频道核心公共议题，话题优先级较轻。"
+        },
+        "age_days": 12.7
+      },
+      {
+        "bvid": "BV1hKa96DEVr",
+        "title": "沈逸讲述一段中国鲜为人知的历史，三妹脸色变得凝重起来",
+        "published": 1791278880,
+        "duration": 186,
+        "views": 10626,
+        "likes": 200,
+        "favorites": 63,
+        "score": 75.1,
+        "dimensions": {
+          "id": 6,
+          "topic": "81",
+          "traffic": "77",
+          "fun": "66",
+          "completeness": "64",
+          "actual_clip": true,
+          "reason": "“中国曾面对苏联核打击威胁、如何用核试验传递战略信号”的历史叙事有稀缺感和悬念，开头就抛出强冲突，适合对国际史和安全议题感兴趣的受众。周恩来宣布核试验成功的细节增加故事性。转写在关键时间线和结尾明显截断，若干史实只由发言者声称“可查”，完整性和可核实性不足。"
+        },
+        "age_days": 11.8
+      },
+      {
+        "bvid": "BV1tdHZ6iEaM",
+        "title": "沈逸和三妹蔡康永敢做就别解释，后果得自己扛！",
+        "published": 1791251987,
+        "duration": 263,
+        "views": 11575,
+        "likes": 123,
+        "favorites": 18,
+        "score": 78.5,
+        "dimensions": {
+          "id": 7,
+          "topic": "76",
+          "traffic": "84",
+          "fun": "75",
+          "completeness": "67",
+          "actual_clip": true,
+          "reason": "以“蔡康永敢做就承担后果”为尖锐主张，开头直接、情绪与人物冲突都强，容易引发赞反双方评论。品牌终止合作的说法和“别解释”的反讽构成明确看点，和本频道受众关心的两岸政治人物话题高度相关。后段转入另一问题时明显卡顿、未收束；有关个人、企业行动及名单的断言应视为嘉宾观点，未独立查证。"
+        },
+        "age_days": 12.2
+      }
+    ],
+    "provisional": true,
+    "note": "Exploratory retest on previously examined samples; not held out. Excludes non-source clips from correlation. No rubric activation or claim of predicting views.",
+    "prompt_sha256": "921ee7877c98c833a48cf2fa3f44f5f7c47d023869cc7e66575a02039d3ccac6",
+    "evaluated_on": "2026-10-18",
+    "held_out": false
+  },
+  {
+    "source": "峰哥亡命天涯",
+    "count": 4,
+    "valid_count": 3,
+    "spearman_with_age_adjusted_views": -0.5,
+    "videos": [
+      {
+        "bvid": "BV1mwpW6BEwB",
+        "title": "峰哥尊界刹车踏板踩断直播太敢说了直播回放切片",
+        "published": 1791501712,
+        "duration": 154,
+        "views": 69768,
+        "likes": 1074,
+        "favorites": 117,
+        "score": 77.0,
+        "dimensions": {
+          "id": 0,
+          "topic": 78,
+          "traffic": 82,
+          "fun": 70,
+          "completeness": 72,
+          "actual_clip": true,
+          "reason": "围绕“尊界刹车踏板疑似踩断”这一具体安全争议展开，汽车受众容易关心，也有品牌、质量与驾驶风险的讨论空间。开头的反常设问和“敢不敢说”的自我收束有停留点；后半段把观点落到高速、山路急刹的后果，代入感较强。其称尚未细看原视频、无法判断是真实测评还是黑公关，因此相关判断应视为其个人直播观点。话题中途多次转到车内展示和封号玩笑，结尾未形成明确结论，完整性中上。"
+        },
+        "age_days": 9.3
+      },
+      {
+        "bvid": "BV1chnM62EdW",
+        "title": "峰哥：“我只交最低档次社保，把高额社保留给有需要的人！！”",
+        "published": 1792290000,
+        "duration": 123,
+        "views": 13865,
+        "likes": 351,
+        "favorites": 64,
+        "score": 65.5,
+        "dimensions": {
+          "id": 1,
+          "topic": 72,
+          "traffic": 68,
+          "fun": 55,
+          "completeness": 83,
+          "actual_clip": true,
+          "reason": "“已缴够年限、按较低基数交社保、其余资金自行养老”的个人选择具体清楚，能引出社保、公平感和个人理财的讨论。标题的“留给有需要的人”有一定价值观反差，但转写中主体是较平缓的解释，缺少强冲突或新信息支撑，传播驱动力一般。内容从缴纳年限、缴费基数到理由和资金去向交代完整；社保规则及其观点均未独立查证，应作为其个人说法理解。"
+        },
+        "age_days": 0.1
+      },
+      {
+        "bvid": "BV13Vpp6GER8",
+        "title": "峰哥怒骂皮子耍大牌不理女生！想剥夺皮哥切片权！",
+        "published": 1791739342,
+        "duration": 355,
+        "views": 8858,
+        "likes": 129,
+        "favorites": 25,
+        "score": 58.8,
+        "dimensions": {
+          "id": 2,
+          "topic": 42,
+          "traffic": 65,
+          "fun": 71,
+          "completeness": 75,
+          "actual_clip": false,
+          "reason": "内容是另一位主播以戏剧化口吻转述“峰哥”要求其加女粉微信、否则取消切片权的说法，人物关系和“加一个给一百”的反差有评论与玩笑空间。但它不是目标主播本人直播切片，且转述是否属实无法由文本确认，不能作为该主播切片口味证据。叙述反复铺陈同一笑点，信息增量有限，不过起因、威胁、求助和收束基本齐全。"
+        },
+        "age_days": 6.5
+      },
+      {
+        "bvid": "BV1zdnT66E49",
+        "title": "峰哥和王自如一起吃饭互关，峰哥以前没少说好兄弟坏话！",
+        "published": 1792291364,
+        "duration": 404,
+        "views": 3715,
+        "likes": 47,
+        "favorites": 20,
+        "score": 77.1,
+        "dimensions": {
+          "id": 3,
+          "topic": 81,
+          "traffic": 76,
+          "fun": 74,
+          "completeness": 86,
+          "actual_clip": true,
+          "reason": "以王自如的职业选择、商业测评可信度及网友对相关传闻的讨论为主线，属于该受众熟悉且有明确争议面的科技圈人物话题。前段尖锐评价和后段对“无证据传闻不应言之凿凿”的反转，提供了观点碰撞及评论动机；自嘲式类比也增加生动度。内容从评价、回应传闻到谈其回归测评，脉络完整。对王自如经历、任职和私人传闻等均应视为主播观点或转述，不能据此当作已确认事实。"
+        },
+        "age_days": 0.1
+      }
+    ],
+    "provisional": true,
+    "note": "Exploratory retest on previously examined samples; not held out. Excludes non-source clips from correlation. No rubric activation or claim of predicting views.",
+    "prompt_sha256": "921ee7877c98c833a48cf2fa3f44f5f7c47d023869cc7e66575a02039d3ccac6",
+    "evaluated_on": "2026-10-18",
+    "held_out": false
+  }
+]

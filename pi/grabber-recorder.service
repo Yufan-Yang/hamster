@@ -1,0 +1,19 @@
+[Unit]
+Description=拾光 continuous live recording
+After=network-online.target grabber-worker.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/media /mnt/disk1
+
+[Service]
+User=grabber
+Group=media
+UMask=0002
+EnvironmentFile=-/etc/grabber.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/grabber/venv/bin/python /opt/grabber/grabber.py recorder
+Nice=5
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

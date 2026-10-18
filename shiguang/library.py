@@ -584,6 +584,22 @@ def media_info(job, days=7):
             for i, m in enumerate(playable(job))]
 
 
+def card_media(jobs):
+    """Card metadata comes from the database; opening a video checks files and subtitles."""
+    paths = list(dict.fromkeys(f for job in jobs if job['status'] == 'done' for f in job['files']
+                              if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT))
+    probes = {}
+    for start in range(0, len(paths), 500):
+        batch = paths[start:start + 500]
+        for row in q("SELECT path, duration, vcodec FROM probes WHERE path IN (" + ','.join('?' for _ in batch) + ")", batch):
+            probes[row['path']] = row
+    return {job['id']: [{'name': Path(f).stem, 'audio': Path(f).suffix.lower() in AUDIO_EXT,
+                         'duration': probes[f]['duration'] if f in probes else 0,
+                         'vcodec': probes[f]['vcodec'] if f in probes else None}
+                        for f in job['files'] if Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT]
+            for job in jobs if job['status'] == 'done'}
+
+
 def bilingual_pair(m):
     """(Chinese, original) subtitle files of a media item, if it has both: English, else another language a Chinese
     track was translated from."""

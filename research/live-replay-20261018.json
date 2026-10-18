@@ -1,0 +1,119 @@
+{
+  "completed": true,
+  "reference_bvid": "BV1qcnM6TEpj",
+  "elapsed_seconds": 120.5,
+  "events": [
+    {
+      "event": "closed-segment",
+      "seq": 0,
+      "offset": 0.0,
+      "duration": 60.1,
+      "recording_continues": true
+    },
+    {
+      "event": "curator-start",
+      "recording_continues": true,
+      "available_until": 60.1
+    },
+    {
+      "event": "closed-segment",
+      "seq": 1,
+      "offset": 60.1,
+      "duration": 60.093,
+      "recording_continues": false
+    },
+    {
+      "event": "closed-segment",
+      "seq": 2,
+      "offset": 120.1,
+      "duration": 30.225,
+      "recording_continues": false
+    },
+    {
+      "event": "curator-start",
+      "recording_continues": false,
+      "available_until": 150.325
+    }
+  ],
+  "recording_count": 3,
+  "curator_windows": [
+    {
+      "until": 60.1,
+      "highlights": [
+        {
+          "start": 0.04,
+          "end": 11.76,
+          "titles": [
+            "没钱上舰，B友买两块酱牛肉把峰哥听哭了",
+            "一份88元酱牛肉，峰哥当场落泪",
+            "没钱办舰长的B友，送了峰哥两块酱牛肉"
+          ],
+          "summary": "峰哥讲述一位没钱开舰长的观众，花88元买了两块酱牛肉并希望加微信，令他当场落泪。",
+          "tags": [
+            "峰哥",
+            "B友",
+            "直播故事",
+            "真情实感"
+          ],
+          "scores": {
+            "topic": 76,
+            "traffic": 81,
+            "fun": 68,
+            "completeness": 88
+          },
+          "confidence": 0.91,
+          "reason": "礼物金额与“没钱上舰”的反差明确，前几秒便进入情绪结果，普通观众也能理解；结尾已交代完整。趣味主要来自真实情感与反差，不是搞笑段子。"
+        }
+      ],
+      "topic_changes": []
+    },
+    {
+      "until": 150.325,
+      "highlights": [
+        {
+          "start": 62.13,
+          "end": 101.99,
+          "titles": [
+            "峰哥解释：为什么不组织B友和大老板一起吃饭",
+            "学生粉丝带着酱牛肉来见我，我更不能组饭局了",
+            "人均千元饭局和学生粉丝，怎么坐到一桌？"
+          ],
+          "summary": "峰哥借学生粉丝坐一小时公交、带酱牛肉来见自己的经历，解释不同经济条件的观众很难舒适地参加同一场高消费聚餐，因此不组织线下饭局。",
+          "tags": [
+            "粉丝故事",
+            "线下聚会",
+            "主播回应",
+            "消费差异"
+          ],
+          "scores": {
+            "topic": 84,
+            "traffic": 81,
+            "fun": 73,
+            "completeness": 88
+          },
+          "confidence": 0.91,
+          "reason": "有明确问题“为什么不组织饭局”，随后用人均千元消费与学生粉丝的具体对照给出完整结论；“怎么坐一桌吃饭”具备强讨论点和停留驱动力。素材从前段故事中段切入，但本段自身已保留核心例子、冲突和结论。"
+        }
+      ],
+      "topic_changes": []
+    }
+  ],
+  "clip_count": 1,
+  "clips": [
+    {
+      "title": "峰哥回应美食粉希望到上海请B友吃饭，并讲述此前不同经济条件观众聚餐的经历。",
+      "lane": "topic",
+      "start": 0.0,
+      "end": 150.325,
+      "score": 0.0
+    }
+  ],
+  "rendered_seconds": 150.333333,
+  "rendered_bytes": 36289243,
+  "limitations": [
+    "Local HTTP replay at 4x speed, not a Bilibili live CDN connection.",
+    "Reuses the reference transcript; live ASR was not rerun in this replay.",
+    "No upload account or actual publication."
+  ],
+  "production_library_untouched": true
+}

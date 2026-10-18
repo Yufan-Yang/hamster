@@ -28,4 +28,4 @@ cause, how to tell it apart, what to do. Add an entry when a diagnosis turned ou
 
 ## AI calls
 
-- DeepSeek 402: balance used up (top up). Claude worker paused: the Mac is gaming or out of quota; falls back on its own.
+- DeepSeek 402: balance used up (top up). Codex worker paused: its subscription quota is exhausted; falls back on its own.

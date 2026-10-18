@@ -15,8 +15,12 @@ from pathlib import Path
 
 APP = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
 REAL_DB = os.environ.get("REAL_DB", "/mnt/disk1/.grabber/grabber.db")
-tmp = Path(tempfile.mkdtemp(prefix="shiguang-test-"))
-sqlite3.connect(REAL_DB).backup(sqlite3.connect(tmp / "grabber.db"))  # a consistent copy, WAL included
+tmp = Path(tempfile.mkdtemp(prefix="shiguang-test-", dir=os.environ.get("QA_TMPDIR", "/var/tmp")))
+snapshot = sqlite3.connect(REAL_DB)
+snapshot.execute('BEGIN')
+snapshot.execute('SELECT count(*) FROM sqlite_master').fetchone()
+snapshot.backup(sqlite3.connect(tmp / "grabber.db"))
+snapshot.close()  # a consistent copy, WAL included
 os.environ.update(DB_PATH=str(tmp / "grabber.db"), STATE_DIR=os.environ.get("STATE_DIR", "/var/lib/grabber"),
                   PLEX_TOKEN="", LLM_API_KEY="", COMPUTE_TOKEN="test-token")
 os.environ["STATE_DIR"] = str(tmp)
@@ -28,7 +32,7 @@ import shiguang  # noqa: E402
 
 G.init_db()
 G.setup_app()
-# the copy holds whatever the real board was doing (the Mac's tasks, requests for Claude): out of the way, so the
+# the copy holds whatever the real board was doing (the Mac's tasks, requests for Codex): out of the way, so the
 # board tests see only their own tasks
 G.q("DELETE FROM tasks WHERE kind='llm'")
 G.q("UPDATE tasks SET state='done', worker=NULL, lease_until=NULL WHERE state IN ('queued', 'running')")
@@ -97,6 +101,73 @@ def whole_category():
 
 
 check("a category chip gets all of its videos", whole_category)
+
+
+def grouped_pagination():
+    """A series counts once, includes older members, and doesn't crowd unrelated videos out of a page."""
+    import json
+    import secrets
+
+    owner = secrets.token_hex(16)
+    client = app.test_client()
+    client.set_cookie(G.DEVICE_COOKIE, owner)
+    titles = ["三国杀up锐评新三国290：正文", "独立视频甲", "三国杀up锐评新三国re07：正文",
+              "三国杀up锐评新三国289：正文", "三国杀up锐评新三国re06：正文", "独立视频乙"]
+    ids = []
+    try:
+        for i, title in enumerate(titles):
+            url = f"https://example.test/grouped/{owner}/{i}"
+            G.q("INSERT INTO jobs (url, owner, status, title, analysis, created, updated) "
+                "VALUES (?, ?, 'done', ?, ?, ?, ?)",
+                (url, owner, title, json.dumps({"library": "Videos", "title": title}), 1000 - i, 1000 - i))
+            ids.append(G.q("SELECT id FROM jobs WHERE url=?", (url,), one=True)["id"])
+
+        def page(limit, grouped=True):
+            response = client.get(f"/api/jobs?limit={limit}" + ("&grouped=1" if grouped else ""))
+            assert response.status_code == 200
+            return response.get_json()
+
+        first = page(1)
+        assert {j["id"] for j in first["jobs"]} == {ids[0], ids[3]}, first
+        assert first["more"]
+        assert {j["series"] for j in first["jobs"]} == {"三国杀up锐评新三国"}
+        second = page(2)
+        assert {j["id"] for j in second["jobs"]} == {ids[0], ids[1], ids[3]}
+        third = page(3)
+        assert {j["id"] for j in third["jobs"]} == set(ids[:-1])
+        assert third["more"]
+        last = page(4)
+        assert {j["id"] for j in last["jobs"]} == set(ids) and not last["more"]
+        assert len(page(1, grouped=False)["jobs"]) == 1
+        for sort in ("published", "title", "author"):
+            data = client.get(f"/api/jobs?grouped=1&limit=1&sort={sort}").get_json()
+            names = {j["series"] for j in data["jobs"]}
+            assert len(names) == 1
+            if next(iter(names)):
+                assert len(data["jobs"]) == 2
+        # A resume card outside the page stays in 继续观看 rather than becoming a partial grid entry.
+        G.q("INSERT INTO watch (owner, job_id, pos, dur, done, updated) VALUES (?, ?, 30, 120, 0, ?)",
+            (owner, ids[4], time.time()))
+        data = page(1)
+        assert {j["id"] for j in data["jobs"] if not j.get("resume_only")} == {ids[0], ids[3]}
+        assert next(j for j in data["jobs"] if j["id"] == ids[4])["resume_only"]
+        # Hidden items cannot consume a page slot or cause a spurious 加载更多.
+        for jid in (ids[0], ids[3]):
+            G.q("UPDATE jobs SET analysis=json_set(analysis, '$.tags', json('[\"pagination-hidden\"]')) WHERE id=?", (jid,))
+        G.q("INSERT INTO privacy (owner, tags) VALUES (?, ?)", (owner, '["pagination-hidden"]'))
+        data = page(1)
+        assert {j["id"] for j in data["jobs"] if not j.get("resume_only")} == {ids[1]}
+        assert not page(3)["more"]
+        explicit = client.get(f"/api/jobs?grouped=1&limit=1&ids={ids[5]}").get_json()
+        assert ids[5] in {j["id"] for j in explicit["jobs"]}
+    finally:
+        G.q("DELETE FROM watch WHERE owner=?", (owner,))
+        G.q("DELETE FROM privacy WHERE owner=?", (owner,))
+        G.q("DELETE FROM jobs WHERE owner=?", (owner,))
+        G.q("DELETE FROM devices WHERE id=?", (owner,))
+
+
+check("series count once in pagination, with complete membership and privacy", grouped_pagination)
 
 
 def note_fields():
@@ -398,35 +469,34 @@ check("e-book links go to the shelf", lambda: (G.is_book_url("https://x.org/a/b.
 
 
 
-def claude_round_trip():
-    """An AI request goes on the board for the Mac's Claude; a stand-in Mac answers it (Claude, then Codex standing in
-    for it, logged as such); nobody taking it means None."""
+def codex_round_trip():
+    """A board request is answered and logged as Codex; no claimant means DeepSeek fallback."""
     import threading
 
     def mac(engine):
         for _ in range(100):
-            t = G.claim_task("test-claude", ["llm", "claude"])
+            t = G.claim_task("test-codex", ["llm", "codex"])
             if t:
-                assert t["payload"]["model"] == G.CLAUDE_MODEL_LIGHT and t["payload"]["effort"] == "low", t["payload"]
-                G.complete_task(t["id"], "test-claude", {"out": {"cause": "测试", "fix": "无"}, "engine": engine,
+                assert t["payload"]["effort"] == "low", t["payload"]
+                G.complete_task(t["id"], "test-codex", {"out": {"cause": "测试", "fix": "无"}, "engine": engine,
                                                           "tokens_in": 10, "tokens_out": 5})
                 return
             time.sleep(0.2)
-    for engine in ("claude", "codex"):
+    for engine in ("codex",):
         th = threading.Thread(target=mac, args=(engine,))
         th.start()
         started, usage = time.time(), {}
-        out = G.claude_json("sys", "user", {"cause": "string", "fix": "string"}, "failure", None, usage, False)
+        out = G.codex_json("sys", "user", {"cause": "string", "fix": "string"}, "failure", None, usage, False)
         th.join()
         assert out == {"cause": "测试", "fix": "无"}, out
         assert usage.get(engine) == 1, usage
         assert G.q("SELECT 1 FROM usage WHERE kind=? AND purpose='failure' AND ts >= ?", (engine, started), one=True)
-    shiguang.llm.CLAUDE_CLAIM_WAIT = 2
-    assert G.claude_json("sys", "user", {"x": "string"}, "failure", None, {}, False) is None
+    shiguang.llm.CODEX_CLAIM_WAIT = 2
+    assert G.codex_json("sys", "user", {"x": "string"}, "failure", None, {}, False) is None
     assert not G.q("SELECT 1 FROM tasks WHERE kind='llm'", one=True), "requests left on the board"
 
 
-check("AI request through the Mac's Claude / Codex, and the fallback when nobody takes it", claude_round_trip)
+check("AI request through the Mac's Codex, and the fallback when nobody takes it", codex_round_trip)
 
 
 def shortcut_from_outside():
@@ -791,6 +861,12 @@ check("自修复: failures become incidents, a fix retries them", heal_incidents
 
 import runpy  # noqa: E402
 runpy.run_path(str(APP / "tests" / "classification_tags.py"))["run"](check)
+runpy.run_path(str(APP / "tests" / "live_clipping.py"))["run"](check)
+runpy.run_path(str(APP / "tests" / "live_topic_review.py"))["run"](check)
+runpy.run_path(str(APP / "tests" / "download_players.py"))["run"](check)
+runpy.run_path(str(APP / "tests" / "live_management.py"))["run"](check)
+
+runpy.run_path(str(APP / "tests" / "usability.py"))["run"](check)
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("\nall good" if not failures else f"\n{len(failures)} failed: {', '.join(failures)}")

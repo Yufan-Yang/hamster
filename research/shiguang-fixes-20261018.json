@@ -1,0 +1,489 @@
+{
+  "date": "2026-10-18",
+  "scope": "当前功能修复和易用性改进，不包含未来新增功能规划",
+  "deployment": {
+    "status": "已部署并通过线上核验",
+    "services": {
+      "grabber": "active",
+      "grabber-worker": "active"
+    },
+    "browser": {
+      "page_status": 200,
+      "capabilities": {
+        "secure": false,
+        "microphone": false,
+        "serviceWorker": false,
+        "voiceButton": "导入语音"
+      },
+      "http_cache_explanation": true,
+      "live_url_reload": true,
+      "errors": []
+    },
+    "calibration": {
+      "schema_version": 20,
+      "sources": [
+        {
+          "id": 1,
+          "name": "勇哥餐饮原创",
+          "enabled": true,
+          "latest_version": 2,
+          "active_latest": false,
+          "protocol": 4,
+          "validated": false,
+          "rejection_reasons": [
+            "验证区分率不足 75%",
+            "独立验证不如默认标准",
+            "排列检验未通过（p=0.343，要求 ≤0.1）",
+            "近 30 天验证样本只有 2 个，至少需要 4 个"
+          ],
+          "task": {
+            "id": 21034,
+            "kind": "live_refine",
+            "state": "running",
+            "error": "",
+            "progress": null
+          },
+          "ready": 16
+        },
+        {
+          "id": 2,
+          "name": "新西兰三妹Summer",
+          "enabled": true,
+          "latest_version": 5,
+          "active_latest": false,
+          "protocol": 4,
+          "validated": false,
+          "rejection_reasons": [
+            "验证区分率不足 75%",
+            "排列检验未通过（p=0.829，要求 ≤0.1）"
+          ],
+          "task": {
+            "id": 21035,
+            "kind": "live_refine",
+            "state": "queued",
+            "error": "",
+            "progress": null
+          },
+          "ready": 33
+        },
+        {
+          "id": 3,
+          "name": "峰哥亡命天涯",
+          "enabled": true,
+          "latest_version": 5,
+          "active_latest": false,
+          "protocol": 4,
+          "validated": false,
+          "rejection_reasons": [
+            "验证区分率不足 75%",
+            "独立验证不如默认标准",
+            "排列检验未通过（p=0.557，要求 ≤0.1）"
+          ],
+          "task": {
+            "id": 21036,
+            "kind": "live_refine",
+            "state": "queued",
+            "error": "",
+            "progress": null
+          },
+          "ready": 34
+        },
+        {
+          "id": 4,
+          "name": "183的冯予希律师",
+          "enabled": true,
+          "latest_version": null,
+          "active_latest": false,
+          "protocol": null,
+          "validated": null,
+          "rejection_reasons": null,
+          "task": {
+            "id": 20413,
+            "kind": "live_calibrate",
+            "state": "queued",
+            "error": "",
+            "progress": null
+          },
+          "ready": 0
+        },
+        {
+          "id": 5,
+          "name": "郭庆梓律师",
+          "enabled": true,
+          "latest_version": 1,
+          "active_latest": false,
+          "protocol": 3,
+          "validated": false,
+          "rejection_reasons": null,
+          "task": {
+            "id": 21038,
+            "kind": "live_refine",
+            "state": "queued",
+            "error": "",
+            "progress": null
+          },
+          "ready": 22
+        },
+        {
+          "id": 6,
+          "name": "真的想不出名儿了",
+          "enabled": true,
+          "latest_version": null,
+          "active_latest": false,
+          "protocol": null,
+          "validated": null,
+          "rejection_reasons": null,
+          "task": {
+            "id": 20778,
+            "kind": "live_calibrate",
+            "state": "running",
+            "error": "",
+            "progress": null
+          },
+          "ready": 0
+        }
+      ]
+    },
+    "retried_collections": [
+      20413,
+      20778
+    ]
+  },
+  "summary": {
+    "baseline_open": 15,
+    "previously_fixed": 1,
+    "current_fixes": 15,
+    "smoke_groups": 68,
+    "browser_scenarios": 13,
+    "responsive_layouts": 16
+  },
+  "findings": [
+    {
+      "id": "SG-01",
+      "title": "切换账号后，旧账号草稿和离线图书仍然可见",
+      "status": "复测通过",
+      "resolution": "草稿、离线进度和 IndexedDB 按服务端确认的账号／设备隔离。切换账号清空私有视图；在途缓存绑定原账号，旧请求响应失效，旧账号写入由服务端拒绝。未标记归属的旧缓存不自动分配，原始存储保留。",
+      "verification": "真实浏览器：账号切换、断网、在途缓存；API：旧账号写入409"
+    },
+    {
+      "id": "SG-02",
+      "title": "自动投稿执行前未重新检查校准资格",
+      "status": "复测通过",
+      "resolution": "自动投稿在入队和真正执行前使用相同资格检查：当前有效校准、开关、追踪启用、成片版本、评分和待复核状态。资格失效时退回待确认，不调用上传器。",
+      "verification": "集成回归：排队后校准失效，上传器调用次数0"
+    },
+    {
+      "id": "SG-03",
+      "title": "修改切片内容后仍沿用旧评分，并请求自动投稿",
+      "status": "复测通过",
+      "resolution": "手动新增或编辑切片标记为待人工确认；改时间同时清空旧评分。制作完成不会自动投稿，明确点击投稿后解除待复核标记。",
+      "verification": "集成回归：手动切片和改时间不触发自动投稿"
+    },
+    {
+      "id": "SG-04",
+      "title": "修改追踪直播间会改变历史切片来源，并保留旧主播规则",
+      "status": "复测通过",
+      "resolution": "直播场次保存原主播、UID 和原直播间快照；投稿简介和预览使用该快照。更换主播需新增追踪，接口拒绝覆盖原追踪的直播间。",
+      "verification": "集成回归：换直播间409；改别名后简介保留原主播"
+    },
+    {
+      "id": "SG-05",
+      "title": "添加下载失败会清空输入，断网时没有有效错误提示",
+      "status": "复测通过",
+      "resolution": "添加下载失败保留输入，提交期间禁用按钮，连接失败给出可重试提示，成功后才清空输入。",
+      "verification": "真实浏览器：添加网络失败、输入及按钮恢复"
+    },
+    {
+      "id": "SG-06",
+      "title": "慢搜索的旧响应会覆盖新搜索",
+      "status": "复测通过",
+      "resolution": "列表、随记、书架和直播加载均增加请求／账号代次校验；过期响应不能覆盖新查询或新账号。",
+      "verification": "真实浏览器：旧查询后完成仍保留新结果；账号响应隔离"
+    },
+    {
+      "id": "SG-07",
+      "title": "普通关键词搜索较慢，首屏数据量偏大",
+      "status": "复测通过",
+      "resolution": "普通关键词默认搜文字，图片／画面检索通过按钮补充；随记文字检索同样避免加载画面向量。首屏使用精简列表，点开视频再获取完整简介和要点。353 个条目的响应体从 1,319,718 字节降至 580,291 字节。",
+      "verification": "真实数据计时；真实浏览器：精简卡片打开后简介和要点完整"
+    },
+    {
+      "id": "SG-08",
+      "title": "短视频过早标为已看完",
+      "status": "复测通过",
+      "resolution": "前后端统一在剩余时间不超过 min(30秒,总时长5%) 时认定看完；20 秒短片观看 5 秒不会看完，19 秒才算完成；5 秒起可继续观看。",
+      "verification": "API：20秒短片在5/18.9/19秒的完成状态；前端一致"
+    },
+    {
+      "id": "SG-09",
+      "title": "直播校准不是只差评分，部分主播缺乏有效样本",
+      "status": "复测通过",
+      "resolution": "校准页显示独立样本数与缺口，支持补 BV 号和切片 UP 空间，排除／恢复样本、重试下载、只用已有样本重新验证。小批量也会保存积累；搜索失败时仍处理手动补充样本。至少 12 个独立近期样本和独立验证门槛继续执行；修复流程不等于所有主播规则已经通过验证。",
+      "verification": "集成：单样本落库、补充链接绕过搜索故障、排除和权限；浏览器入口"
+    },
+    {
+      "id": "SG-10",
+      "title": "校准详情会被 5 秒轮询收起",
+      "status": "复测通过",
+      "resolution": "直播面板无变化时不重建 DOM；有变化时按来源／场次标识恢复展开状态，保持滚动，输入控件操作期间暂缓替换。",
+      "verification": "真实浏览器：轮询数据变化后仍展开"
+    },
+    {
+      "id": "SG-11",
+      "title": "进度接口缺少完整的数值校验",
+      "status": "复测通过",
+      "resolution": "进度、时间、页码和比例在写库及统计前校验类型、有限值与边界，异常返回 400；拒绝旧账号待同步进度。累计离线秒数按原规则限制到每次 300 秒。",
+      "verification": "API：NaN、Infinity、负数、非法页码／时间、秒数及归属"
+    },
+    {
+      "id": "SG-12",
+      "title": "失败任务缺乏直接恢复入口",
+      "status": "复测通过",
+      "resolution": "失败计算任务增加归属校验后的直接重试，校准支持仅重试验证；制作永久失败回写切片失败状态，重试会恢复制作状态。投稿结果不确定继续走核实流程。网络失败有有界自动重试，模型编号格式有一次修复。",
+      "verification": "集成：本人重试成功、他人拒绝、制作失败回写及重排、投稿任务拒绝通用重试"
+    },
+    {
+      "id": "SG-13",
+      "title": "刷新和浏览器导航不保留当前栏目",
+      "status": "复测通过",
+      "resolution": "栏目、搜索、视频排序、直播子页和状态筛选写入 URL，支持刷新、浏览器返回和滚动恢复；阅读器保留原有图书历史入口。",
+      "verification": "真实浏览器：栏目／子页刷新、返回、搜索和排序恢复"
+    },
+    {
+      "id": "SG-14",
+      "title": "弹窗键盘关闭行为不一致，手机操作目标较小",
+      "status": "复测通过",
+      "resolution": "统一弹窗 Esc、对话框标签、Tab 焦点约束及关闭后焦点恢复。主要按钮／筛选和操作链接至少 40px 高；四种宽度、四个栏目均无横向文档溢出。",
+      "verification": "真实浏览器：Esc、焦点循环／恢复；360/390/768/1440px"
+    },
+    {
+      "id": "SG-15",
+      "title": "局域网 HTTP 下不能直接录音，离线重开页面能力也受限",
+      "status": "复测通过",
+      "resolution": "HTTP 下入口显示“导入语音”，可直接选择录音文件。缓存页说明保持已打开页面与安全地址离线重开的区别，配置安全地址时提供入口。安全上下文缓存完整网页、直播脚本、字体和阅读器，已验证断网刷新后打开缓存 TXT。浏览器对普通 LAN HTTP 的麦克风／Service Worker 限制依然存在。",
+      "verification": "真实浏览器：断网重开页面及缓存正文；部署后 LAN 能力检查"
+    },
+    {
+      "id": "SG-16",
+      "title": "新校准把字符串编号误判为无效",
+      "status": "复测通过",
+      "resolution": "模型样本编号接受等价字符串／整数表示，继续拒绝未知、重复、非整数或布尔编号，并提供一次格式修复；前一轮已部署，本轮继续回归通过。",
+      "verification": "集成：编号归一、白名单、批次隔离、格式修复"
+    }
+  ],
+  "browser": {
+    "results": [
+      {
+        "case": "real UI registration and verified storage owner",
+        "passed": true,
+        "seconds": 1.09,
+        "detail": null
+      },
+      {
+        "case": "cached TXT reading offline and reconnect",
+        "passed": true,
+        "seconds": 0.62,
+        "detail": null
+      },
+      {
+        "case": "logout, second account, draft/pending/cache/reader isolation",
+        "passed": true,
+        "seconds": 1.11,
+        "detail": null
+      },
+      {
+        "case": "in-flight cache writes remain bound to the original account",
+        "passed": true,
+        "seconds": 0.18,
+        "detail": {
+          "new_owner_cache": 0
+        }
+      },
+      {
+        "case": "failed add preserves input and restores the submit button",
+        "passed": true,
+        "seconds": 0.56,
+        "detail": null
+      },
+      {
+        "case": "old search responses cannot overwrite newer results",
+        "passed": true,
+        "seconds": 0.06,
+        "detail": "new"
+      },
+      {
+        "case": "reload, URL state, browser back and search/sort restoration",
+        "passed": true,
+        "seconds": 2.64,
+        "detail": null
+      },
+      {
+        "case": "compact cards fetch full summary and key points when opened",
+        "passed": true,
+        "seconds": 0.52,
+        "detail": null
+      },
+      {
+        "case": "live details survive changed polling; sample controls and Escape",
+        "passed": true,
+        "seconds": 0.56,
+        "detail": null
+      },
+      {
+        "case": "modal Escape, dialog labels, focus trap and focus restoration",
+        "passed": true,
+        "seconds": 1.22,
+        "detail": null
+      },
+      {
+        "case": "four responsive widths, four workspaces, touch targets and no horizontal overflow",
+        "passed": true,
+        "seconds": 3.2,
+        "detail": [
+          {
+            "width": 360,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          }
+        ]
+      },
+      {
+        "case": "secure-context app shell reloads offline with live scripts cached",
+        "passed": true,
+        "seconds": 1.91,
+        "detail": null
+      },
+      {
+        "case": "no unhandled browser JavaScript errors",
+        "passed": true,
+        "seconds": 0.0,
+        "detail": null
+      }
+    ],
+    "browser_errors": []
+  },
+  "performance": [
+    {
+      "query": "?grouped=1",
+      "seconds": 0.897,
+      "bytes": 1319718,
+      "jobs": 353
+    },
+    {
+      "query": "?grouped=1&compact=1",
+      "seconds": 0.567,
+      "bytes": 580291,
+      "jobs": 353
+    },
+    {
+      "query": "?q=伊朗&compact=1",
+      "seconds": 1.527,
+      "bytes": 412666,
+      "jobs": 120
+    },
+    {
+      "query": "?q=伊朗&compact=1",
+      "seconds": 1.208,
+      "bytes": 412666,
+      "jobs": 120
+    }
+  ],
+  "limits": [
+    "样本数量与独立验证结果决定专属规则是否启用，本轮没有强制启用不合格规则。",
+    "普通局域网 HTTP 的直接录音和离线重开限制来自浏览器；文件导入、已打开页面读缓存和安全地址离线重开流程均已处理。",
+    "未进行真实 B站投稿和新的扫码授权。主播开播后的整场录制／转写／投稿，以及 DLNA 电视和真实 iPhone Safari 仍未做实机验收。",
+    "旧版未标记归属的浏览器缓存不能安全地自动归给当前账号，需要重新缓存；原书架和已保存的随记不变，旧浏览器存储保留。"
+  ],
+  "planning": "按用户要求，到未来功能规划前停止。"
+}

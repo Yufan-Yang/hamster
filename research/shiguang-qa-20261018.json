@@ -1,0 +1,1367 @@
+{
+  "date": "2026-10-18",
+  "scope": "已部署的拾光当前版本",
+  "summary": {
+    "smoke_passed": 65,
+    "read_api_samples": 27,
+    "routes_inventoried": 105,
+    "browser_checks": 42,
+    "supplemental_checks": 8,
+    "download_checks": 8,
+    "responsive_widths": [
+      360,
+      390,
+      768,
+      1440
+    ],
+    "findings_open": 15,
+    "findings_fixed": 1
+  },
+  "coverage": [
+    {
+      "module": "片库/剧集",
+      "status": "通过",
+      "detail": "列表、分类、分页、完整剧集成员、排序、标签/拼音/字幕搜索、继续观看；发现搜索性能、乱序响应及短片完成判断问题。"
+    },
+    {
+      "module": "下载/文件管理",
+      "status": "通过",
+      "detail": "真实本地 HTTP 视频下载 → ffmpeg 检查/整理 → 入库/可播放；同账号去重、跨账号共享、取消/重试、移除列表、共享保护和删除测试文件。AI 分类使用确定性替身。"
+    },
+    {
+      "module": "追更/B站分P",
+      "status": "回归通过",
+      "detail": "频道识别、筛选条件、412 重试、分P展开及账号隔离；线上外站大批量抓取未实际触发。"
+    },
+    {
+      "module": "播放器/字幕",
+      "status": "通过",
+      "detail": "真实媒体 Range 响应、字幕解析、默认关闭及手动选择、章节定位、播放记录；格式和字幕任务路由通过回归。"
+    },
+    {
+      "module": "电视投屏",
+      "status": "交互回归通过",
+      "detail": "7 组真实 Chromium 流程：设备保持、章节/定位、远端时钟、失败重试、快速切换和停止。实际 LAN 发现设备为 0，未验证真机播放。"
+    },
+    {
+      "module": "随记",
+      "status": "通过并发现问题",
+      "detail": "文本、附件、编辑/删除、搜索和隐私回归；新建草稿与切换栏目保留正常，但切换账号仍残留旧草稿。"
+    },
+    {
+      "module": "书架/阅读器",
+      "status": "通过并发现问题",
+      "detail": "EPUB、TXT 导入回归；真实 EPUB 正文、250 个目录入口；13.36MB 书籍缓存、断网读取、进度暂存与恢复联网同步均通过。账号间缓存未隔离。"
+    },
+    {
+      "module": "问拾光/AI",
+      "status": "基础与失败恢复通过",
+      "detail": "问答接口回归、引用入口；模拟 503 能显示原因并恢复按钮；Mac Codex 和 DeepSeek 实际评分调用通过。未对问答质量做系统人工评测。"
+    },
+    {
+      "module": "每周总结/资源使用",
+      "status": "通过",
+      "detail": "统计、隐私过滤、日期边界、设备/队列/流量页面与接口可用；弹窗 Esc、失败任务操作入口需优化。"
+    },
+    {
+      "module": "账号/隐私/分享",
+      "status": "回归通过并发现问题",
+      "detail": "注册、登录、权限、外网管理员限制、密钥、设备移除、分享单浏览器限制等通过；账号切换的本地草稿/缓存隔离失败。"
+    },
+    {
+      "module": "直播切片",
+      "status": "模拟流程通过，真实可用性仍受阻",
+      "detail": "录制分段、ASR缺口、两条选题线、跨段成片、原直播来源简介、投稿结果不确定的保护通过回归；另复现三处投稿/来源状态问题。实际主播均未开播，未进行真实投稿。"
+    },
+    {
+      "module": "任务板/计算节点/自修复",
+      "status": "回归与在线健康通过",
+      "detail": "发布、领取、续租、过期归还、结果保存、自修复事故记录；Pi 与 Mac 工作进程在线。AI 7 项本地通过，Pi 复跑 4 通过/3 因环境跳过；VPN 4 项通过。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "SG-01",
+      "priority": "P1",
+      "title": "切换账号后，旧账号草稿和离线图书仍然可见",
+      "impact": "共用设备上，新账号能看到前一个账号未发送的草稿；断网后可读取之前缓存的私有图书。",
+      "reproduce": "在数据库副本中缓存原账号图书并写草稿 → 退出 → 注册另一账号。新账号在线书架为 0 本，断网后出现原账号缓存的 1 本；草稿也仍在。",
+      "recommendation": "草稿、缓存、离线进度按账号命名空间保存；退出账号时清空内存视图，离线读取先核对缓存归属。",
+      "source": "index.html:1649,2549,2772,3884",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-02",
+      "priority": "P1",
+      "title": "自动投稿执行前未重新检查校准资格",
+      "impact": "任务排队后，校准失效或协议升级时，旧任务仍可进入投稿组件。",
+      "reproduce": "独立测试库中构造已排队的自动投稿，当前 active_rubric={}；执行 upload 后投稿函数仍被调用。投稿函数使用模拟替身，无真实投稿。",
+      "recommendation": "在实际投稿执行、修改 state=uploading 之前，再检查当前校准、来源和版本资格；失效时退回待审核。",
+      "source": "shiguang/live.py:149,366",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-03",
+      "priority": "P1",
+      "title": "修改切片内容后仍沿用旧评分，并请求自动投稿",
+      "impact": "编辑起止时间改变了视频内容，原评分已不再对应新内容；重新制作完成后仍走 automatic=True。",
+      "reproduce": "原片段 0–30 秒评分 90；编辑为 100–150 秒后评分未清除，after_render 仍调用 queue_upload(automatic=True)。仅模拟投稿队列，无真实投稿。",
+      "recommendation": "内容范围变化时清除旧评分并强制待审核；重新评分或用户明确投稿之后才进入自动流程。",
+      "source": "shiguang/live.py:312,496",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-04",
+      "priority": "P1",
+      "title": "修改追踪直播间会改变历史切片来源，并保留旧主播规则",
+      "impact": "旧素材可能带上另一直播间的来源，旧评分口味也会被应用到另一主播。",
+      "reproduce": "测试库中把房间 111 改为 222，接口返回 200；原场次切片的简介变为房间 222，原主播的专属规则仍 active。",
+      "recommendation": "每场直播保存原主播、房间号、来源链接快照；存在历史数据时，更换房间应新增追踪并重新校准。",
+      "source": "shiguang/live.py:77,442; shiguang/live_bilibili.py:181",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-05",
+      "priority": "P2",
+      "title": "添加下载失败会清空输入，断网时没有有效错误提示",
+      "impact": "用户必须重新找链接；断网后页面只留下空输入框。",
+      "reproduce": "真实 Chromium 中提交测试链接，分别模拟 HTTP 400 和网络断开；两种情况下输入都变为空，断网还出现未处理 Failed to fetch。",
+      "recommendation": "提交成功后再清空输入；失败保留内容，恢复按钮并显示可重试的错误。",
+      "source": "index.html:2486,2510",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-06",
+      "priority": "P2",
+      "title": "慢搜索的旧响应会覆盖新搜索",
+      "impact": "搜索框显示新关键词，但列表可能属于之前的关键词。",
+      "reproduce": "浏览器中令 old 查询延迟 1.2 秒，50ms 后发出 new 查询；最终 query=new，state.qa_query=old。",
+      "recommendation": "给请求增加序号或 AbortController，只接收当前查询和筛选条件对应的响应。",
+      "source": "index.html:1157,3890",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-07",
+      "priority": "P2",
+      "title": "普通关键词搜索较慢，首屏数据量偏大",
+      "impact": "快速连续搜索容易积压请求；移动网络上列表等待较明显。",
+      "reproduce": "基于真实数据库副本，中文关键词首次 11732ms、再次 3592ms；标签搜索 181ms。首页原始 JSON 1319656 字节、353 个任务；一次浏览器传输约 228KB（已压缩）。测试期间服务未停止，耗时为当次测量而非长期基准。",
+      "recommendation": "先快速返回标题、标签、字幕命中，再异步补画面结果；增加文字索引和查询缓存，按需返回列表字段。",
+      "source": "shiguang/web.py:793; shiguang/search.py:192,209",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-08",
+      "priority": "P2",
+      "title": "短视频过早标为已看完",
+      "impact": "20 秒短视频只看四分之一就退出继续观看列表，也会影响每周总结。",
+      "reproduce": "测试库向 /api/watch/1000 提交 pos=5,dur=20,secs=5，返回 done=true。",
+      "recommendation": "完成门槛按短片比例计算，避免统一套用“剩余 30 秒以内”；前后端使用同一规则。",
+      "source": "shiguang/web.py:1835; index.html:1970",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-09",
+      "priority": "P2",
+      "title": "直播校准不是只差评分，部分主播缺乏有效样本",
+      "impact": "6 个追踪在本轮快照中均无启用规则；其中两个主播最近只有 1、2 个匹配样本，无法达到 12 个独立样本门槛。",
+      "reproduce": "线上只读审计：另四个主播有 15、22、26、21 个独立参考素材；这些仍需本人来源核验、近期性及独立验证，不能把“有素材”当作已通过校准。",
+      "recommendation": "增加手动补充参考 BV、指定切片账号与排除错误样本入口；显示缺少的数量和下一步；将待样本、格式失败和验证未通过分开。",
+      "source": "shiguang/live_calibration.py:112,178,422; static/live.js:55",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-10",
+      "priority": "P2",
+      "title": "校准详情会被 5 秒轮询收起",
+      "impact": "用户展开长规则和证据后，尚未读完就被刷新关闭。",
+      "reproduce": "真实 Chromium 加载现有界面代码：展开校准 details，执行一次 loadLive 后 open 从 true 变为 false；正常轮询每 5 秒调用。",
+      "recommendation": "保存展开状态，或局部更新变化内容；阅读证据时保持滚动位置和焦点。",
+      "source": "static/live.js:14,21,55",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-11",
+      "priority": "P2",
+      "title": "进度接口缺少完整的数值校验",
+      "impact": "异常数据可能产生 500，甚至写入无法正常处理的观看记录。",
+      "reproduce": "书籍 progress 提交 secs=\"abc\" 返回 500；观看 pos=\"NaN\" 返回 200，随后正常更新该记录可触发 None/float 异常；负数也未统一拒绝。均在测试库复现。",
+      "recommendation": "统一验证所有数值为有限数，并限制合理范围；非法输入返回 400，写库前完成验证。",
+      "source": "shiguang/web.py:1671,1835",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-12",
+      "priority": "P2",
+      "title": "失败任务缺乏直接恢复入口",
+      "impact": "用户看到错误后不清楚如何继续；相同目标的失败任务不会因普通 publish 自动重排。",
+      "reproduce": "资源使用页最近失败只展示文字；校准页的按钮会重新收集样本。相同 live-refine 签名 publish 未 force 时保留 failed。",
+      "recommendation": "失败卡片显示“重试此步骤”“补充样本”“查看详情”；区分可重试的模型格式/网络错误和需要新证据的验证失败。",
+      "source": "shiguang/board.py:103; static/live.js:55; index.html:3728",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-13",
+      "priority": "P3",
+      "title": "刷新和浏览器导航不保留当前栏目",
+      "impact": "在直播或书架工作时刷新会回到首页，难以分享或恢复当前工作位置。",
+      "reproduce": "真实 Chromium 进入直播栏目后刷新，URL 仍为 /，chip 恢复为 all；阅读器已有 #book 历史机制，其他栏目没有对应机制。",
+      "recommendation": "把栏目、子页、筛选和排序写入 URL；返回时恢复滚动位置。",
+      "source": "index.html:1002,2933,3887",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-14",
+      "priority": "P3",
+      "title": "弹窗键盘关闭行为不一致，手机操作目标较小",
+      "impact": "账号、添加等弹窗可以 Esc 关闭，但直播、资源、周报等不行；手机上部分按钮容易误触。",
+      "reproduce": "四种宽度均复现直播弹窗 Esc 后仍在；资源与周报同样不关闭。390px 屏幕首屏不同栏目存在 27–30 个高度不足 32px 的按钮/链接，无横向文档溢出。",
+      "recommendation": "统一弹窗关闭、焦点进入和焦点恢复；增大主要点击目标和相邻按钮间距。",
+      "source": "index.html:2271; static/live.js:75",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-15",
+      "priority": "P3",
+      "title": "局域网 HTTP 下不能直接录音，离线重开页面能力也受限",
+      "impact": "在家用 IP 地址访问时，用户看到语音和缓存入口，但浏览器能力与 HTTPS 地址不同。",
+      "reproduce": "Chromium 访问 http://192.168.3.200:8088：isSecureContext=false、navigator.mediaDevices 不存在、serviceWorker 不存在。页面已有录音文件替代入口。",
+      "recommendation": "在入口明确显示能力限制；统一使用可信 HTTPS 地址，或引导用户录音文件导入和已打开页面的离线阅读。",
+      "source": "index.html:1739,3923",
+      "status": "待修复"
+    },
+    {
+      "id": "SG-16",
+      "priority": "已修复",
+      "title": "新校准把字符串编号误判为无效",
+      "impact": "上一轮新增的严格类型检查导致四个校准任务失败。此问题由本次前序修改引入。",
+      "reproduce": "真实 Codex 对输入 [86,84,85,87] 返回 [\"86\",\"84\",\"85\",\"87\"]；修复后四个编号全部正确归一并通过。DeepSeek 同批整数编号亦可通过。",
+      "recommendation": "已部署 ID 归一、白名单核对和一次格式修复；仍拒绝未知、重复、非整数及布尔编号；四个失败任务已重排。是否启用规则仍以独立验证为准。",
+      "source": "shiguang/live_calibration.py:267,339,366; tests/live_clipping.py",
+      "status": "已修复并部署"
+    }
+  ],
+  "evidence": {
+    "api": [
+      {
+        "url": "/",
+        "status": 200,
+        "ms": 6.7,
+        "bytes": 256539
+      },
+      {
+        "url": "/api/jobs?grouped=1",
+        "status": 200,
+        "ms": 691.9,
+        "bytes": 1319656
+      },
+      {
+        "url": "/api/jobs?grouped=1&sort=title",
+        "status": 200,
+        "ms": 539.6,
+        "bytes": 1084568
+      },
+      {
+        "url": "/api/jobs?grouped=1&sort=author",
+        "status": 200,
+        "ms": 561.0,
+        "bytes": 1309922
+      },
+      {
+        "url": "/api/jobs?cat=TV",
+        "status": 200,
+        "ms": 378.2,
+        "bytes": 560700
+      },
+      {
+        "url": "/api/jobs?cat=Movies",
+        "status": 200,
+        "ms": 220.5,
+        "bytes": 3447
+      },
+      {
+        "url": "/api/jobs?q=%E4%BC%8A%E6%9C%97",
+        "status": 200,
+        "ms": 11732.4,
+        "bytes": 938505
+      },
+      {
+        "url": "/api/jobs?q=%E4%BC%8A%E6%9C%97",
+        "status": 200,
+        "ms": 3592.1,
+        "bytes": 938505
+      },
+      {
+        "url": "/api/jobs?q=%23%E6%96%B0%E9%97%BB",
+        "status": 200,
+        "ms": 180.8,
+        "bytes": 24761
+      },
+      {
+        "url": "/api/jobs?q=%E5%9C%A8%E4%B8%8A%E6%B5%B7%E6%97%85%E8%A1%8C&nl=1",
+        "status": 200,
+        "ms": 3524.0,
+        "bytes": 73184
+      },
+      {
+        "url": "/api/notes",
+        "status": 200,
+        "ms": 4.4,
+        "bytes": 4262
+      },
+      {
+        "url": "/api/notes?q=yanan",
+        "status": 200,
+        "ms": 606.4,
+        "bytes": 343
+      },
+      {
+        "url": "/api/books",
+        "status": 200,
+        "ms": 3.7,
+        "bytes": 1720
+      },
+      {
+        "url": "/api/books?q=%E4%B8%89",
+        "status": 200,
+        "ms": 159.7,
+        "bytes": 22583
+      },
+      {
+        "url": "/api/weekly",
+        "status": 200,
+        "ms": 230.0,
+        "bytes": 6888
+      },
+      {
+        "url": "/api/digests",
+        "status": 200,
+        "ms": 75.9,
+        "bytes": 15359
+      },
+      {
+        "url": "/api/usage?days=7",
+        "status": 200,
+        "ms": 65.8,
+        "bytes": 22047
+      },
+      {
+        "url": "/api/account",
+        "status": 200,
+        "ms": 31.9,
+        "bytes": 1248
+      },
+      {
+        "url": "/api/live",
+        "status": 200,
+        "ms": 23.5,
+        "bytes": 130157
+      },
+      {
+        "url": "/api/tasks",
+        "status": 200,
+        "ms": 37.9,
+        "bytes": 13467
+      },
+      {
+        "url": "/api/shares",
+        "status": 400,
+        "ms": 2.1,
+        "bytes": 17
+      },
+      {
+        "url": "/api/jobs?limit=0",
+        "status": 200,
+        "ms": 203.6,
+        "bytes": 27315
+      },
+      {
+        "url": "/api/notes?before=bad",
+        "status": 200,
+        "ms": 3.8,
+        "bytes": 4262
+      },
+      {
+        "url": "/api/usage?days=abc",
+        "status": 200,
+        "ms": 138.8,
+        "bytes": 26417
+      },
+      {
+        "url": "/api/books/2147483647",
+        "status": 404,
+        "ms": 2.9,
+        "bytes": 22
+      },
+      {
+        "url": "/api/points/2147483647",
+        "status": 404,
+        "ms": 2.2,
+        "bytes": 22
+      },
+      {
+        "url": "/api/similar/2147483647",
+        "status": 404,
+        "ms": 2.2,
+        "bytes": 22
+      }
+    ],
+    "inventory": {
+      "jobs": 852,
+      "subs": 6,
+      "notes": 8,
+      "books": 5,
+      "live_sources": [
+        {
+          "id": 6,
+          "name": "真的想不出名儿了",
+          "status": "offline",
+          "ready_refs": 0,
+          "independent_refs": 0,
+          "matched_last_search": 2,
+          "active_rubric": false,
+          "protocol": null,
+          "rejection_reasons": []
+        },
+        {
+          "id": 3,
+          "name": "峰哥亡命天涯",
+          "status": "offline",
+          "ready_refs": 34,
+          "independent_refs": 26,
+          "matched_last_search": 103,
+          "active_rubric": false,
+          "protocol": 3,
+          "rejection_reasons": []
+        },
+        {
+          "id": 5,
+          "name": "郭庆梓律师",
+          "status": "offline",
+          "ready_refs": 22,
+          "independent_refs": 21,
+          "matched_last_search": 77,
+          "active_rubric": false,
+          "protocol": 3,
+          "rejection_reasons": []
+        },
+        {
+          "id": 4,
+          "name": "183的冯予希律师",
+          "status": "offline",
+          "ready_refs": 0,
+          "independent_refs": 0,
+          "matched_last_search": 1,
+          "active_rubric": false,
+          "protocol": null,
+          "rejection_reasons": []
+        },
+        {
+          "id": 2,
+          "name": "新西兰三妹Summer",
+          "status": "offline",
+          "ready_refs": 33,
+          "independent_refs": 22,
+          "matched_last_search": 102,
+          "active_rubric": false,
+          "protocol": 3,
+          "rejection_reasons": []
+        },
+        {
+          "id": 1,
+          "name": "勇哥餐饮原创",
+          "status": "offline",
+          "ready_refs": 16,
+          "independent_refs": 15,
+          "matched_last_search": 59,
+          "active_rubric": false,
+          "protocol": 3,
+          "rejection_reasons": []
+        }
+      ],
+      "live_sessions": 0,
+      "live_clips": 0,
+      "tasks": 6066,
+      "seg": 613076,
+      "vec": 138848,
+      "job_states": [
+        {
+          "status": "cancelled",
+          "n": 112
+        },
+        {
+          "status": "done",
+          "n": 740
+        }
+      ]
+    },
+    "browser": [
+      {
+        "name": "initial_load",
+        "detail": {
+          "jobs_received": 353,
+          "errors": []
+        }
+      },
+      {
+        "name": "layout_all_1440",
+        "detail": {
+          "viewport": 1440,
+          "document": 1440,
+          "scrollHeight": 5692,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_subs_1440",
+        "detail": {
+          "viewport": 1440,
+          "document": 1440,
+          "scrollHeight": 1592,
+          "smallTargets": 34
+        }
+      },
+      {
+        "name": "layout_notes_1440",
+        "detail": {
+          "viewport": 1440,
+          "document": 1440,
+          "scrollHeight": 3370,
+          "smallTargets": 29
+        }
+      },
+      {
+        "name": "layout_books_1440",
+        "detail": {
+          "viewport": 1440,
+          "document": 1440,
+          "scrollHeight": 900,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_live_1440",
+        "detail": {
+          "viewport": 1440,
+          "document": 1440,
+          "scrollHeight": 900,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "add_sheet_1440",
+        "detail": {
+          "sheetTop": 216.40625,
+          "sheetBottom": 683.59375,
+          "height": 900,
+          "submitVisible": true
+        }
+      },
+      {
+        "name": "live_modal_escape_1440",
+        "detail": {
+          "active": "url",
+          "modal": true,
+          "remainsAfterEscape": true
+        }
+      },
+      {
+        "name": "layout_all_768",
+        "detail": {
+          "viewport": 768,
+          "document": 768,
+          "scrollHeight": 15024,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_subs_768",
+        "detail": {
+          "viewport": 768,
+          "document": 768,
+          "scrollHeight": 1592,
+          "smallTargets": 34
+        }
+      },
+      {
+        "name": "layout_notes_768",
+        "detail": {
+          "viewport": 768,
+          "document": 768,
+          "scrollHeight": 3370,
+          "smallTargets": 29
+        }
+      },
+      {
+        "name": "layout_books_768",
+        "detail": {
+          "viewport": 768,
+          "document": 768,
+          "scrollHeight": 1024,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_live_768",
+        "detail": {
+          "viewport": 768,
+          "document": 768,
+          "scrollHeight": 1024,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "add_sheet_768",
+        "detail": {
+          "sheetTop": 278.40625,
+          "sheetBottom": 745.59375,
+          "height": 1024,
+          "submitVisible": true
+        }
+      },
+      {
+        "name": "live_modal_escape_768",
+        "detail": {
+          "active": null,
+          "modal": true,
+          "remainsAfterEscape": true
+        }
+      },
+      {
+        "name": "layout_all_390",
+        "detail": {
+          "viewport": 390,
+          "document": 390,
+          "scrollHeight": 10402,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_subs_390",
+        "detail": {
+          "viewport": 390,
+          "document": 390,
+          "scrollHeight": 2031,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "layout_notes_390",
+        "detail": {
+          "viewport": 390,
+          "document": 390,
+          "scrollHeight": 3473,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "layout_books_390",
+        "detail": {
+          "viewport": 390,
+          "document": 390,
+          "scrollHeight": 844,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_live_390",
+        "detail": {
+          "viewport": 390,
+          "document": 390,
+          "scrollHeight": 844,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "add_sheet_390",
+        "detail": {
+          "sheetTop": 352.8125,
+          "sheetBottom": 844,
+          "height": 844,
+          "submitVisible": true
+        }
+      },
+      {
+        "name": "live_modal_escape_390",
+        "detail": {
+          "active": null,
+          "modal": true,
+          "remainsAfterEscape": true
+        }
+      },
+      {
+        "name": "layout_all_360",
+        "detail": {
+          "viewport": 360,
+          "document": 360,
+          "scrollHeight": 10043,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_subs_360",
+        "detail": {
+          "viewport": 360,
+          "document": 360,
+          "scrollHeight": 2257,
+          "smallTargets": 26
+        }
+      },
+      {
+        "name": "layout_notes_360",
+        "detail": {
+          "viewport": 360,
+          "document": 360,
+          "scrollHeight": 3478,
+          "smallTargets": 23
+        }
+      },
+      {
+        "name": "layout_books_360",
+        "detail": {
+          "viewport": 360,
+          "document": 360,
+          "scrollHeight": 876,
+          "smallTargets": 30
+        }
+      },
+      {
+        "name": "layout_live_360",
+        "detail": {
+          "viewport": 360,
+          "document": 360,
+          "scrollHeight": 740,
+          "smallTargets": 27
+        }
+      },
+      {
+        "name": "add_sheet_360",
+        "detail": {
+          "sheetTop": 200.8125,
+          "sheetBottom": 740,
+          "height": 740,
+          "submitVisible": true
+        }
+      },
+      {
+        "name": "live_modal_escape_360",
+        "detail": {
+          "active": null,
+          "modal": true,
+          "remainsAfterEscape": true
+        }
+      },
+      {
+        "name": "add_network_failure",
+        "detail": {
+          "inputAfterFailure": "",
+          "newErrors": [
+            "Failed to fetch"
+          ],
+          "toast": ""
+        }
+      },
+      {
+        "name": "add_api_failure",
+        "detail": {
+          "inputAfterFailure": "",
+          "toast": "测试：链接无法识别"
+        }
+      },
+      {
+        "name": "search_response_race",
+        "detail": {
+          "query": "new",
+          "responseQuery": "old"
+        }
+      },
+      {
+        "name": "note_draft_across_tabs",
+        "detail": {
+          "retained": true
+        }
+      },
+      {
+        "name": "tab_reload",
+        "detail": {
+          "url": "http://127.0.0.1:18088/",
+          "tabAfterReload": "all"
+        }
+      },
+      {
+        "name": "usage_open",
+        "detail": {
+          "visible": true,
+          "textLength": 4697
+        }
+      },
+      {
+        "name": "usage_escape",
+        "detail": {
+          "remainsVisible": true
+        }
+      },
+      {
+        "name": "weekly_open",
+        "detail": {
+          "visible": true,
+          "textLength": 688
+        }
+      },
+      {
+        "name": "weekly_escape",
+        "detail": {
+          "remainsVisible": true
+        }
+      },
+      {
+        "name": "ask_service_failure",
+        "detail": {
+          "text": "QA 模拟 AI 暂不可用",
+          "buttonEnabled": true
+        }
+      },
+      {
+        "name": "reader_open",
+        "detail": {
+          "visible": true,
+          "contentLength": 26948,
+          "format": "epub"
+        }
+      },
+      {
+        "name": "reader_toc",
+        "detail": {
+          "entries": 250
+        }
+      },
+      {
+        "name": "browser_errors_all",
+        "detail": [
+          "Failed to fetch"
+        ]
+      }
+    ],
+    "offline_and_accounts": [
+      {
+        "name": "mobile_reader",
+        "detail": {
+          "contentLength": 26948,
+          "overflow": false
+        }
+      },
+      {
+        "name": "cache_real_book",
+        "detail": {
+          "complete": true,
+          "size": 13360686
+        }
+      },
+      {
+        "name": "offline_books",
+        "detail": {
+          "offline": true,
+          "count": 1
+        }
+      },
+      {
+        "name": "offline_reader",
+        "detail": {
+          "contentLength": 26948,
+          "pending": 1
+        }
+      },
+      {
+        "name": "offline_progress_reconnect",
+        "detail": {
+          "pending": 0
+        }
+      },
+      {
+        "name": "register_in_copy",
+        "detail": {
+          "status": 200
+        }
+      },
+      {
+        "name": "draft_account_isolation",
+        "detail": {
+          "previousAccountDraftVisible": true
+        }
+      },
+      {
+        "name": "cached_book_account_isolation",
+        "detail": {
+          "user": "qa-account-switch",
+          "offline": true,
+          "count": 1,
+          "onlineOwnBookCount": 0
+        }
+      }
+    ],
+    "boundary": [
+      {
+        "case": "change_source_room_with_history",
+        "status": 200,
+        "old_clip_attribution": "原主播：另一主播\n原直播间：https://live.bilibili.com/222\n拾光切片 #1-v1",
+        "old_rubric_still_active": true
+      },
+      {
+        "case": "queued_automatic_upload_without_validated_rubric",
+        "active_rubric": {},
+        "publisher_was_called": true,
+        "result": {
+          "bvid": "QA-mock",
+          "aid": 1
+        }
+      },
+      {
+        "case": "edited_timestamps_auto_queue_after_render",
+        "edit_status": 200,
+        "previous_scores_retained": {
+          "topic": 90,
+          "traffic": 90,
+          "fun": 90,
+          "completeness": 90
+        },
+        "auto_queue_called": {
+          "automatic": true
+        }
+      },
+      {
+        "case": "book_progress_invalid_values",
+        "payload": {
+          "pct": 0.1,
+          "secs": "abc"
+        },
+        "status": 500
+      },
+      {
+        "case": "book_progress_invalid_values",
+        "payload": {
+          "pct": 0.1,
+          "secs": {}
+        },
+        "status": 200
+      },
+      {
+        "case": "book_progress_invalid_values",
+        "payload": {
+          "pct": 0.1,
+          "at": "NaN"
+        },
+        "status": 200
+      },
+      {
+        "case": "watch_progress_invalid_values",
+        "payload": {
+          "pos": "NaN",
+          "dur": 100
+        },
+        "status": 200
+      },
+      {
+        "case": "watch_progress_invalid_values",
+        "payload": {
+          "pos": -500,
+          "dur": 100
+        },
+        "status": 500
+      },
+      {
+        "case": "watch_progress_invalid_values",
+        "payload": {
+          "pos": 500,
+          "dur": -100
+        },
+        "status": 200
+      },
+      {
+        "case": "short_video_marked_done_after_five_seconds",
+        "status": 200,
+        "response": {
+          "done": true,
+          "ok": true
+        }
+      }
+    ],
+    "downloads": [
+      {
+        "case": "dedup_before_download",
+        "new": "new",
+        "other_account": "linked",
+        "same_account": "duplicate",
+        "same_id": true
+      },
+      {
+        "case": "local_http_to_library",
+        "state": "done",
+        "milliseconds": 5071,
+        "files_exist": true,
+        "playable": 1
+      },
+      {
+        "case": "shared_result_propagation",
+        "other_state": "done"
+      },
+      {
+        "case": "shared_delete_keeps_file",
+        "result": "kept_shared",
+        "removed_files": 0,
+        "exists": true
+      },
+      {
+        "case": "list_only_delete_keeps_file",
+        "result": "removed",
+        "exists": true
+      },
+      {
+        "case": "cancel_queued",
+        "state": "cancelled"
+      },
+      {
+        "case": "retry_cancelled",
+        "state": "queued"
+      },
+      {
+        "case": "unshared_file_delete",
+        "result": "removed",
+        "removed_files": 2,
+        "exists": false
+      }
+    ],
+    "runtime": {
+      "time": 1792315544.4972057,
+      "sources": [
+        {
+          "id": 1,
+          "name": "勇哥餐饮原创",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.06
+        },
+        {
+          "id": 2,
+          "name": "新西兰三妹Summer",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.06
+        },
+        {
+          "id": 3,
+          "name": "峰哥亡命天涯",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.06
+        },
+        {
+          "id": 4,
+          "name": "183的冯予希律师",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.06
+        },
+        {
+          "id": 5,
+          "name": "郭庆梓律师",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.06
+        },
+        {
+          "id": 6,
+          "name": "真的想不出名儿了",
+          "enabled": 1,
+          "calibration_enabled": true,
+          "days_since_collection": 0.02
+        }
+      ],
+      "workers": [
+        {
+          "name": "pi",
+          "caps": [
+            "index_subs",
+            "save_cover",
+            "save_frames",
+            "save_note_media",
+            "save_subs",
+            "similar"
+          ],
+          "seen_seconds_ago": 6,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "pi-publish",
+          "caps": [
+            "live_upload"
+          ],
+          "seen_seconds_ago": 6,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "pi-ai-2",
+          "caps": [
+            "chapters",
+            "digest",
+            "explain_failure",
+            "live_analyze",
+            "note_ai",
+            "notes_recap",
+            "summarize"
+          ],
+          "seen_seconds_ago": 6,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "pi-live-io",
+          "caps": [
+            "live_calibrate",
+            "live_reference"
+          ],
+          "seen_seconds_ago": 6,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-codex-1",
+          "caps": [
+            "codex",
+            "llm",
+            "shortcut"
+          ],
+          "seen_seconds_ago": 21,
+          "paused": false,
+          "task": 20874
+        },
+        {
+          "name": "pi-now",
+          "caps": [
+            "book_import",
+            "live_render",
+            "live_transcribe",
+            "note_media"
+          ],
+          "seen_seconds_ago": 21,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "pi-ai",
+          "caps": [
+            "chapters",
+            "digest",
+            "explain_failure",
+            "live_analyze",
+            "live_refine",
+            "note_ai",
+            "notes_recap",
+            "summarize",
+            "translate"
+          ],
+          "seen_seconds_ago": 21,
+          "paused": false,
+          "task": 20814
+        },
+        {
+          "name": "mac-Yufans-Mac-mini",
+          "caps": [
+            "cover",
+            "frames",
+            "gpu",
+            "live_render",
+            "live_transcribe",
+            "note_media",
+            "transcribe"
+          ],
+          "seen_seconds_ago": 38,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-heal",
+          "caps": [
+            "heal"
+          ],
+          "seen_seconds_ago": 39,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "pi-cpu",
+          "caps": [
+            "cover",
+            "frames",
+            "transcribe"
+          ],
+          "seen_seconds_ago": 43,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-codex-2",
+          "caps": [
+            "codex",
+            "llm",
+            "shortcut"
+          ],
+          "seen_seconds_ago": 53,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-claude-2",
+          "caps": [
+            "claude",
+            "llm",
+            "shortcut"
+          ],
+          "seen_seconds_ago": 78151,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-claude-1",
+          "caps": [
+            "claude",
+            "llm",
+            "shortcut"
+          ],
+          "seen_seconds_ago": 78151,
+          "paused": false,
+          "task": null
+        },
+        {
+          "name": "mac-Yufans-Mac-mini-pic",
+          "caps": [
+            "cover",
+            "frames",
+            "gpu"
+          ],
+          "seen_seconds_ago": 1028324,
+          "paused": false,
+          "task": 6188
+        }
+      ],
+      "tasks": [
+        {
+          "kind": "heal",
+          "state": "failed",
+          "n": 1
+        },
+        {
+          "kind": "live_calibrate",
+          "state": "failed",
+          "n": 2
+        },
+        {
+          "kind": "live_refine",
+          "state": "failed",
+          "n": 2
+        },
+        {
+          "kind": "live_refine",
+          "state": "queued",
+          "n": 2
+        },
+        {
+          "kind": "live_refine",
+          "state": "running",
+          "n": 1
+        },
+        {
+          "kind": "llm",
+          "state": "running",
+          "n": 1
+        }
+      ],
+      "ai_api": {
+        "status": 200,
+        "ms": 169,
+        "valid_response": true,
+        "model": "deepseek-flash"
+      },
+      "uploader": {
+        "path": "/var/lib/grabber/tools/biliup",
+        "exists": true,
+        "executable": true
+      },
+      "rubrics": [
+        {
+          "protocol": null,
+          "active": 0,
+          "n": 2
+        },
+        {
+          "protocol": 2,
+          "active": 0,
+          "n": 2
+        },
+        {
+          "protocol": 3,
+          "active": 0,
+          "n": 6
+        }
+      ]
+    },
+    "live_ui": [
+      {
+        "case": "calibration_expansion_survives_poll",
+        "before": true,
+        "after": false
+      },
+      {
+        "case": "lan_browser_capabilities",
+        "secure": false,
+        "microphone": false,
+        "serviceWorker": false
+      }
+    ],
+    "real_model_id_probe": [
+      {
+        "expected": [
+          86,
+          84,
+          85,
+          87
+        ],
+        "returned": [
+          {
+            "id": "86",
+            "type": "str"
+          },
+          {
+            "id": "84",
+            "type": "str"
+          },
+          {
+            "id": "85",
+            "type": "str"
+          },
+          {
+            "id": "87",
+            "type": "str"
+          }
+        ]
+      },
+      {
+        "accepted": [
+          86,
+          84,
+          85,
+          87
+        ]
+      }
+    ]
+  },
+  "limitations": [
+    "外站真实下载、扫码授权与 B站投稿没有执行，避免干扰用户数据和账号。",
+    "实际局域网未发现可用 DLNA 电视；投屏控制通过浏览器与协议替身验证，尚无真机播放验收。",
+    "所有主播在采样时未开播，无真实直播录制/转写/投稿的完整线上验收。",
+    "浏览器交互使用 Chromium 的桌面和移动尺寸；尚未使用真实 iPhone Safari/麦克风实机。",
+    "记录了 105 条路由；27 个 GET 接口为直接采样，写操作由集成测试和独立用例覆盖，不等同所有路由的穷尽测试。",
+    "测试下载、删除、账户切换、草稿和阅读进度均在副本或隔离目录；模型连通性测试使用临时任务，校准修复后恢复了四个线上失败任务。"
+  ]
+}

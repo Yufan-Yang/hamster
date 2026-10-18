@@ -346,10 +346,10 @@ def note_marks(r, term):
     return marks
 
 
-def notes_search(term):
+def notes_search(term, visual=True):
     """[(note, matched text bits, photos that look like it)]: by text, what's said or written in it, and by look."""
     rows = q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC", (g.owner,))
-    looks = visual_hits(term, "note", {r["id"] for r in rows})
+    looks = visual_hits(term, "note", {r["id"] for r in rows}) if visual else {}
     out = []
     for r in rows:
         marks = note_marks(r, term)

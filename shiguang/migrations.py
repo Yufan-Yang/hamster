@@ -41,6 +41,91 @@ def _backfill_flag(db):
         db.execute("UPDATE jobs SET backfill=1 WHERE status IN ('queued','downloading','processing','failed') AND source LIKE 'sub:%'")
 
 
+def _live_clipping(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS live_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, name TEXT NOT NULL,
+        room_id INTEGER NOT NULL, url TEXT NOT NULL, enabled INTEGER DEFAULT 1,
+        settings TEXT DEFAULT '{}', checked REAL, live_status TEXT DEFAULT 'waiting', error TEXT DEFAULT '',
+        created REAL, updated REAL, UNIQUE(owner, room_id));
+    CREATE TABLE IF NOT EXISTS live_accounts (
+        owner TEXT PRIMARY KEY, mid TEXT, name TEXT, status TEXT DEFAULT 'ready', updated REAL);
+    CREATE TABLE IF NOT EXISTS live_sessions (
+        key TEXT PRIMARY KEY, source_id INTEGER NOT NULL, owner TEXT NOT NULL, title TEXT DEFAULT '',
+        status TEXT DEFAULT 'recording', cursor REAL DEFAULT 0, topic_start REAL DEFAULT 0,
+        topic_title TEXT DEFAULT '', started REAL, ended REAL, error TEXT DEFAULT '');
+    CREATE TABLE IF NOT EXISTS live_recordings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, source_id INTEGER NOT NULL,
+        session_key TEXT NOT NULL, seq INTEGER NOT NULL, offset REAL DEFAULT 0, duration REAL DEFAULT 0,
+        path TEXT NOT NULL, state TEXT DEFAULT 'transcribing', segments TEXT DEFAULT '[]', error TEXT DEFAULT '',
+        created REAL, updated REAL, UNIQUE(session_key, seq));
+    CREATE INDEX IF NOT EXISTS live_recordings_session ON live_recordings(session_key, seq);
+    CREATE TABLE IF NOT EXISTS live_clips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, source_id INTEGER NOT NULL,
+        session_key TEXT NOT NULL, lane TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL,
+        title TEXT NOT NULL, description TEXT DEFAULT '', tags TEXT DEFAULT '[]', score REAL DEFAULT 0,
+        scores TEXT DEFAULT '{}', reason TEXT DEFAULT '', state TEXT DEFAULT 'queued',
+        file TEXT DEFAULT '', cover TEXT DEFAULT '', version INTEGER DEFAULT 1, render_version INTEGER DEFAULT 0,
+        bvid TEXT DEFAULT '', aid TEXT DEFAULT '', error TEXT DEFAULT '', submit_started REAL,
+        created REAL, updated REAL);
+    CREATE INDEX IF NOT EXISTS live_clips_owner ON live_clips(owner, id);
+    CREATE INDEX IF NOT EXISTS live_clips_session ON live_clips(session_key, lane, start, end);
+    CREATE TABLE IF NOT EXISTS live_references (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, source_id INTEGER NOT NULL,
+        bvid TEXT NOT NULL, title TEXT, author TEXT, published REAL, duration REAL, views INTEGER,
+        metrics TEXT DEFAULT '{}', cohort TEXT DEFAULT 'high', state TEXT DEFAULT 'queued',
+        path TEXT DEFAULT '', segments TEXT DEFAULT '[]', error TEXT DEFAULT '', created REAL, updated REAL,
+        UNIQUE(source_id, bvid));
+    CREATE TABLE IF NOT EXISTS live_rubrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, source_id INTEGER NOT NULL,
+        version INTEGER NOT NULL, rubric TEXT NOT NULL, evidence TEXT DEFAULT '{}', active INTEGER DEFAULT 1,
+        created REAL, UNIQUE(source_id, version));
+    """)
+    add(db, "live_sources", "calibrated", "REAL")
+    add(db, "live_sources", "uid", "INTEGER")
+    add(db, "live_recordings", "bytes", "INTEGER DEFAULT 0")
+    add(db, "live_clips", "performance", "TEXT DEFAULT '{}' ")
+
+
+def _live_review_and_origin(db):
+    # Web and worker can start together; serialize column checks before either changes the schema.
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    add(db, 'live_sessions', 'origin', "TEXT DEFAULT '{}'")
+    add(db, 'live_clips', 'needs_review', 'INTEGER DEFAULT 0')
+    add(db, 'live_references', 'excluded', 'INTEGER DEFAULT 0')
+    # Capture the attribution available at upgrade time; future sessions store it at recording start.
+    db.execute("UPDATE live_sessions SET origin=(SELECT json_object('name',name,'room_id',room_id,'url',url,'uid',uid) "
+               "FROM live_sources WHERE id=live_sessions.source_id) WHERE origin='{}'")
+
+
+def _live_reference_evidence(db):
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    add(db, 'live_references', 'reference_info', "TEXT DEFAULT '{}'")
+    add(db, 'live_references', 'source_match', "TEXT DEFAULT 'pending'")
+    add(db, 'live_references', 'match_reason', "TEXT DEFAULT ''")
+
+
+def _live_editorial_titles(db):
+    add(db, 'live_clips', 'cover_title', "TEXT DEFAULT ''")
+    from .live_bilibili import publication_title
+    for row in db.execute("SELECT c.id,c.title,s.origin,p.name,p.settings FROM live_clips c "
+                          "JOIN live_sources p ON p.id=c.source_id LEFT JOIN live_sessions s ON s.key=c.session_key "
+                          "WHERE c.state NOT IN ('uploading','submitted','uncertain')").fetchall():
+        cid, title, origin, name, settings = row
+        updated = publication_title({'title': title, 'origin': origin or '{}'}, {'name': name, 'settings': settings})
+        if updated != title:
+            db.execute('UPDATE live_clips SET title=? WHERE id=?', (updated, cid))
+
+
+def _live_topic_review(db):
+    add(db, 'live_sessions', 'topic_summary', "TEXT DEFAULT ''")
+    add(db, 'live_sessions', 'topic_kind', "TEXT DEFAULT 'content'")
+    add(db, 'live_clips', 'content_kind', "TEXT DEFAULT 'content'")
+    add(db, 'live_clips', 'merged_into', 'INTEGER')
+
+
 STEPS = [
     (1, lambda db: add(db, "jobs", "transcript", "TEXT DEFAULT ''")),
     (2, lambda db: add(db, "jobs", "owner", "TEXT")),
@@ -62,6 +147,12 @@ STEPS = [
     (17, lambda db: add(db, "users", "shortcut_key", "TEXT")),  # the iOS shortcut's secret, so it works from outside too
     # 追更 filters: which videos of the uploader to cache; `refilter` = changed, the next check looks back again
     (18, lambda db: (add(db, "subs", "filter", "TEXT DEFAULT ''"), add(db, "subs", "refilter", "INTEGER DEFAULT 0"))),
+    (19, _live_clipping),
+    (20, _live_review_and_origin),
+    (21, _live_reference_evidence),
+    (22, _live_editorial_titles),
+    (23, _live_topic_review),
+    (24, lambda db: add(db, 'live_sources', 'archived', 'INTEGER NOT NULL DEFAULT 0')),
 ]
 
 

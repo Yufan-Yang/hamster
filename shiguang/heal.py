@@ -1,5 +1,5 @@
 """自修复: an error the Pi runs into (a task that fails for good, a page request that crashes) becomes an incident;
-the Mac's Claude Code reads it with the code, works out why, and fixes it (mac_worker.py, heal). A code fix goes live
+the Mac's Codex reads it with the code, works out why, and fixes it (mac_worker.py, heal). A code fix goes live
 by itself when the smoke test passes (deploy.sh: tests on a copy of the database, rolls back if the Pi doesn't come
 back up); the tasks that failed are then tried again.
 
@@ -137,7 +137,7 @@ def db_watch(name):
 
 @board.task("heal", "自修复", "mac", remote=True)
 def pi_heal(task, beat):
-    """Only the Mac heals (Claude Code with the code next to it); no Pi worker takes these."""
+    """Only the Mac heals (Codex with the code next to it); no Pi worker takes these."""
     raise ValueError("only the Mac heals")
 
 

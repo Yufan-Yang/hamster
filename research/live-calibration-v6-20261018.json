@@ -1,0 +1,96 @@
+{
+  "protocol": 6,
+  "changes": [
+    "同发布账号、近时间和近时长配对，减少账号体量混杂",
+    "候选最多1–2条局部修正，每条至少两组正反例",
+    "训练、调优、最终保留三组隔离；先胜过调优基线再消耗最终验证",
+    "冻结快照、缓存逐批评分和候选，重复点击复用结果，中断后续算",
+    "已用于最终验证的素材不回流学习，新最终素材未参与历史训练调优；未测试的预留素材保留",
+    "足够可比较样本即开跑，不等待其他下载或核验完成",
+    "已撤回或改为待核验的来源证据使规则暂停生效"
+  ],
+  "checks": {
+    "integration_groups": 71,
+    "deployed": true,
+    "browser_cases": 13,
+    "browser_passed": 13,
+    "browser_errors": []
+  },
+  "readonly_dataset_preview": [
+    {
+      "name": "勇哥餐饮原创",
+      "independent": 0,
+      "comparable_pairs": 0,
+      "ready": false,
+      "split": {
+        "comparable_pairs": 0,
+        "required_pairs": 10,
+        "fresh_test_pairs": 0,
+        "required_fresh_test_pairs": 4
+      }
+    },
+    {
+      "name": "新西兰三妹Summer",
+      "independent": 21,
+      "comparable_pairs": 4,
+      "ready": false,
+      "split": {
+        "comparable_pairs": 3,
+        "required_pairs": 10,
+        "fresh_test_pairs": 2,
+        "required_fresh_test_pairs": 4
+      }
+    },
+    {
+      "name": "峰哥亡命天涯",
+      "independent": 17,
+      "comparable_pairs": 2,
+      "ready": false,
+      "split": {
+        "comparable_pairs": 0,
+        "required_pairs": 10,
+        "fresh_test_pairs": 0,
+        "required_fresh_test_pairs": 4
+      }
+    },
+    {
+      "name": "183的冯予希律师",
+      "independent": 17,
+      "comparable_pairs": 6,
+      "ready": false,
+      "split": {
+        "comparable_pairs": 6,
+        "required_pairs": 10,
+        "fresh_test_pairs": 6,
+        "required_fresh_test_pairs": 4
+      }
+    },
+    {
+      "name": "郭庆梓律师",
+      "independent": 100,
+      "comparable_pairs": 38,
+      "ready": true,
+      "split": {
+        "train": 24,
+        "tuning": 8,
+        "heldout": 16
+      }
+    },
+    {
+      "name": "真的想不出名儿了",
+      "independent": 70,
+      "comparable_pairs": 28,
+      "ready": true,
+      "split": {
+        "train": 24,
+        "tuning": 8,
+        "heldout": 16
+      }
+    }
+  ],
+  "limitations": [
+    "传播指标仍是弱标签，封面、标题、平台分发没有被完全控制",
+    "配对命中率与旧版跨账号区分率口径不同，不能直接比较百分比",
+    "流程修复不等于候选规则已通过验证；真实校准在后台继续"
+  ]
+}

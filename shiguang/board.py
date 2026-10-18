@@ -46,8 +46,9 @@ PREFER_WAIT = 3 * 86400  # e.g. a Mac that claims but never finishes
 LEASE = 300  # seconds a claim lasts without a heartbeat
 PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops counting as around
 # "now": CPU work someone is waiting for (a note just made): done right away, not only in idle time
-# ("mac": kinds only the Mac does, e.g. asking Claude; no Pi worker takes them)
-PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now"}
+# ("mac": kinds only the Mac does, e.g. asking Codex; no Pi worker takes them)
+PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now",
+              "publish": "pi-publish", "live-io": "pi-live-io", "live-search": "pi-live-search"}
 
 
 def task(kind, label, pool, prefer=None, remote=False, then=None, prefer_wait=PREFER_WAIT):
@@ -102,7 +103,7 @@ def task_payload(kind, target):
 def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_before=None, payload=None):
     """Put a task on the board; one per kind and target (publishing it again is a no-op unless `force`, which runs
     a finished one again). Returns its id. `payload`: what the worker needs, when it isn't worked out from the target
-    (a request to Claude carries its whole prompt)."""
+    (a request to Codex carries its whole prompt)."""
     if kind not in TASK_KINDS:
         raise ValueError(f"unknown kind {kind}")
     payload = json.dumps(payload if payload is not None else task_payload(kind, target), ensure_ascii=False)
@@ -165,6 +166,10 @@ def claim_task(worker, caps):
     if q("SELECT 1 FROM tasks WHERE state='running' AND lease_until < ? LIMIT 1", (now,), one=True):
         _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL WHERE state='running' AND lease_until < ?", (now,))
     kinds = [k for k in TASK_KINDS if k in caps]
+    # Older Mac workers also advertise "llm", but may answer with Claude. During a rolling
+    # upgrade only Codex workers may take these requests; local tasks and shortcuts are unaffected.
+    if "codex" not in caps and "llm" in kinds:
+        kinds.remove("llm")
     if not kinds:
         return None
     alive = {c for r in q("SELECT caps FROM workers WHERE seen > ? AND name != ?", (now - WORKER_FRESH, worker))
@@ -219,7 +224,7 @@ def complete_task(tid, worker, result):
 def fail_task(tid, worker, error, retry=True, trace="", expected=False):
     """retry: try again later (after 1, 4, 9... minutes; at most 5 times); else it stays failed, and unless it was
     `expected` (the target is gone...) it goes to 自修复 (heal.py) with its traceback."""
-    row = q("SELECT attempts FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
+    row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
     if not row:
         return False
     if retry and row["attempts"] < 5:
@@ -228,6 +233,15 @@ def fail_task(tid, worker, error, retry=True, trace="", expected=False):
     else:
         _write("UPDATE tasks SET state='failed', worker=NULL, lease_until=NULL, error=?, updated=? WHERE id=?",
                (str(error)[:1000], time.time(), tid))
+        if row['kind'] == 'live_render':
+            payload = json.loads(row['payload'])
+            q("UPDATE live_clips SET state='failed', error=?, updated=? WHERE id=? AND version=? AND state IN ('queued','rendering')",
+              (str(error)[:800], time.time(), payload.get('clip'), payload.get('version')))
+        if row['kind'] in ('live_reference', 'live_transcribe'):
+            payload = json.loads(row['payload'])
+            if payload.get('reference'):
+                q("UPDATE live_references SET state='failed',error=?,updated=? WHERE id=?",
+                  (str(error)[:800], time.time(), payload['reference']))
         from . import heal
         heal.task_failed(tid, error, trace, expected)
     return True
@@ -242,6 +256,13 @@ def release_task(tid, worker):
 
 def task_media(task):
     p = task["payload"]
+    if p.get("recording") or p.get("reference"):
+        from .live import media_path
+        table, key = ("live_recordings", "recording") if p.get("recording") else ("live_references", "reference")
+        row = q(f"SELECT path FROM {table} WHERE id=?", (p[key],), one=True)
+        if not row:
+            raise ValueError("直播素材不存在")
+        return media_path(row["path"]), []
     row = q("SELECT * FROM jobs WHERE id=?", (p["job"],), one=True)
     media = library.playable(job_dict(row)) if row else []
     if p.get("part") is None or p["part"] >= len(media):
@@ -363,6 +384,26 @@ def run_task_process(tid, worker):
         run_claimed(task_dict(row), worker)
 
 
+def retry_allowed(task, owner, admin=False):
+    # Re-running computation is safe; publishing and arbitrary model requests have separate review flows.
+    if task['kind'] not in {'live_calibrate', 'live_refine', 'live_verify', 'live_style', 'live_reference', 'live_transcribe', 'live_analyze',
+                             'live_render', 'live_score', 'book_import', 'note_media', 'note_ai', 'transcribe', 'chapters', 'frames',
+                             'cover', 'index_subs', 'save_subs', 'translate', 'summarize', 'explain_failure', 'digest', 'notes_recap'}:
+        return False
+    payload = json.loads(task['payload'] or '{}')
+    if payload.get('owner'):
+        return admin or payload['owner'] == owner
+    if payload.get('session'):
+        row = q('SELECT owner FROM live_sessions WHERE key=?', (payload['session'],), one=True)
+        return bool(row and (admin or row['owner'] == owner))
+    for key, table in (('source','live_sources'), ('reference','live_references'), ('recording','live_recordings'),
+                       ('clip','live_clips'), ('job','jobs'), ('book','books'), ('note','notes')):
+        if payload.get(key) is not None:
+            row = q(f'SELECT owner FROM {table} WHERE id=?', (payload[key],), one=True)
+            return bool(row and (admin or row['owner'] == owner))
+    return False
+
+
 def board_summary(since=0):
     """The board for 资源使用: per kind how many wait / run now, how many were done / failed since `since`, who's
     working on what."""
@@ -383,6 +424,11 @@ def board_summary(since=0):
     failed = [{"id": r["id"], "label": TASK_KINDS.get(r["kind"], {}).get("label", r["kind"]),
                "title": json.loads(r["payload"]).get("title"), "error": (r["error"] or "")[:200]}
               for r in q("SELECT * FROM tasks WHERE state='failed' AND updated >= ? ORDER BY updated DESC LIMIT 5", (since,))]
+    from flask import g, has_request_context
+    if has_request_context():
+        for item in failed:
+            task = q('SELECT * FROM tasks WHERE id=?', (item['id'],), one=True)
+            item['retryable'] = retry_allowed(task, g.owner, g.admin)
     workers = [{"name": r["name"], "caps": json.loads(r["caps"]), "seen": r["seen"],
                 "online": time.time() - r["seen"] < WORKER_FRESH, "task": r["task"],
                 "paused": json.loads(r["paused"])["why"] if r["paused"] else None}

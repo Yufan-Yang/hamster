@@ -1,0 +1,522 @@
+{
+  "scope": "修复直播专属规则的样本收集、来源核验和训练用途区分；不降低自动投稿的独立验证门槛",
+  "changes": [
+    "全名、配置别名及有原文/BV依据的 AI 别名共同搜索",
+    "本人投稿、历史代表作和未成熟传播数据可用于风格学习",
+    "来源初筛不确定的素材保留，结合转写核验并显示原因",
+    "全部候选入库，每主播最多六个下载/转写任务排队，优先音频以减少存储",
+    "效果样本每轮上限从16提高至48，保留集最多12，其余用于训练",
+    "风格素材与效果样本按内容去重，避免验证内容经转载泄漏到训练",
+    "正反例明确标注；耗时校准任务持续续租；永久转写失败正确回写"
+  ],
+  "validation": {
+    "integration_groups": 70,
+    "deployment_healthy": true,
+    "browser_cases": 13,
+    "browser_passed": 13,
+    "browser_errors": [],
+    "browser": [
+      {
+        "case": "real UI registration and verified storage owner",
+        "passed": true,
+        "seconds": 1.12,
+        "detail": null
+      },
+      {
+        "case": "cached TXT reading offline and reconnect",
+        "passed": true,
+        "seconds": 0.65,
+        "detail": null
+      },
+      {
+        "case": "logout, second account, draft/pending/cache/reader isolation",
+        "passed": true,
+        "seconds": 1.12,
+        "detail": null
+      },
+      {
+        "case": "in-flight cache writes remain bound to the original account",
+        "passed": true,
+        "seconds": 0.18,
+        "detail": {
+          "new_owner_cache": 0
+        }
+      },
+      {
+        "case": "failed add preserves input and restores the submit button",
+        "passed": true,
+        "seconds": 0.69,
+        "detail": null
+      },
+      {
+        "case": "old search responses cannot overwrite newer results",
+        "passed": true,
+        "seconds": 0.07,
+        "detail": "new"
+      },
+      {
+        "case": "reload, URL state, browser back and search/sort restoration",
+        "passed": true,
+        "seconds": 2.66,
+        "detail": null
+      },
+      {
+        "case": "compact cards fetch full summary and key points when opened",
+        "passed": true,
+        "seconds": 0.53,
+        "detail": null
+      },
+      {
+        "case": "live details survive changed polling; sample controls and Escape",
+        "passed": true,
+        "seconds": 0.67,
+        "detail": null
+      },
+      {
+        "case": "modal Escape, dialog labels, focus trap and focus restoration",
+        "passed": true,
+        "seconds": 1.34,
+        "detail": null
+      },
+      {
+        "case": "four responsive widths, four workspaces, touch targets and no horizontal overflow",
+        "passed": true,
+        "seconds": 3.69,
+        "detail": [
+          {
+            "width": 360,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 360,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 390,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 768,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "all",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "notes",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "books",
+            "overflow": false,
+            "short": []
+          },
+          {
+            "width": 1440,
+            "tab": "live",
+            "overflow": false,
+            "short": []
+          }
+        ]
+      },
+      {
+        "case": "secure-context app shell reloads offline with live scripts cached",
+        "passed": true,
+        "seconds": 2.02,
+        "detail": null
+      },
+      {
+        "case": "no unhandled browser JavaScript errors",
+        "passed": true,
+        "seconds": 0.0,
+        "detail": null
+      }
+    ]
+  },
+  "before_recollection": {
+    "1": 16,
+    "2": 33,
+    "3": 34,
+    "4": 1,
+    "5": 22,
+    "6": 2
+  },
+  "runtime_snapshot": {
+    "checked_at": 1792319415.2569394,
+    "protocol": 5,
+    "sources": [
+      {
+        "id": 1,
+        "name": "勇哥餐饮原创",
+        "counts": [
+          {
+            "state": "ready",
+            "source_match": "matched",
+            "n": 16
+          }
+        ],
+        "progress": {
+          "ready": 16,
+          "independent": 15,
+          "style": 0,
+          "required": 12,
+          "pending": 0,
+          "verifying": 0,
+          "uncertain": 0,
+          "rejected": 0
+        },
+        "search": {
+          "updated": 1792310016.1774342,
+          "found": 478,
+          "metadata_candidates": 246,
+          "matched": 59,
+          "pending": null,
+          "stored_candidates": null,
+          "warning": null
+        },
+        "aliases": [],
+        "task": {
+          "id": 19994,
+          "state": "queued",
+          "progress": null,
+          "error": ""
+        }
+      },
+      {
+        "id": 2,
+        "name": "新西兰三妹Summer",
+        "counts": [
+          {
+            "state": "ready",
+            "source_match": "pending",
+            "n": 33
+          }
+        ],
+        "progress": {
+          "ready": 33,
+          "independent": 0,
+          "style": 0,
+          "required": 12,
+          "pending": 0,
+          "verifying": 33,
+          "uncertain": 0,
+          "rejected": 0
+        },
+        "search": {
+          "updated": 1792310269.735425,
+          "found": 557,
+          "metadata_candidates": 218,
+          "matched": 102,
+          "pending": null,
+          "stored_candidates": null,
+          "warning": null
+        },
+        "aliases": [],
+        "task": {
+          "id": 19995,
+          "state": "queued",
+          "progress": null,
+          "error": ""
+        }
+      },
+      {
+        "id": 3,
+        "name": "峰哥亡命天涯",
+        "counts": [
+          {
+            "state": "ready",
+            "source_match": "matched",
+            "n": 14
+          },
+          {
+            "state": "ready",
+            "source_match": "pending",
+            "n": 18
+          },
+          {
+            "state": "ready",
+            "source_match": "rejected",
+            "n": 1
+          },
+          {
+            "state": "ready",
+            "source_match": "uncertain",
+            "n": 1
+          }
+        ],
+        "progress": {
+          "ready": 34,
+          "independent": 7,
+          "style": 7,
+          "required": 12,
+          "pending": 0,
+          "verifying": 18,
+          "uncertain": 1,
+          "rejected": 1
+        },
+        "search": {
+          "updated": 1792310181.3509789,
+          "found": 462,
+          "metadata_candidates": 129,
+          "matched": 103,
+          "pending": null,
+          "stored_candidates": null,
+          "warning": null
+        },
+        "aliases": [],
+        "task": {
+          "id": 19996,
+          "state": "queued",
+          "progress": null,
+          "error": ""
+        }
+      },
+      {
+        "id": 4,
+        "name": "183的冯予希律师",
+        "counts": [
+          {
+            "state": "pending",
+            "source_match": "pending",
+            "n": 33
+          },
+          {
+            "state": "queued",
+            "source_match": "pending",
+            "n": 5
+          },
+          {
+            "state": "ready",
+            "source_match": "pending",
+            "n": 8
+          }
+        ],
+        "progress": {
+          "ready": 8,
+          "independent": 0,
+          "style": 0,
+          "required": 12,
+          "pending": 38,
+          "verifying": 8,
+          "uncertain": 0,
+          "rejected": 0
+        },
+        "search": {
+          "updated": 1792319342.0555627,
+          "found": 504,
+          "metadata_candidates": 265,
+          "matched": 23,
+          "pending": 22,
+          "stored_candidates": null,
+          "warning": ""
+        },
+        "aliases": [
+          {
+            "name": "183",
+            "support_bvids": [
+              "BV1tkHS65Eiv"
+            ]
+          },
+          {
+            "name": "冯律师",
+            "support_bvids": [
+              "BV1jia96cEce"
+            ]
+          }
+        ],
+        "task": {
+          "id": 20413,
+          "state": "running",
+          "progress": "{\"phase\": \"collecting\", \"video\": \"BV15p8g6AECa\", \"stored\": 44}",
+          "error": ""
+        }
+      },
+      {
+        "id": 5,
+        "name": "郭庆梓律师",
+        "counts": [
+          {
+            "state": "ready",
+            "source_match": "matched",
+            "n": 21
+          },
+          {
+            "state": "ready",
+            "source_match": "uncertain",
+            "n": 1
+          }
+        ],
+        "progress": {
+          "ready": 22,
+          "independent": 20,
+          "style": 0,
+          "required": 12,
+          "pending": 0,
+          "verifying": 0,
+          "uncertain": 1,
+          "rejected": 0
+        },
+        "search": {
+          "updated": 1792310088.4223166,
+          "found": 347,
+          "metadata_candidates": 204,
+          "matched": 77,
+          "pending": null,
+          "stored_candidates": null,
+          "warning": null
+        },
+        "aliases": [],
+        "task": {
+          "id": 20417,
+          "state": "queued",
+          "progress": null,
+          "error": ""
+        }
+      },
+      {
+        "id": 6,
+        "name": "真的想不出名儿了",
+        "counts": [
+          {
+            "state": "downloading",
+            "source_match": "pending",
+            "n": 1
+          },
+          {
+            "state": "pending",
+            "source_match": "pending",
+            "n": 102
+          },
+          {
+            "state": "queued",
+            "source_match": "pending",
+            "n": 3
+          },
+          {
+            "state": "ready",
+            "source_match": "pending",
+            "n": 53
+          },
+          {
+            "state": "transcribing",
+            "source_match": "pending",
+            "n": 2
+          }
+        ],
+        "progress": {
+          "ready": 53,
+          "independent": 0,
+          "style": 0,
+          "required": 12,
+          "pending": 108,
+          "verifying": 53,
+          "uncertain": 0,
+          "rejected": 0
+        },
+        "search": {
+          "updated": 1792319133.2532423,
+          "found": 276,
+          "metadata_candidates": 192,
+          "matched": 147,
+          "pending": 12,
+          "stored_candidates": 159,
+          "warning": ""
+        },
+        "aliases": [
+          {
+            "name": "圆律",
+            "support_bvids": [
+              "BV1LwnM6iEu4",
+              "BV1HcJQ6AEHs",
+              "BV1d3JQ6sEAN"
+            ]
+          }
+        ],
+        "task": {
+          "id": 20778,
+          "state": "done",
+          "progress": "{\"phase\": \"collecting\", \"video\": \"BV1x1uz67EeL\", \"stored\": 158}",
+          "error": ""
+        }
+      }
+    ],
+    "api": {
+      "status": 200,
+      "seconds": 0.666,
+      "bytes": 352976,
+      "references": 312,
+      "alias_fields": true
+    }
+  },
+  "identity_evidence": {
+    "source_uid": 2990100,
+    "room_id": 4195167,
+    "own_video": "BV1pEeC6UE8n",
+    "alias_video": "BV1LwnM6iEu4",
+    "clip_account_uid": 68383830,
+    "basis": "本人投稿确认 UID，圆律切片简介明确链接相同直播间"
+  },
+  "remaining": "重新采样、转写与来源核验在后台继续；入库数量是候选数，不是独立验证通过数。此快照时仍无通过新协议的启用规则。"
+}

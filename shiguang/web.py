@@ -34,6 +34,7 @@ from flask import session
 from pathlib import Path
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
+from .series import page_ids, series_name
 from .core import (ADMIN_PASSWORD, AUDIO_EXT, BOOKS_DIR, BOOK_MAX_UPLOAD, CAST_URL, EXTERNAL_PORT, HERE, INCOMPLETE, LLM_API_KEY, MEDIA, NOTES_DIR, NOTE_MAX_UPLOAD, STATE, TG_TOKEN, UA, URL_RE, VIDEO_EXT, app, bell_mark, bell_wait, db_lock, find_urls, job_dict, kv_get, kv_set, q, safe_name, secret_key)
 
 
@@ -199,10 +200,14 @@ def identify():
         session.clear()
         g.user, g.admin = None, False
     g.owner = f"user:{g.user}" if g.user else g.device
+    expected_owner = request.headers.get('X-Storage-Owner')
+    if (expected_owner and expected_owner != g.owner and request.method not in ('GET','HEAD','OPTIONS')
+            and request.path not in ('/api/login','/api/register','/api/logout')):
+        return jsonify(error='账号已切换，请刷新后重试'), 409
     if g.external and not g.user:
         # No anonymous device mode on the internet: show the page and the login form, nothing else
         if request.path == "/api/jobs":
-            return jsonify(jobs=[], login_required=True, external=True, user=None, admin=False,
+            return jsonify(jobs=[], storage_owner=g.owner, login_required=True, external=True, user=None, admin=False,
                            disk={"free": 0, "total": 0}, features={}, privacy={})
         if request.path == "/api/account":
             return jsonify(user=None, devices=[])
@@ -791,6 +796,9 @@ def list_columns():
 
 @app.get("/api/jobs")
 def jobs():
+    metadata_only = request.args.get('metadata') == '1'
+    compact = request.args.get('compact') == '1'
+    visual = request.args.get("visual") == "1"
     term = request.args.get("q", "").strip()
     term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
     wanted_tags = tag_query(term)  # "#标签": only by tags
@@ -806,7 +814,13 @@ def jobs():
                   "COALESCE(json_extract(analysis, '$.title'), title, '') COLLATE NOCASE, id DESC",
     }.get(sort, "created DESC, id DESC")
     scope, scope_args = scope_sql()
+    if request.args.get('only') == '1' and request.args.get('ids'):
+        ids = [int(x) for x in request.args['ids'].split(',') if x.isdigit()][:50]
+        scope += " AND id IN (" + ','.join('?' for _ in ids) + ")" if ids else " AND 0"
+        scope_args = (*scope_args, *ids)
     scope += " AND status != 'cancelled'"  # cancelled jobs are hidden
+    if metadata_only:
+        scope += ' AND 0'  # account/navigation for workspaces that do not display video cards
     sub = request.args.get("sub", "")
     # every unfinished job (queued / downloading / failed) is always sent; finished ones a page at a time
     limit = int(request.args["limit"]) if request.args.get("limit", "").isdigit() else 100
@@ -818,6 +832,9 @@ def jobs():
         scope_args, limit = (*scope_args, cat), max(limit, 2000)
     more = False
     parsed = None
+    grouped = request.args.get("grouped") == "1" and not term
+    subscriptions = {f"sub:{r['id']}": dict(r) for r in q("SELECT id, platform, name FROM subs WHERE owner=? OR ?",
+                                                        (g.owner, int(g.admin)))} if grouped else {}
     # A sentence ("上个月小王讲伊朗、画面里有地图的片段"): an AI reads it into keywords, what's on screen, an
     # uploader and dates (the page asks for this once typing pauses; `exact` searches the words as typed)
     if term and not wanted_tags and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
@@ -849,7 +866,7 @@ def jobs():
                 said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"],
                                                  "text": search.snippet(r["text"], term, 10, 40).strip("…") if len(r["text"]) > 50 else r["text"]})
         looks = {}  # covers and frames that look like it
-        for source, found in search.visual_hits(term, "job", set(by_source)).items():
+        for source, found in (search.visual_hits(term, "job", set(by_source)) if visual else {}).items():
             for jid in by_source[source]:
                 looks[jid] = found
         known = {r["id"] for r in rows}
@@ -884,19 +901,37 @@ def jobs():
         unfinished = "status IN ('queued', 'downloading', 'processing', 'linked', 'failed')"
         cols = list_columns()
         rows = q(f"SELECT {cols} FROM jobs WHERE {scope} AND {unfinished}", scope_args)
-        finished = q(f"SELECT {cols} FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order} LIMIT ?", (*scope_args, limit + 1))
-        more = len(finished) > limit
+        if grouped:
+            # Read only the naming fields for pagination, not every video's full analysis and media info.
+            candidates = q("SELECT id, source, title, json_object('library', json_extract(analysis, '$.library'), "
+                           "'show', json_extract(analysis, '$.show'), 'title', json_extract(analysis, '$.title')) analysis "
+                           f"FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order}", scope_args)
+            hidden = hidden_ids()
+            candidates = [{**dict(r), "analysis": json.loads(r["analysis"])} for r in candidates if r["id"] not in hidden]
+            ids, more = page_ids(candidates, max(1, limit), subscriptions)
+            finished = q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(ids))})",
+                         (*scope_args, *ids)) if ids else []
+        else:
+            finished = q(f"SELECT {cols} FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order} LIMIT ?",
+                         (*scope_args, limit + 1))
+            more = len(finished) > limit
+            finished = finished[:limit]
         if request.args.get("ids"):  # particular videos (opened from a digest, a note...), wherever they are
             wanted = [int(x) for x in request.args["ids"].split(",") if x.isdigit()][:50]
             finished += q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(wanted))})", (*scope_args, *wanted)) if wanted else []
             finished = list({r["id"]: r for r in finished}.values())
-            limit = len(finished)
-        shown = {r["id"] for r in rows + finished[:limit]}
+        shown = {r["id"] for r in rows + finished}
         # videos you're in the middle of are always there, also when they're further back than the first page
-        resume = [r["job_id"] for r in q("SELECT job_id FROM watch WHERE owner=? AND done=0 AND pos > 15 "
+        resume = [r["job_id"] for r in q("SELECT job_id FROM watch WHERE owner=? AND done=0 AND pos >= 5 "
                                          "ORDER BY updated DESC LIMIT 12", (g.owner,)) if r["job_id"] not in shown]
         extra = q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(resume))})", (*scope_args, *resume)) if resume else []
-        out = [job_dict(r) for r in sorted(rows + finished[:limit] + extra, key=lambda r: r["id"], reverse=True)]
+        out = [job_dict(r) for r in sorted(rows + finished + extra, key=lambda r: r["id"], reverse=True)]
+        if grouped:
+            for d in out:
+                d["series"] = series_name(d, subscriptions)
+                # Continue-watching videos outside this page belong in that strip, not as partial series.
+                if d["id"] not in shown:
+                    d["resume_only"] = True
     # privacy mode: hidden items aren't even sent unless they've been revealed with the password
     prefs, show_hidden = privacy_get(g.owner), revealed()
     hidden_count = 0
@@ -910,6 +945,7 @@ def jobs():
         kept.append(d)
     out = kept
     watched = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=?", (g.owner,))}
+    cards = library.card_media(out) if compact else {}
     for d in out:
         w = watched.get(d["id"])
         if w:
@@ -920,13 +956,21 @@ def jobs():
                 d.update(status=src["status"] if src["status"] in ("queued", "downloading", "processing") else "queued",
                          stage=src["stage"], progress=src["progress"], speed=src["speed"], title=d["title"] or src["title"])
         owner = d.pop("owner", None)
-        d["media"] = library.media_info(d) if d["status"] == "done" else []
+        d["media"] = cards.get(d['id'], []) if compact else library.media_info(d) if d["status"] == "done" else []
         d["missing"] = d["status"] == "done" and not d["media"] and any(
             Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT for f in d["files"])
         if g.admin:
             d["owner_label"] = owner_label(owner)
+    if compact:
+        for d in out:
+            for key in ('files', 'dir', 'info', 'error_detail'):
+                d.pop(key, None)
+            d['analysis'] = {k: v for k, v in (d.get('analysis') or {}).items()
+                             if k not in ('summary', 'key_points', 'chapters', 'usage', 'raw', 'transcript')}
+            d['compact'] = True
     usage = shutil.disk_usage(MEDIA)
     return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
+                   storage_owner=g.owner, secure_url=PUBLIC_URL if PUBLIC_URL.startswith("https://") else None,
                    features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
                    subs=subs_list(), sub_interval=channels.SUB_INTERVAL,
@@ -941,7 +985,7 @@ def jobs():
                                                                     (g.owner,)) if has_tags(json.loads(r["tags"] or "[]"), wanted_tags)][:50]
                    if wanted_tags else
                    [notes.note_dict(r, m, seen) for r, m, seen in
-                    search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term)[:50]]
+                    search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term, visual=visual)[:50]]
                    if term else [],
                    understood=search.understood(parsed) if parsed else None,
                    partial=bool(parsed and out and out[0].get("partial")), cats=category_counts())
@@ -1341,6 +1385,28 @@ def api_task_cover(tid):
     return send_file(library.job_thumb(task))
 
 
+@app.post('/api/tasks/<int:tid>/retry')
+def retry_task(tid):
+    task = q('SELECT * FROM tasks WHERE id=?', (tid,), one=True)
+    if not task or not board.retry_allowed(task, g.owner, g.admin):
+        return jsonify(error='任务不存在或不能在这里重试'), 404
+    if task['state'] != 'failed':
+        return jsonify(error='任务已在运行或已经完成，请刷新查看'), 409
+    payload = json.loads(task['payload'])
+    if task['kind'] == 'live_render':
+        from . import live
+        clip = q('SELECT * FROM live_clips WHERE id=?', (payload.get('clip'),), one=True)
+        if not clip or clip['version'] != payload.get('version') or clip['state'] in ('uploading','submitted','uncertain','rejected'):
+            return jsonify(error='切片已更新，请在切片卡片中重试'), 409
+        try:
+            live.queue_render(clip['id'])
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 409
+    else:
+        board.publish(task['kind'], task['target'], max(25, task['priority']), force=True, payload=payload)
+    return jsonify(ok=True)
+
+
 @app.get("/api/tasks")
 def api_board():
     """The board (for `task board` on the Mac and for 资源使用)."""
@@ -1358,7 +1424,7 @@ def notes_list():
     if before and before_id.isdigit():
         where, args = where + " AND (created < ? OR (created = ? AND id < ?))", args + [before, before, int(before_id)]
     if term:  # the text and what's said in voice notes and videos; forgiving (see _note_find)
-        found = search.notes_search(term)
+        found = search.notes_search(term, visual=request.args.get("visual") == "1")
         return jsonify(notes=[notes.note_dict(r, m, seen) for r, m, seen in found[:200]], more=False)
     rows = q(f"SELECT * FROM notes WHERE {where} ORDER BY created DESC, id DESC LIMIT 51", args)
     extra = {}
@@ -1645,6 +1711,23 @@ def book_replace(bid):
     return jsonify(ok=True)
 
 
+def reading_position(value):
+    if value is None:
+        return 'null'
+    if not isinstance(value, dict) or set(value) - {'ch', 'page', 'f'}:
+        raise ValueError('invalid reading position')
+    out = {}
+    for key in ('ch', 'page'):
+        if key in value:
+            n = core.number(value[key], high=1000000)
+            if n != int(n):
+                raise ValueError('invalid page')
+            out[key] = int(n)
+    if 'f' in value:
+        out['f'] = core.number(value['f'], high=1)
+    return json.dumps(out)
+
+
 @app.post("/api/books/<int:bid>/progress")
 def book_progress(bid):
     """Where reading is (pos: {ch, f} or {page, f}; pct: of the whole book) and the seconds read since the last save.
@@ -1653,14 +1736,19 @@ def book_progress(bid):
         return jsonify(error="not found"), 404
     body = request.get_json(silent=True) or {}
     try:
-        pct = max(0.0, min(1.0, float(body.get("pct") or 0)))
-        at = min(float(body.get("at") or time.time()), time.time())
+        pct = core.number(body.get('pct'), high=1)
+        at = min(core.number(body.get('at'), default=time.time()), time.time())
+        secs = min(core.number(body.get('secs')), weekly.MAX_SAVE_SECONDS)
     except (TypeError, ValueError):
         return jsonify(error="bad position"), 400
-    pos = json.dumps(body.get("pos"))[:500]
+    try:
+        pos = reading_position(body.get("pos"))
+    except (TypeError, ValueError):
+        return jsonify(error="bad position"), 400
+    if body.get('storage_owner') and body['storage_owner'] != g.owner:
+        return jsonify(error="账号已切换，请刷新后重试"), 409
     prev = q("SELECT * FROM book_read WHERE owner=? AND book=?", (g.owner, bid), one=True)
-    weekly.record(g.owner, "book", bid, body.get("secs"), prev["pct"] if prev else 0, pct)
-    secs = max(0.0, min(float(body.get("secs") or 0), weekly.MAX_SAVE_SECONDS))
+    weekly.record(g.owner, "book", bid, secs, prev["pct"] if prev else 0, pct)
     if prev and prev["updated"] and at < prev["updated"]:  # a newer position came from another device meanwhile
         q("UPDATE book_read SET seconds=seconds+? WHERE owner=? AND book=?", (secs, g.owner, bid))
         return jsonify(ok=True, stale=True)
@@ -1681,11 +1769,12 @@ def book_mark_add(bid):
         return jsonify(error="not found"), 404
     body = request.get_json(silent=True) or {}
     try:
-        pct = max(0.0, min(1.0, float(body.get("pct") or 0)))
+        pct = core.number(body.get('pct'), high=1)
+        pos = reading_position(body.get("pos"))
     except (TypeError, ValueError):
         return jsonify(error="bad position"), 400
     q("INSERT INTO book_marks (owner, book, pos, pct, text, created) VALUES (?,?,?,?,?,?)",
-      (g.owner, bid, json.dumps(body.get("pos"))[:500], pct, str(body.get("text", ""))[:300], time.time()))
+      (g.owner, bid, pos, pct, str(body.get("text", ""))[:300], time.time()))
     return book_info(bid)
 
 
@@ -1815,14 +1904,23 @@ def save_watch(jid):
     if not visible(jid):
         return jsonify(error="not found"), 404
     body = request.get_json(silent=True) or {}
+    if body.get('storage_owner') and body['storage_owner'] != g.owner:
+        return jsonify(error='账号已切换'), 409
     try:
-        pos, dur, part = float(body.get("pos") or 0), float(body.get("dur") or 0), int(body.get("part") or 0)
+        if 'ended' in body and not isinstance(body['ended'], bool):
+            raise ValueError('bad ended')
+        pos, dur = core.number(body.get('pos')), core.number(body.get('dur'))
+        part = core.number(body.get('part'), high=100000)
+        secs = min(core.number(body.get('secs')), weekly.MAX_SAVE_SECONDS)
+        if not part.is_integer() or (dur and pos > dur + 1):
+            raise ValueError('bad position')
+        part = int(part)
     except (TypeError, ValueError):
         return jsonify(error="bad position"), 400
-    done = bool(body.get("ended")) or (dur > 0 and (pos > dur - 30 or pos / dur > 0.95))
+    done = bool(body.get("ended")) or core.watched_to_end(pos, dur)
     prev = q("SELECT done, pos, dur FROM watch WHERE owner=? AND job_id=?", (g.owner, jid), one=True)
     if dur > 0:  # how long it was really played since the last save (每周总结)
-        weekly.record(g.owner, "video", jid, body.get("secs"), (prev["pos"] / prev["dur"]) if prev and prev["dur"] else 0,
+        weekly.record(g.owner, "video", jid, secs, ((prev["pos"] or 0) / prev["dur"]) if prev and prev["dur"] else 0,
                       1.0 if done and body.get("ended") else min(1.0, pos / dur))
     q("INSERT INTO watch (owner, job_id, part, pos, dur, done, updated) VALUES (?,?,?,?,?,?,?) "
       "ON CONFLICT(owner, job_id) DO UPDATE SET part=excluded.part, pos=excluded.pos, dur=excluded.dur, "
@@ -2042,7 +2140,8 @@ def setup_app():
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, share, tasks, weekly  # noqa: E402
+from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
+__import__(__package__ + '.share')  # register sharing routes
 
 
 def _request_crashed(sender, exception, **extra):

@@ -20,12 +20,9 @@ When nobody has touched the Mac for a while (IDLE_AFTER) a second loop takes the
 CLIP on the CPU) while the first keeps Whisper busy on the GPU; one more would only make the Pi cut keyframes for two
 videos at once. Back to one loop as soon as someone uses the Mac (the picture task in hand is finished first).
 
-AI requests (summaries, chapters, translations, sorting...): two more claim loops answer them with this Mac's Claude
-Code (`claude -p`, logged in with the Claude subscription), so they don't go to the paid DeepSeek API. They keep going
-while a game is in front (it's only waiting on the network). When Claude fails or its limits are used up, Codex
-(`codex exec`, logged in with the ChatGPT subscription) answers instead; when both are used up the loops say they're
-paused until one resets, and the Pi asks DeepSeek meanwhile. When AI requests pile up (LLM_BACKLOG waiting), two more
-loops join in until the pile is gone (it's only waiting on the network; the subscription's limits are what's spent).
+AI requests use Codex (the ChatGPT subscription) first; the Pi falls back to DeepSeek if Codex is
+unavailable, fails or runs out of quota. Two loops keep going during gaming; two extra loops join
+when LLM_BACKLOG requests are waiting. Whisper, CLIP and Vision keep their existing local paths.
 """
 import base64
 import json
@@ -53,7 +50,7 @@ FFMPEG = shutil.which("ffmpeg") or "/usr/local/Homebrew/bin/ffmpeg"  # launchd's
 OUTBOX = HERE / "outbox.jsonl"
 UNLOAD_AFTER = 600  # free the model's ~2 GB of memory after this long without work
 NAME = "mac-" + socket.gethostname().split(".")[0]
-CAPS = ["transcribe", "cover", "frames", "note_media", "gpu"]  # the task kinds this does, and that it has a GPU
+CAPS = ["transcribe", "live_transcribe", "live_render", "cover", "frames", "note_media", "gpu"]
 PIC_CAPS = ["cover", "frames", "gpu"]  # the second loop's, while the Mac is idle (CPU: runs beside Whisper)
 IDLE_AFTER = 600  # seconds without keyboard / mouse before the Mac counts as idle
 CLIP = HERE / "models" / "clip" / "vision.onnx"  # the Pi's image model (same file: same vectors), copied over
@@ -61,11 +58,10 @@ CLIP_MODEL = "chinese-clip-vit-base-patch16-int8"  # its name on the Pi (search.
 CLIP_MEAN, CLIP_STD = (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 SAME_SHOT = 0.85  # a keyframe at least this alike to the last one kept is the same shot (talk shows: a handful)
 GAME_APPS = HERE / "game-apps.txt"
-CLAUDE = Path(os.environ.get("CLAUDE_BIN") or Path.home() / ".local" / "bin" / "claude")
-CLAUDE_DIR = HERE / "claude-cwd"  # an empty folder to run it in: no project files for it to pick up
-CLAUDE_CAPS = ["llm", "claude", "shortcut"]  # (and signing iOS shortcuts: quick, and keeps going while gaming)
-CLAUDE_LOOPS = 2
-CLAUDE_EXTRA = 2  # more loops, only while LLM_BACKLOG or more AI requests are waiting
+AI_DIR = HERE / "codex-cwd"  # an empty folder to run it in: no project files for it to pick up
+AI_CAPS = ["llm", "codex", "shortcut"]  # (and signing iOS shortcuts: quick, and keeps going while gaming)
+AI_LOOPS = 2
+AI_EXTRA = 2  # more loops, only while LLM_BACKLOG or more AI requests are waiting
 LLM_BACKLOG = 6
 CODEX = Path(os.environ.get("CODEX_BIN") or shutil.which("codex") or "/usr/local/Homebrew/bin/codex")
 CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-terra")  # empty: the account's default model
@@ -362,7 +358,22 @@ def do_note_media(task):
     return {"items": items}
 
 
-HANDLERS = {"transcribe": do_transcribe, "cover": do_cover, "frames": do_frames, "note_media": do_note_media}
+def do_live_render(task):
+    p = task["payload"]
+    with fetch(task, "live-source", ".mkv") as original, tempfile.NamedTemporaryFile(suffix=".mp4") as rendered:
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-ss", str(p["seek"]), "-i", original.name,
+                        "-t", str(p["duration"]), "-map", "0:v:0", "-map", "0:a:0?",
+                        "-vf", "scale='min(1280,iw)':-2", "-c:v", "h264_videotoolbox", "-b:v", "3500k",
+                        "-c:a", "aac", "-movflags", "+faststart", rendered.name], check=True, timeout=1800)
+        with open(rendered.name, "rb") as video:
+            response = http.post(f"{PI}/api/tasks/{task['id']}/live-result", params={"worker": whoami()},
+                                 files={"video": ("clip.mp4", video, "video/mp4")}, timeout=(10, 600))
+            response.raise_for_status()
+    return {"rendered": True}
+
+
+HANDLERS = {"transcribe": do_transcribe, "live_transcribe": do_transcribe, "live_render": do_live_render,
+            "cover": do_cover, "frames": do_frames, "note_media": do_note_media}
 
 
 class Busy(Exception):
@@ -426,7 +437,7 @@ def unload():
         traceback.print_exc()
 
 
-# ---- AI requests from the Pi, answered by Claude Code on this Mac
+# ---- AI requests from the Pi, answered by Codex on this Mac
 
 class UsageLimit(Exception):
     def __init__(self, text, until):
@@ -444,12 +455,12 @@ def proxy_env():
     return env
 
 
-def run_cli(cmd, text, beat, timeout=600):
+def run_cli(cmd, text, beat, timeout=600, cwd=None):
     """Run an AI command line in the empty folder with `text` on stdin, heartbeats to the Pi every minute meanwhile.
     Killed when it takes longer than `timeout` (the Pi stops waiting at some point anyway)."""
-    CLAUDE_DIR.mkdir(exist_ok=True)
+    AI_DIR.mkdir(exist_ok=True)
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          cwd=CLAUDE_DIR, env=proxy_env()) as proc:
+                          cwd=cwd or AI_DIR, env=proxy_env()) as proc:
         stop = threading.Event()
         threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
         try:
@@ -463,46 +474,18 @@ def run_cli(cmd, text, beat, timeout=600):
     return proc.returncode, stdout, stderr
 
 
-def ask_claude(p, beat):
-    """One request (system prompt, user text, the JSON keys wanted) through `claude -p`: no tools, no project
-    context (--safe-mode), nothing kept; the answer validated against a schema with those keys."""
-    schema = {"type": "object", "properties": {k: {} for k in p["fields"]}, "required": list(p["fields"])}
-    cmd = [str(CLAUDE), "-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--output-format", "json",
-           "--model", p.get("model") or "sonnet", "--effort", p.get("effort") or "medium",
-           "--system-prompt", p["system"], "--json-schema", json.dumps(schema)]
-    started = time.time()
-    code, stdout, stderr = run_cli(cmd, p["user"], beat)
-    try:
-        out = json.loads(stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude said (exit {code}): {(stderr or stdout).strip()[-300:]}")
-    if out.get("is_error") or out.get("subtype") != "success":
-        text = str(out.get("result") or out.get("subtype") or stderr)
-        if out.get("api_error_status") == 429 or re.search(r"limit", text, re.I):
-            m = re.search(r"\|(\d{10})", text)  # "...limit reached|<when it resets>"
-            raise UsageLimit(text[:200], int(m.group(1)) if m else time.time() + 1800)
-        raise RuntimeError(f"claude: {text[:300]}")
-    answer = out.get("structured_output")
-    if not isinstance(answer, dict):
-        answer = json.loads(re.sub(r"^```(json)?|```$", "", (out.get("result") or "").strip()))
-    u = out.get("usage") or {}
-    return {"out": answer, "model": next(iter(out.get("modelUsage") or {}), p.get("model")), "engine": "claude",
-            "tokens_in": (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
-            "cache_read": u.get("cache_read_input_tokens") or 0, "tokens_out": u.get("output_tokens") or 0,
-            "seconds": round(time.time() - started, 1)}
-
-
-def ask_codex(p, beat):
-    """The same request through `codex exec` (the ChatGPT subscription): read-only sandbox in the empty folder, no
+def ask_codex(p, beat, *, cwd=None, timeout=300, model=None):
+    """A request through `codex exec` (the ChatGPT subscription): read-only sandbox in the empty folder, no
     user config or rules, nothing kept. The system prompt goes in as developer instructions. No --output-schema: its
     strict mode wants a type for every key, and the prompts already ask for exactly these keys as JSON."""
+    model = CODEX_MODEL if model is None else model
     cmd = [str(CODEX), "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
            "-s", "read-only", "--json", "--color", "never",
            "-c", f"model_reasoning_effort={json.dumps(p.get('effort') or 'medium')}",
            "-c", f"developer_instructions={json.dumps(p['system'], ensure_ascii=False)}",
-           *(["-m", CODEX_MODEL] if CODEX_MODEL else []), "-"]
+           *(["-m", model] if model else []), "-"]
     started = time.time()
-    code, stdout, stderr = run_cli(cmd, p["user"], beat, timeout=300)
+    code, stdout, stderr = run_cli(cmd, p["user"], beat, timeout=timeout, cwd=cwd)
     text, usage, error = None, {}, None
     for line in stdout.splitlines():
         try:
@@ -515,7 +498,7 @@ def ask_codex(p, beat):
             usage = ev.get("usage") or {}
         elif ev.get("type") in ("error", "turn.failed"):
             error = str(ev.get("message") or (ev.get("error") or {}).get("message") or ev)
-    if text is None:
+    if code != 0 or error or text is None:
         error = error or (stderr or stdout).strip()[-300:] or f"exit {code}"
         if re.search(r"usage limit|rate limit|429|quota", error, re.I):
             raise UsageLimit(f"codex: {error[:200]}", time.time() + 1800)
@@ -523,16 +506,15 @@ def ask_codex(p, beat):
     answer = json.loads(re.sub(r"^```(json)?|```$", "", text.strip()))
     if not isinstance(answer, dict):
         raise RuntimeError(f"codex: not a JSON object: {text[:200]}")
-    return {"out": answer, "model": CODEX_MODEL or "codex", "engine": "codex",
+    return {"out": answer, "model": model or "codex", "engine": "codex",
             "tokens_in": usage.get("input_tokens") or 0, "cache_read": usage.get("cached_input_tokens") or 0,
             "tokens_out": (usage.get("output_tokens") or 0), "seconds": round(time.time() - started, 1)}
 
 
 def answer_llm(p, beat, limits):
-    """Claude first, then Codex; each skipped while its limits are used up (`limits`: name -> until when).
-    Raises when neither answered: the Pi asks DeepSeek then."""
+    """Ask Codex unless its quota is exhausted; failures go back to the Pi for DeepSeek."""
     errors = []
-    for name, ask, there in (("claude", ask_claude, CLAUDE.exists()), ("codex", ask_codex, CODEX.exists())):
+    for name, ask, there in (("codex", ask_codex, CODEX.exists()),):
         if not there or time.time() < limits.get(name, 0):
             continue
         try:
@@ -544,7 +526,7 @@ def answer_llm(p, beat, limits):
         except Exception as e:
             traceback.print_exc()
             errors.append(f"{name}: {e}")
-    raise RuntimeError("; ".join(errors) or "no Claude or Codex to ask")
+    raise RuntimeError("; ".join(errors) or "no Codex to ask")
 
 
 def text_value(text, attachments=None):
@@ -595,26 +577,26 @@ def sign_shortcut(p):
         raise RuntimeError(f"shortcuts sign: {(r.stderr or r.stdout).strip()[-300:]}")
 
 
-def claude_loop(n, extra=False):
-    name = me.name = f"{NAME}-claude-{n}"
-    limits = {}  # "claude" / "codex" -> until when its limits are used up
+def codex_loop(n, extra=False):
+    name = me.name = f"{NAME}-codex-{n}"
+    limits = {}  # "codex" -> until when its limits are used up
     while True:
         if extra and llm_backlog() < LLM_BACKLOG:
             time.sleep(30)
             continue
-        if not CLAUDE.exists() and not CODEX.exists():
-            log("no Claude Code at", CLAUDE, "and no Codex at", CODEX, ": AI requests stay with the Pi")
+        if not CODEX.exists():
+            log("no Codex at", CODEX, ": AI requests stay with the Pi")
             return
         try:
-            usable = [k for k, there in (("claude", CLAUDE.exists()), ("codex", CODEX.exists()))
+            usable = [k for k, there in (("codex", CODEX.exists()),)
                       if there and time.time() >= limits.get(k, 0)]
             if not usable:
                 until = min(limits.values())
-                call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS,
-                     paused=f"Claude 和 Codex 额度用完，{time.strftime('%H:%M', time.localtime(until))} 恢复")
+                call("/api/tasks/claim", worker=name, caps=AI_CAPS,
+                     paused=f"Codex 额度用完，{time.strftime('%H:%M', time.localtime(until))} 恢复")
                 time.sleep(60)
                 continue
-            task = call("/api/tasks/claim", worker=name, caps=CLAUDE_CAPS, wait=25)["task"]
+            task = call("/api/tasks/claim", worker=name, caps=AI_CAPS, wait=25)["task"]
         except requests.RequestException:
             time.sleep(5)  # the Pi restarting (a deploy): back soon, and someone may be waiting on a search
             continue
@@ -642,13 +624,12 @@ def claude_loop(n, extra=False):
                 pass
 
 
-# ---- 自修复: an error the Pi ran into (shiguang/heal.py), worked out and fixed with this Mac's Claude Code
+# ---- 自修复: an error the Pi ran into (shiguang/heal.py), worked out and fixed with this Mac's Codex
 
 REPO = Path(os.environ.get("SHIGUANG_REPO") or Path.home() / "vpn" / "grabber")  # the code, deploy.sh next to it
 HEAL_DIR = HERE / "heal-worktree"  # a git worktree of it: the user's own checkout is never touched
-HEAL_MODEL = os.environ.get("HEAL_MODEL", "opus")
-HEAL_TURNS = int(os.environ.get("HEAL_TURNS", "30"))  # Claude's turns (tool calls and answers) per round, at most
-HEAL_ROUNDS = 2  # a fix the smoke test rejects goes back to Claude once, with what failed
+HEAL_MODEL = os.environ.get("HEAL_MODEL", CODEX_MODEL)
+HEAL_ROUNDS = 2  # a fix the smoke test rejects goes back to Codex once, with what failed
 HEAL_PATHS = ("shiguang/", "grabber.py", "index.html", "tests/")  # what a fix may change (not deploy.sh, mac/, config)
 PI_SSH = os.environ.get("PI_SSH", "pi@192.168.3.200")
 HEAL_SYSTEM = """You fix bugs in 拾光, a home media server on a Raspberry Pi. The code is in this folder: the shiguang/
@@ -726,38 +707,49 @@ def heal_prompt(p, failed="", evidence=""):
 
 
 def ask_healer(p, beat, can_edit, failed="", evidence=""):
-    """One round of Claude Code in the worktree: read-only when it can't fix (it then only diagnoses)."""
-    cmd = [str(CLAUDE), "-p", "--safe-mode", "--no-session-persistence", "--output-format", "json",
-           "--model", HEAL_MODEL, "--max-turns", str(HEAL_TURNS),
-           "--tools", "Read,Grep,Glob,Edit,Write" if can_edit else "Read,Grep,Glob",
-           "--permission-mode", "acceptEdits", "--append-system-prompt", HEAL_SYSTEM, "--json-schema", json.dumps(HEAL_SCHEMA)]
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          cwd=HEAL_DIR, env=proxy_env()) as proc:
-        stop = threading.Event()
-        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
-        try:
-            stdout, stderr = proc.communicate(heal_prompt(p, failed, evidence), timeout=1800)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise RuntimeError("claude: no answer in 30 min")
-        finally:
-            stop.set()
-    try:
-        out = json.loads(stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude said (exit {proc.returncode}): {(stderr or stdout).strip()[-300:]}")
-    answer = out.get("structured_output")
-    if not isinstance(answer, dict):
-        if out.get("subtype") == "error_max_turns":
-            return {"state": "diagnosed", "diagnosis": f"对话到了 {HEAL_TURNS} 轮上限，还没找到原因。", "summary": "没查出来", "retry": False,
-                    "confidence": "low", "evidence": ""}
-        raise RuntimeError(f"claude: {str(out.get('result') or out.get('subtype'))[:300]}")
+    """Codex inspects the worktree read-only; the host validates and applies its proposed patch."""
+    system = HEAL_SYSTEM + """
+Return one JSON object with state, diagnosis, summary, retry, confidence, evidence and patch.
+Do not edit files or run commands that change files or system state. Read/search the repository as needed.
+patch: a unified diff suitable for git apply, or an empty string when no code change is needed.
+Only propose changes within shiguang/, grabber.py, index.html and tests/.
+""" + ("This invocation is diagnosis only: patch MUST be empty." if not can_edit else "")
+    answer = ask_codex({"system": system, "user": heal_prompt(p, failed, evidence), "effort": "medium"},
+                       beat, cwd=HEAL_DIR, timeout=1800, model=HEAL_MODEL)["out"]
+    for key in HEAL_SCHEMA["required"]:
+        if key not in answer:
+            raise RuntimeError(f"codex healer: missing {key}")
+    if answer["state"] not in ("fixed", "diagnosed", "not_a_bug") or not isinstance(answer["retry"], bool):
+        raise RuntimeError("codex healer: invalid state or retry")
+    patch = answer.get("patch") or ""
+    if not isinstance(patch, str):
+        raise RuntimeError("codex healer: patch must be a string")
+    if can_edit and patch.strip():
+        apply_heal_patch(patch)
     return answer
 
 
+def apply_heal_patch(patch):
+    """Validate every destination before applying a diff; never execute model-supplied code."""
+    args = ["git", "apply", "--numstat", "-z", "-"]
+    r = subprocess.run(args, input=patch, cwd=HEAL_DIR, capture_output=True, text=True)
+    if r.returncode or not r.stdout:
+        raise RuntimeError(f"codex healer: invalid patch: {r.stderr[:300]}")
+    for entry in r.stdout.split("\0"):
+        if not entry:
+            continue
+        added, removed, path = entry.split("\t", 2)
+        if (added == "-" or removed == "-" or not path.startswith(HEAL_PATHS)
+                or Path(path).is_absolute() or ".." in Path(path).parts):
+            raise RuntimeError(f"codex healer: patch outside allowed text files: {path}")
+    for flags in (["--check"], []):
+        r = subprocess.run(["git", "apply", *flags, "-"], input=patch, cwd=HEAL_DIR, capture_output=True, text=True)
+        if r.returncode:
+            raise RuntimeError(f"codex healer: patch rejected: {r.stderr[:300]}")
+
+
 def heal(task, beat):
-    """Diagnose an incident and, when the Pi runs the committed code, fix it: Claude edits a worktree, deploy.sh tests
+    """Diagnose an incident and, when the Pi runs the committed code, fix it: Codex proposes a patch for a worktree, deploy.sh tests
     the fix on a copy of the database and puts it live (or leaves the Pi as it was); the fix is then committed onto
     the checkout's branch (or a heal/N branch when that has moved on)."""
     p = task["payload"]
@@ -788,7 +780,7 @@ def heal(task, beat):
                 return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}
             git("add", "-A", "--", *HEAL_PATHS, cwd=HEAL_DIR)
             git("commit", "-q", "-m", f"自修复 #{p['incident']}: {answer['summary']}\n\n{answer['diagnosis']}\n\n"
-                "Co-Authored-By: Claude <noreply@anthropic.com>", cwd=HEAL_DIR)
+                "Co-Authored-By: Codex <noreply@openai.com>", cwd=HEAL_DIR)
             env = dict(os.environ, PYFLAKES=os.environ.get("PYFLAKES") or str(Path(sys.executable).parent / "pyflakes"))
             stop = threading.Event()
             threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
@@ -818,8 +810,8 @@ def heal(task, beat):
 def heal_loop():
     """Its own thread, one incident at a time (they're rare; a deploy at a time)."""
     me.name = f"{NAME}-heal"
-    if not CLAUDE.exists() or not (REPO / ".git").exists():
-        log("no Claude Code or no code at", REPO, ": 自修复 stays off")
+    if not CODEX.exists() or not (REPO / ".git").exists():
+        log("no Codex or no code at", REPO, ": 自修复 stays off")
         return
     while True:
         try:
@@ -922,8 +914,8 @@ def run():
     threading.Thread(target=drop_loop, daemon=True).start()
     threading.Thread(target=pic_loop, daemon=True).start()
     threading.Thread(target=heal_loop, daemon=True).start()
-    for n in range(1, CLAUDE_LOOPS + CLAUDE_EXTRA + 1):
-        threading.Thread(target=claude_loop, args=(n, n > CLAUDE_LOOPS), daemon=True).start()
+    for n in range(1, AI_LOOPS + AI_EXTRA + 1):
+        threading.Thread(target=codex_loop, args=(n, n > AI_LOOPS), daemon=True).start()
     last_work, loaded, paused_for_game = time.time(), False, False
     while True:
         if gaming():  # playing: leave the Mac alone; tell the Pi we're only paused, so it doesn't start on our tasks

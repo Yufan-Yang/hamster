@@ -653,9 +653,9 @@ def pi_shortcut(task, beat):
     raise ValueError("only a Mac signs shortcuts")
 
 
-@board.task("llm", "AI（Mac 上的 Claude）", "mac")
+@board.task("llm", "AI（Mac 上的 Codex）", "mac")
 def pi_llm(task, beat):
-    """A request for Claude (llm.claude_json): only the Mac's claim loop does these; the asker falls back to DeepSeek."""
+    """A request for Codex (llm.codex_json): only the Mac's claim loop does these; the asker falls back to DeepSeek."""
     raise ValueError("only the Mac answers these")
 
 

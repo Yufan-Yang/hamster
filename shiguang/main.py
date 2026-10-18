@@ -1,8 +1,9 @@
 """Process entry points: the web page, the worker, a job, a task."""
 import threading
 import time
+import os
 
-from . import migrations, board, channels, heal, library, pipeline, search, telegram, usage, web
+from . import migrations, board, channels, heal, library, live_calibration, live_editorial, live_recorder, pipeline, search, telegram, usage, web
 from .core import (DOWNLOAD_WORKERS, EXTERNAL_PORT, INCOMPLETE, NOTE_MAX_UPLOAD, PORT, TG_TOKEN, app, finishing_threads, init_db, listen_bell)
 
 
@@ -13,6 +14,7 @@ def main_web():
     web.ensure_admin()
     heal.db_watch("web")
     threading.Thread(target=library.warm_probes, daemon=True).start()
+    threading.Thread(target=live_calibration.progress_cache_loop, daemon=True).start()
     if (search.CLIP_DIR / "text.onnx").exists():
         threading.Thread(target=search.clip_text, args=("拾光",), daemon=True).start()  # first search needn't wait for it
     from waitress import serve
@@ -38,6 +40,12 @@ def main_worker():
     threading.Thread(target=board.light_loop, daemon=True).start()
     threading.Thread(target=board.light_loop, args=("ai",), daemon=True).start()
     threading.Thread(target=board.light_loop, args=("ai-quick",), daemon=True).start()
+    threading.Thread(target=board.light_loop, args=("publish",), daemon=True).start()
+    threading.Thread(target=board.light_loop, args=("live-io",), daemon=True).start()
+    threading.Thread(target=board.light_loop, args=("live-search",), daemon=True).start()
+    threading.Thread(target=live_editorial.cleanup_loop, daemon=True).start()
+    if os.environ.get('GRABBER_RECORDER_SEPARATE') != '1':
+        threading.Thread(target=live_recorder.loop, daemon=True).start()
     threading.Thread(target=board.heavy_loop, daemon=True).start()
     threading.Thread(target=usage.traffic_loop, daemon=True).start()
     if TG_TOKEN:
@@ -58,11 +66,20 @@ def main_run_job(job_id):
         t.join(timeout=max(0, deadline - time.time()))
 
 
+def main_recorder():
+    init_db()
+    web.setup_app()
+    listen_bell('recorder')
+    live_recorder.loop(wait_for_lock=True)
+
+
 def main(argv):
-    """grabber.py [web | worker | run-job N | task N WORKER]"""
+    """grabber.py [web | worker | recorder | run-job N | task N WORKER]"""
     mode = argv[1] if len(argv) > 1 else "web"
     if mode == "worker":
         main_worker()
+    elif mode == 'recorder':
+        main_recorder()
     elif mode == "run-job":
         main_run_job(int(argv[2]))
     elif mode == "task":

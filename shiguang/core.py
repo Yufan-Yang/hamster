@@ -2,6 +2,7 @@
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import requests
@@ -63,6 +64,25 @@ SUB_EXT = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup"}
 VIDEO_FOLDERS = ["Music Videos", "Tutorials", "Talks", "News", "Gaming", "Sports", "Documentaries",
                  "Vlogs", "Comedy", "Clips", "Other"]
 URL_RE = re.compile(r"(magnet:\?[^\s<>\"]+|https?://[^\s<>\"]+)")
+
+
+def number(value, default=0, low=0, high=None):
+    """Validate client numbers before they can reach SQLite or activity calculations."""
+    if value is None:
+        value = default
+    if isinstance(value, bool):
+        raise ValueError('数值无效')
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError('数值超出有效范围') from exc
+    if not math.isfinite(value) or value < low or (high is not None and value > high):
+        raise ValueError('数值超出有效范围')
+    return value
+
+
+def watched_to_end(position, duration):
+    return duration > 0 and position >= duration - min(30, duration * .05)
 
 
 def find_urls(text):
@@ -259,7 +279,7 @@ def init_db(reset=False):
         worker TEXT, lease_until REAL, attempts INTEGER DEFAULT 0, not_before REAL, error TEXT DEFAULT '',
         parent INTEGER, published_by TEXT, created REAL, updated REAL, UNIQUE (kind, target));
     CREATE INDEX IF NOT EXISTS tasks_queue ON tasks (state, priority, id);
-    -- 自修复 (heal.py): errors the Pi ran into, one row per distinct bug, and what the Mac's Claude Code made of it
+    -- 自修复 (heal.py): errors the Pi ran into, one row per distinct bug, and what the Mac's Codex made of it
     CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, sig TEXT UNIQUE, kind TEXT, label TEXT,
         title TEXT, error TEXT, trace TEXT, context TEXT, tasks TEXT DEFAULT '[]', count INTEGER DEFAULT 1,
         tries INTEGER DEFAULT 0, state TEXT DEFAULT 'new', diagnosis TEXT DEFAULT '', summary TEXT DEFAULT '',
