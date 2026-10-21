@@ -6,9 +6,72 @@ from pathlib import Path
 from unittest.mock import patch
 
 from shiguang import core, live, live_editorial
+from shiguang.live_curator import confirmed_boundaries
 
 
 def run(check):
+    def complete_units():
+        owner, key = 'user:complete-units-test', 'complete-units-test'
+        core.q("INSERT INTO live_sources(owner,room_id,url,name,settings,enabled) VALUES (?,88442,'https://live.bilibili.com/88442','边界测试',?,0)",
+               (owner, json.dumps({'topic_minutes': 2, 'topic_unit': 'story'})))
+        source = core.q('SELECT * FROM live_sources WHERE owner=?', (owner,), one=True)
+        sid = source['id']
+        core.q("INSERT INTO live_sessions(key,source_id,owner,title,started,cursor,topic_start,topic_title,topic_summary) "
+               "VALUES (?,?,?,'咨询直播',?,1440,0,'同一案子的完整咨询','案情已说明，正在分析证据，尚未答复完')", (key,sid,owner,time.time()))
+        for seq in range(28):
+            core.q("INSERT INTO live_recordings(owner,source_id,session_key,seq,offset,duration,state,path,segments) "
+                   "VALUES (?,?,?,?,?,60,'ready','/unused/complete-units.mkv',?)",
+                   (owner,sid,key,seq,seq*60,json.dumps([[0,30,'补充同一案子的证据，继续回答当事人的追问。'],[30,60,'继续讨论。']])))
+        candidate = {'at': 1500, 'next_title': '证据与责任分析', 'previous_summary': '同一案子的背景'}
+        result = {'highlights': [], 'topic_changes': [candidate], 'current_topic': '证据与责任分析',
+                  'current_summary': '仍在回答同一当事人的追问'}
+        def analyze(responses):
+            with patch.object(live.llm, 'llm_json', side_effect=responses) as model, patch.object(live, 'queue_render'):
+                live.analyze({'payload': {'session':key}}, lambda _: True)
+                return model
+        try:
+            # Longer than both the old default limit and this source's explicit two-minute limit.
+            model = analyze([result, {'boundaries':[{'index':0, 'previous_complete':False, 'next_independent':False,
+                                                     'confidence':.95, 'reason':'仍为同一案子的追问'}]}])
+            assert not core.q('SELECT id FROM live_clips WHERE session_key=?', (key,))
+            assert core.q('SELECT topic_start FROM live_sessions WHERE key=?', (key,), one=True)['topic_start'] == 0
+            assert json.loads(model.call_args.args[1])['topic_unit'] == 'story'
+            # An unconfirmed switch near the window edge is reconsidered after later dialogue arrives.
+            core.q('UPDATE live_sessions SET cursor=1440 WHERE key=?', (key,))
+            late = {**result, 'topic_changes':[{**candidate, 'at':1550}]}
+            assert analyze([late]).call_count == 1
+            assert not core.q('SELECT id FROM live_clips WHERE session_key=?', (key,))
+            core.q('UPDATE live_sources SET settings=? WHERE id=?', (json.dumps({'topic_unit':'topic'}), sid))
+            switched = {**late, 'current_topic':'另一个聊天话题'}
+            approval = {'boundaries':[{'index':0,'previous_complete':True,'next_independent':True,
+                                       'confidence':.95,'reason':'已持续转到独立话题'}]}
+            # 1550 is before the saved cursor 1560, but has not yet been cut.
+            model = analyze([switched, approval])
+            assert json.loads(model.call_args.args[1])['topic_unit'] == 'topic'
+            clips = core.q('SELECT start,end FROM live_clips WHERE session_key=?', (key,))
+            assert [(c['start'],c['end']) for c in clips] == [(0,1550)]
+            # On recording end, keep the whole remaining discussion, without a timed continuation.
+            core.q("UPDATE live_sessions SET status='ended',cursor=1560 WHERE key=?", (key,))
+            analyze([{**result, 'topic_changes':[]}])
+            clips = core.q('SELECT start,end FROM live_clips WHERE session_key=? ORDER BY start', (key,))
+            assert [(c['start'],c['end']) for c in clips] == [(0,1550),(1550,1680)]
+            for bad in (None, {}, {'boundaries':None}, {'boundaries':[True]},
+                        {'boundaries':[{**approval['boundaries'][0], 'index':True}]},
+                        {'boundaries':[{**approval['boundaries'][0], 'previous_complete':'true'}]}):
+                assert confirmed_boundaries(bad,[candidate]) == []
+            for unit in ('auto','story','topic'):
+                assert live.settings({'topic_unit':unit})['topic_unit'] == unit
+            try:
+                live.settings({'topic_unit':'chapters'})
+                raise AssertionError('invalid topic unit accepted')
+            except ValueError:
+                pass
+        finally:
+            core.q("DELETE FROM tasks WHERE kind IN ('live_render','live_score') AND json_extract(payload,'$.clip') IN (SELECT id FROM live_clips WHERE owner=?)", (owner,))
+            for table in ('live_clips','live_recordings','live_sessions','live_sources'):
+                core.q(f'DELETE FROM {table} WHERE owner=?', (owner,))
+    check('live segmentation: long complete stories, reviewed switches, delayed boundaries, chat units and final flush', complete_units)
+
     def topic_scores():
         assert live_editorial.normalized_scores({'topic': 90}) is None
         assert live_editorial.normalized_scores({'topic': True, 'traffic': 80, 'fun': 80, 'completeness': 90}) is None

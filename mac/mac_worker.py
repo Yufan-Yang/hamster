@@ -64,7 +64,7 @@ AI_LOOPS = 2
 AI_EXTRA = 2  # more loops, only while LLM_BACKLOG or more AI requests are waiting
 LLM_BACKLOG = 6
 CODEX = Path(os.environ.get("CODEX_BIN") or shutil.which("codex") or "/usr/local/Homebrew/bin/codex")
-CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-terra")  # empty: the account's default model
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-6.1-sol")  # empty: the account's default model
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
 CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 / 书架 the drop folder fills
@@ -94,6 +94,13 @@ def call(path, **body):
     r = http.post(PI + path, json={"worker": whoami(), **body}, timeout=60)
     r.raise_for_status()
     return r.json()
+
+
+def task_heartbeat(task, **body):
+    result = call(f"/api/tasks/{task['id']}/heartbeat", claim_token=task.get("claim_token"), **body)
+    if not result.get("ok"):
+        raise RuntimeError("task lease was lost")
+    return result
 
 
 # ---- publishing (with an outbox for when the Pi can't be reached)
@@ -366,7 +373,7 @@ def do_live_render(task):
                         "-vf", "scale='min(1280,iw)':-2", "-c:v", "h264_videotoolbox", "-b:v", "3500k",
                         "-c:a", "aac", "-movflags", "+faststart", rendered.name], check=True, timeout=1800)
         with open(rendered.name, "rb") as video:
-            response = http.post(f"{PI}/api/tasks/{task['id']}/live-result", params={"worker": whoami()},
+            response = http.post(f"{PI}/api/tasks/{task['id']}/live-result", params={"worker": whoami(), "claim_token": task.get("claim_token")},
                                  files={"video": ("clip.mp4", video, "video/mp4")}, timeout=(10, 600))
             response.raise_for_status()
     return {"rendered": True}
@@ -458,11 +465,22 @@ def proxy_env():
 def run_cli(cmd, text, beat, timeout=600, cwd=None):
     """Run an AI command line in the empty folder with `text` on stdin, heartbeats to the Pi every minute meanwhile.
     Killed when it takes longer than `timeout` (the Pi stops waiting at some point anyway)."""
+    beat()
     AI_DIR.mkdir(exist_ok=True)
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                           cwd=cwd or AI_DIR, env=proxy_env()) as proc:
         stop = threading.Event()
-        threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
+        lost = []
+        def keep():
+            while not stop.wait(60):
+                try:
+                    beat()
+                except Exception as exc:
+                    lost.append(exc)
+                    proc.kill()
+                    return
+        keeper = threading.Thread(target=keep, daemon=True)
+        keeper.start()
         try:
             stdout, stderr = proc.communicate(text, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -471,6 +489,9 @@ def run_cli(cmd, text, beat, timeout=600, cwd=None):
             raise RuntimeError(f"{Path(cmd[0]).name}: no answer in {timeout}s")
         finally:
             stop.set()
+        if lost:
+            raise RuntimeError("task heartbeat failed; discarded the unfinished model result") from lost[0]
+        beat()
     return proc.returncode, stdout, stderr
 
 
@@ -605,21 +626,21 @@ def codex_loop(n, extra=False):
         p, tid = task["payload"], task["id"]
         if task["kind"] == "shortcut":
             try:
-                call(f"/api/tasks/{tid}/done", worker=name, result=sign_shortcut(p))
+                call(f"/api/tasks/{tid}/done", worker=name, claim_token=task.get("claim_token"), result=sign_shortcut(p))
                 log("signed shortcut", tid, p.get("title"))
             except Exception as e:
                 traceback.print_exc()
-                call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
+                call(f"/api/tasks/{tid}/fail", worker=name, claim_token=task.get("claim_token"), error=str(e)[:500], retry=False)
             continue
         try:
-            result = answer_llm(p, lambda: call(f"/api/tasks/{tid}/heartbeat", worker=name), limits)
-            call(f"/api/tasks/{tid}/done", worker=name, result=result)
+            result = answer_llm(p, lambda: task_heartbeat(task, worker=name), limits)
+            call(f"/api/tasks/{tid}/done", worker=name, claim_token=task.get("claim_token"), result=result)
             log(result["engine"], tid, p.get("purpose"), result["model"], f"{result['seconds']}s",
                 f"{result['tokens_in']} in / {result['tokens_out']} out")
         except Exception as e:  # the Pi asks DeepSeek instead
             log("AI request", tid, p.get("purpose"), "-> DeepSeek:", str(e)[:300])
             try:
-                call(f"/api/tasks/{tid}/fail", worker=name, error=str(e)[:500], retry=False)
+                call(f"/api/tasks/{tid}/fail", worker=name, claim_token=task.get("claim_token"), error=str(e)[:500], retry=False)
             except requests.RequestException:
                 pass
 
@@ -630,7 +651,7 @@ REPO = Path(os.environ.get("SHIGUANG_REPO") or Path.home() / "vpn" / "grabber") 
 HEAL_DIR = HERE / "heal-worktree"  # a git worktree of it: the user's own checkout is never touched
 HEAL_MODEL = os.environ.get("HEAL_MODEL", CODEX_MODEL)
 HEAL_ROUNDS = 2  # a fix the smoke test rejects goes back to Codex once, with what failed
-HEAL_PATHS = ("shiguang/", "grabber.py", "index.html", "tests/")  # what a fix may change (not deploy.sh, mac/, config)
+HEAL_PATHS = ("shiguang/", "grabber.py", "index.html", "static/", "tests/")
 PI_SSH = os.environ.get("PI_SSH", "pi@192.168.3.200")
 HEAL_SYSTEM = """You fix bugs in 拾光, a home media server on a Raspberry Pi. The code is in this folder: the shiguang/
 package, grabber.py (entry), index.html (the page), tests/smoke.py (run before every deploy, on a copy of the real
@@ -712,7 +733,13 @@ def ask_healer(p, beat, can_edit, failed="", evidence=""):
 Return one JSON object with state, diagnosis, summary, retry, confidence, evidence and patch.
 Do not edit files or run commands that change files or system state. Read/search the repository as needed.
 patch: a unified diff suitable for git apply, or an empty string when no code change is needed.
-Only propose changes within shiguang/, grabber.py, index.html and tests/.
+Only propose changes within shiguang/, grabber.py, index.html, static/ and tests/.
+Existing tests are immutable. Add a standalone stdlib unittest regression in
+tests/heal_regression_<name>.py that reproduces this incident: it must fail with
+an assertion on the original code and pass on your patch. Do not use network,
+production data, credentials or external dependencies in this regression.
+Only return fixed with high confidence and concrete evidence. An uncertain
+diagnosis must not propose a patch or request retry.
 """ + ("This invocation is diagnosis only: patch MUST be empty." if not can_edit else "")
     answer = ask_codex({"system": system, "user": heal_prompt(p, failed, evidence), "effort": "medium"},
                        beat, cwd=HEAL_DIR, timeout=1800, model=HEAL_MODEL)["out"]
@@ -721,10 +748,16 @@ Only propose changes within shiguang/, grabber.py, index.html and tests/.
             raise RuntimeError(f"codex healer: missing {key}")
     if answer["state"] not in ("fixed", "diagnosed", "not_a_bug") or not isinstance(answer["retry"], bool):
         raise RuntimeError("codex healer: invalid state or retry")
+    if answer["confidence"] not in CONFIDENCE or any(
+            not isinstance(answer[key], str) or not answer[key].strip()
+            for key in ("diagnosis", "summary", "evidence")):
+        raise RuntimeError("codex healer: missing diagnosis evidence or confidence")
     patch = answer.get("patch") or ""
     if not isinstance(patch, str):
         raise RuntimeError("codex healer: patch must be a string")
     if can_edit and patch.strip():
+        if answer["state"] != "fixed" or answer["confidence"] != "high":
+            raise RuntimeError("codex healer: automatic patches need high-confidence evidence")
         apply_heal_patch(patch)
     return answer
 
@@ -739,13 +772,72 @@ def apply_heal_patch(patch):
         if not entry:
             continue
         added, removed, path = entry.split("\t", 2)
-        if (added == "-" or removed == "-" or not path.startswith(HEAL_PATHS)
+        allowed = any(path == p or p.endswith("/") and path.startswith(p) for p in HEAL_PATHS)
+        if (added == "-" or removed == "-" or not allowed
                 or Path(path).is_absolute() or ".." in Path(path).parts):
             raise RuntimeError(f"codex healer: patch outside allowed text files: {path}")
+        if path.startswith("tests/") and (HEAL_DIR / path).exists():
+            raise RuntimeError("codex healer: existing regression tests cannot be changed")
+    if re.search(r"(?:new|old|deleted) file mode (?!100644|100755)\d+", patch):
+        raise RuntimeError("codex healer: only regular source files are allowed")
     for flags in (["--check"], []):
         r = subprocess.run(["git", "apply", *flags, "-"], input=patch, cwd=HEAL_DIR, capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"codex healer: patch rejected: {r.stderr[:300]}")
+
+
+def heal_regressions(base, beat):
+    """Require an actual assertion failure on the baseline and a passing fix."""
+    names = [n for n in git("ls-files", "--others", "--exclude-standard", "tests/", cwd=HEAL_DIR).splitlines()
+             if re.fullmatch(r"tests/heal_regression_[a-zA-Z0-9_]+\.py", n)]
+    # The previous round may already have added the regression to the index.
+    names += [n for n in git("diff", "--name-only", "--diff-filter=A", base, cwd=HEAL_DIR).splitlines()
+              if re.fullmatch(r"tests/heal_regression_[a-zA-Z0-9_]+\.py", n)]
+    names = sorted(set(names))
+    if not names:
+        raise RuntimeError("修复缺少可重现原问题的 heal_regression_ 回归测试")
+    with tempfile.TemporaryDirectory(prefix="shiguang-heal-check-") as tmp:
+        baseline = Path(tmp) / "baseline"
+        baseline.mkdir()
+        archived = subprocess.run(["git", "archive", base], cwd=REPO, capture_output=True, check=True)
+        subprocess.run(["tar", "xf", "-", "-C", str(baseline)], input=archived.stdout, check=True)
+        for name in names:
+            dest = baseline / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(HEAL_DIR / name, dest)
+            for folder, expect_pass in ((baseline, False), (HEAL_DIR, True)):
+                beat()
+                data = Path(tmp) / ("candidate-data" if expect_pass else "baseline-data")
+                data.mkdir(exist_ok=True)
+                env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "SYSTEMROOT")}
+                env.update(HOME=str(data), DB_PATH=str(data / "test.db"),
+                           STATE_DIR=str(data / "state"), MEDIA_ROOT=str(data / "media"),
+                           PYTHONPATH=str(folder), LLM_API_KEY="", COMPUTE_TOKEN="test-only")
+                check = subprocess.run([sys.executable, name], cwd=folder, env=env,
+                                       capture_output=True, text=True, timeout=90)
+                output = check.stdout + check.stderr
+                ran = re.search(r"Ran ([1-9]\d*) tests? in ", output)
+                valid = check.returncode == 0 if expect_pass else (
+                    check.returncode != 0 and "FAILED (failures=" in output and "errors=" not in output)
+                if not ran or not valid:
+                    label = "修复版本应通过" if expect_pass else "原版本应复现断言失败"
+                    raise RuntimeError(f"{name}: {label}\n{output[-2500:]}")
+    return names
+
+
+def verify_heal_release(revision, started):
+    """The model's claim of success is insufficient: read the deployment receipt."""
+    command = "cat /opt/grabber/VERIFICATION.json"
+    result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", PI_SSH, command],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError("无法读取上线验收记录")
+    receipt = json.loads(result.stdout)
+    required = {"source_hashes", "page", "task_api", "fresh_pi_cpu"}
+    if (receipt.get("revision") != revision or receipt.get("verified_at", 0) < started
+            or not required.issubset(receipt.get("checks", [])) or deployed_revision() != revision):
+        raise RuntimeError("上线版本或验收记录与本次修复不一致")
+    return receipt
 
 
 def heal(task, beat):
@@ -753,8 +845,12 @@ def heal(task, beat):
     the fix on a copy of the database and puts it live (or leaves the Pi as it was); the fix is then committed onto
     the checkout's branch (or a heal/N branch when that has moved on)."""
     p = task["payload"]
-    base = git("rev-parse", "HEAD")
-    can_edit = deployed_revision() == base
+    deployed = deployed_revision()
+    known = bool(re.fullmatch(r"[a-f0-9]{40}", deployed)) and subprocess.run(
+        ["git", "cat-file", "-e", f"{deployed}^{{commit}}"], cwd=REPO,
+        capture_output=True).returncode == 0
+    base = deployed if known else git("rev-parse", "HEAD")
+    can_edit = known
     if HEAL_DIR.exists():
         git("worktree", "remove", "--force", str(HEAL_DIR), check=False)
         shutil.rmtree(HEAL_DIR, ignore_errors=True)
@@ -765,7 +861,15 @@ def heal(task, beat):
         failed, rounds = "", 0
         while True:
             rounds += 1
-            answer = ask_healer(p, beat, can_edit, failed, evidence)
+            try:
+                answer = ask_healer(p, beat, can_edit, failed, evidence)
+            except RuntimeError as exc:
+                if rounds >= HEAL_ROUNDS:
+                    return {"state": "diagnosed", "summary": "诊断或补丁未通过校验", "retry": False,
+                            "diagnosis": str(exc)[:3000], "rounds": rounds,
+                            "verification": {"status": "rejected", "base": base}}
+                failed = str(exc)
+                continue
             for line in git("status", "--porcelain", cwd=HEAL_DIR).splitlines():  # outside what a fix may touch: undone
                 path = line[3:].split(" -> ")[-1]
                 if not path.startswith(HEAL_PATHS):
@@ -774,33 +878,56 @@ def heal(task, beat):
                    "diagnosis": f"{answer['diagnosis']}（把握：{CONFIDENCE.get(answer.get('confidence'), '低')}）",
                    "evidence": str(answer.get("evidence") or "")[:2000]}
             if not can_edit:
-                out["diagnosis"] += "（Pi 上的代码不是已提交的版本，所以这次只诊断、没有改代码。）"
-                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}
+                out["diagnosis"] += "（找不到线上版本对应的源码快照，本次仅诊断。）"
+                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"], "retry": False}
             if not git("status", "--porcelain", cwd=HEAL_DIR):
-                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"]}
+                return out | {"state": "diagnosed" if answer["state"] == "fixed" else answer["state"], "retry": False}
+            if answer["state"] != "fixed" or answer["confidence"] != "high":
+                return out | {"state": "diagnosed", "retry": False,
+                              "diagnosis": out["diagnosis"] + "（当前诊断不足以发布补丁，保留诊断结果。）",
+                              "verification": {"status": "rejected", "base": base}}
+            try:
+                regressions = heal_regressions(base, beat)
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                if rounds >= HEAL_ROUNDS:
+                    return out | {"state": "diagnosed", "retry": False,
+                                  "diagnosis": out["diagnosis"] + f"（回归门槛未通过：{str(exc)[:2000]}）",
+                                  "verification": {"status": "rejected", "base": base}}
+                failed = str(exc)
+                continue
+            beat()
+            if deployed_revision() != base:
+                return out | {"state": "diagnosed", "retry": False,
+                              "diagnosis": out["diagnosis"] + "（线上版本已变化，停止发布过期补丁。）",
+                              "verification": {"status": "rejected", "base": base}}
             git("add", "-A", "--", *HEAL_PATHS, cwd=HEAL_DIR)
             git("commit", "-q", "-m", f"自修复 #{p['incident']}: {answer['summary']}\n\n{answer['diagnosis']}\n\n"
                 "Co-Authored-By: Codex <noreply@openai.com>", cwd=HEAL_DIR)
-            env = dict(os.environ, PYFLAKES=os.environ.get("PYFLAKES") or str(Path(sys.executable).parent / "pyflakes"))
+            env = dict(os.environ, PYFLAKES=os.environ.get("PYFLAKES") or str(Path(sys.executable).parent / "pyflakes"),
+                       SHIGUANG_EXPECTED_REVISION=base)
             stop = threading.Event()
             threading.Thread(target=lambda: [beat() for _ in iter(lambda: stop.wait(60), True)], daemon=True).start()
             try:
+                started = time.time()
                 d = subprocess.run(["./deploy.sh", "--no-mac"], cwd=HEAL_DIR, capture_output=True, text=True, timeout=1200, env=env)
             finally:
                 stop.set()
             if d.returncode == 0:
                 sha = git("rev-parse", "HEAD", cwd=HEAL_DIR)
-                if git("merge", "--ff-only", "-q", sha, check=False) == "" and git("rev-parse", "HEAD") == sha:
+                receipt = verify_heal_release(sha, started)
+                if not git("status", "--porcelain") and git("merge", "--ff-only", "-q", sha, check=False) == "" and git("rev-parse", "HEAD") == sha:
                     note = ""
                 else:  # the checkout moved on meanwhile: the fix waits on its own branch
                     git("branch", "-f", f"heal/{p['incident']}", sha)
                     note = f"（修复已上线，提交在分支 heal/{p['incident']}，还没合并进当前分支。）"
-                return out | {"state": "fixed", "commit": sha[:10], "diagnosis": out["diagnosis"] + note}
+                return out | {"state": "fixed", "commit": sha[:10], "diagnosis": out["diagnosis"] + note,
+                              "verification": {"status": "passed", "base": base, "regressions": regressions, **receipt}}
             log("heal", p["incident"], "deploy rejected the fix, round", rounds)
             git("reset", "-q", "--soft", "HEAD~1", cwd=HEAL_DIR)  # the fix stays in the tree for the next round
             if rounds >= HEAL_ROUNDS:
                 return out | {"state": "diagnosed", "retry": False, "diagnosis": out["diagnosis"] +
-                              f"（改了 {rounds} 次都没通过部署前的测试，Pi 上的代码没动，需要人看一下。）",
+                              f"（{rounds} 轮发布或上线验收未通过，已停止自动修复，需要查看部署日志。）",
+                              "verification": {"status": "rejected", "base": base, "regressions": regressions},
                               "log": (d.stdout + d.stderr)[-3000:]}
             failed = (d.stdout + d.stderr)[-4000:]
     finally:
@@ -809,7 +936,7 @@ def heal(task, beat):
 
 def heal_loop():
     """Its own thread, one incident at a time (they're rare; a deploy at a time)."""
-    me.name = f"{NAME}-heal"
+    name = me.name = f"{NAME}-heal"
     if not CODEX.exists() or not (REPO / ".git").exists():
         log("no Codex or no code at", REPO, ": 自修复 stays off")
         return
@@ -824,13 +951,13 @@ def heal_loop():
         tid, started = task["id"], time.time()
         log("heal", tid, task["payload"].get("title"))
         try:
-            result = heal(task, lambda: call(f"/api/tasks/{tid}/heartbeat"))
-            call(f"/api/tasks/{tid}/done", result=result)
+            result = heal(task, lambda: task_heartbeat(task, worker=name))
+            call(f"/api/tasks/{tid}/done", claim_token=task.get("claim_token"), result=result)
             log("healed", tid, result["state"], f"{time.time() - started:.0f}s", result["summary"])
         except Exception as e:
             traceback.print_exc()
             try:
-                call(f"/api/tasks/{tid}/fail", error=str(e)[:500], retry=False)
+                call(f"/api/tasks/{tid}/fail", claim_token=task.get("claim_token"), error=str(e)[:500], retry=False)
             except requests.RequestException:
                 pass
 
@@ -845,7 +972,7 @@ def work(task):
         me.name = name  # (its own thread: claims under the same worker as the loop it's for)
         while not stop.wait(60):
             try:
-                if not call(f"/api/tasks/{task['id']}/heartbeat")["ok"]:
+                if not call(f"/api/tasks/{task['id']}/heartbeat", claim_token=task.get("claim_token"))["ok"]:
                     log("lost the claim on", task["id"])
             except requests.RequestException:
                 pass
@@ -858,20 +985,20 @@ def work(task):
     except Busy as e:
         stop.set()
         log("gave back", task["id"], e)
-        call(f"/api/tasks/{task['id']}/release")
+        call(f"/api/tasks/{task['id']}/release", claim_token=task.get("claim_token"))
         return
     except requests.RequestException as e:  # the network, not the task: back on the board soon
         stop.set()
         traceback.print_exc()
-        call(f"/api/tasks/{task['id']}/fail", error=f"network: {e}", retry=True)
+        call(f"/api/tasks/{task['id']}/fail", claim_token=task.get("claim_token"), error=f"network: {e}", retry=True)
         return
     except Exception as e:  # the task itself (unreadable audio...): failed for good
         stop.set()
         traceback.print_exc()
-        call(f"/api/tasks/{task['id']}/fail", error=str(e), retry=False, trace=traceback.format_exc()[-8000:])
+        call(f"/api/tasks/{task['id']}/fail", claim_token=task.get("claim_token"), error=str(e), retry=False, trace=traceback.format_exc()[-8000:])
         return
     stop.set()
-    call(f"/api/tasks/{task['id']}/done", result=result)
+    call(f"/api/tasks/{task['id']}/done", claim_token=task.get("claim_token"), result=result)
     extra = (f"{result['language']}, {len(result['segments'])} lines" if task["kind"] == "transcribe" else
              f"{len(result['frames'])} of {result['keyframes']} frames kept" if task["kind"] == "frames" else
              f"{len(result['lines'])} lines of text" if task["kind"] == "cover" else "")

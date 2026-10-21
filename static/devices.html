@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设备状态 · 拾光</title>
+  <link rel="icon" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/devices.css">
+  <script src="/static/devices.js" defer></script>
+</head>
+<body>
+  <header><a href="/">← 拾光</a><span>家里的设备</span></header>
+  <main>
+    <div class="heading"><div><h1>设备状态</h1><p>查看电视连接、投屏接收器和可用空间。</p></div><button id="refresh">刷新状态</button></div>
+    <p id="message" role="status" aria-live="polite">正在连接电视…</p>
+    <section class="device" aria-labelledby="deviceName">
+      <div class="device-heading"><h2 id="deviceName">乐视电视</h2><span id="online" class="badge">检测中</span></div>
+      <p id="address" class="muted"></p>
+      <dl id="facts"></dl>
+      <div class="actions"><button id="restoreReceiver" hidden>恢复投屏</button><button id="screenshot" hidden>查看当前画面</button></div>
+      <p id="receiverHint" class="muted" hidden>恢复投屏会打开电视网络设置并重新开启 DLNA & Airplay。</p>
+      <p id="adminHint" class="muted" hidden>查看当前画面需要先在拾光首页登录管理员账号。</p>
+      <p id="updated" class="muted"></p>
+    </section>
+    <section aria-labelledby="adTitle"><h2 id="adTitle">系统广告</h2>
+      <p class="muted">屏蔽应用打开和退出广告弹窗、商业推送、屏保广告轮询，保留原桌面、风扇故障提示和关机流程。</p>
+      <p class="muted">这项设置不代表所有开机缓存广告、桌面内容推荐或视频应用内广告都已消除。</p>
+      <p id="adSummary">等待电视状态…</p><dl id="adItems"></dl>
+      <p id="adPermission" class="error" role="status" hidden></p>
+      <div class="actions"><button id="blockAds" hidden>屏蔽广告组件</button><button id="restoreAds" hidden>恢复广告组件</button></div>
+      <p class="muted">管理员可以操作；屏蔽前会保存恢复记录。</p>
+    </section>
+    <section id="screenPanel" hidden><h2>当前画面</h2><p class="muted">点击按钮时获取，不自动截图。</p><img id="screen" alt="电视当前画面"><button id="closeScreen">收起画面</button></section>
+  </main>
+</body>
+</html>

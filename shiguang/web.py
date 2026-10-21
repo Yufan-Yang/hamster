@@ -559,7 +559,7 @@ def index():
     """From memory (it's read again when it changes), so it can go gzipped and revalidated like the API."""
     path = HERE / "index.html"
     mtime = path.stat().st_mtime
-    if _page[0] != mtime:
+    if _page[0] != mtime or not _page[1]:
         _page[:] = [mtime, path.read_bytes()]
     return Response(_page[1], mimetype="text/html")
 
@@ -861,7 +861,11 @@ def jobs():
         for r in q(f"SELECT id, ref FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args):
             by_source.setdefault(r["ref"] or r["id"], []).append(r["id"])
         said = {}  # lines said in the video (subtitles) or written on its cover
-        for r in q("SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND text LIKE ? ORDER BY ref, part, t", (like,)):
+        # Use seg_ref to search only this view's source jobs, including shared downloads.
+        segments = q("SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND ref IN "
+                     f"(SELECT COALESCE(ref, id) FROM jobs WHERE {scope} AND status IN ('done', 'linked')) "
+                     "AND text LIKE ? ORDER BY ref, part, t", (*scope_args, like)) if by_source else []
+        for r in segments:
             for jid in by_source.get(r["ref"], []):
                 said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"],
                                                  "text": search.snippet(r["text"], term, 10, 40).strip("…") if len(r["text"]) > 50 else r["text"]})
@@ -946,12 +950,16 @@ def jobs():
     out = kept
     watched = {r["job_id"]: r for r in q("SELECT * FROM watch WHERE owner=?", (g.owner,))}
     cards = library.card_media(out) if compact else {}
+    linked_refs = {d["ref"] for d in out if d["status"] == "linked" and d.get("ref")}
+    linked_sources = {r["id"]: r for r in q(
+        "SELECT id, status, stage, progress, speed, title, thumb FROM jobs "
+        f"WHERE id IN ({','.join('?' * len(linked_refs))})", tuple(linked_refs))} if linked_refs else {}
     for d in out:
         w = watched.get(d["id"])
         if w:
             d["watch"] = {"part": w["part"], "pos": w["pos"], "dur": w["dur"], "done": bool(w["done"]), "at": w["updated"]}
         if d["status"] == "linked" and d.get("ref"):  # show the original download's progress
-            src = q("SELECT status, stage, progress, speed, title, thumb FROM jobs WHERE id=?", (d["ref"],), one=True)
+            src = linked_sources.get(d["ref"])
             if src:
                 d.update(status=src["status"] if src["status"] in ("queued", "downloading", "processing") else "queued",
                          stage=src["stage"], progress=src["progress"], speed=src["speed"], title=d["title"] or src["title"])
@@ -1241,12 +1249,28 @@ def api_claim():
         bell_wait("tasks", mark, max(0.1, deadline - time.time()))
 
 
+def _claim_identity(body):
+    """New workers fence reports with a claim token; older workers may omit it."""
+    if not isinstance(body, dict):
+        raise ValueError("expected a JSON object")
+    token, attempt = body.get("claim_token"), body.get("attempt")
+    if token is not None and (not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token)):
+        raise ValueError("invalid claim token")
+    if attempt is not None and (type(attempt) is not int or attempt < 1):
+        raise ValueError("invalid task attempt")
+    return {"claim_token": token, "attempt": attempt}
+
+
 @app.post("/api/tasks/<int:tid>/heartbeat")
 def api_heartbeat(tid):
     if (denied := compute_auth()):
         return denied
     body = request.get_json(silent=True) or {}
-    return jsonify(ok=board.heartbeat_task(tid, _worker(), body.get("progress")))
+    try:
+        identity = _claim_identity(body)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(ok=board.heartbeat_task(tid, _worker(), body.get("progress"), **identity))
 
 
 @app.post("/api/tasks/<int:tid>/done")
@@ -1254,7 +1278,11 @@ def api_done(tid):
     if (denied := compute_auth()):
         return denied
     body = request.get_json(silent=True) or {}
-    if not board.complete_task(tid, _worker(), body.get("result") or {}):
+    try:
+        identity = _claim_identity(body)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    if not board.complete_task(tid, _worker(), body.get("result") or {}, **identity):
         return jsonify(error="not your task (any more)"), 409
     return jsonify(ok=True)
 
@@ -1264,8 +1292,13 @@ def api_fail(tid):
     if (denied := compute_auth()):
         return denied
     body = request.get_json(silent=True) or {}
+    try:
+        identity = _claim_identity(body)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
     return jsonify(ok=board.fail_task(tid, _worker(), body.get("error", ""), retry=bool(body.get("retry", True)),
-                                      trace=str(body.get("trace") or "")[-8000:], expected=bool(body.get("expected"))))
+                                      trace=str(body.get("trace") or "")[-8000:], expected=bool(body.get("expected")),
+                                      **identity))
 
 
 @app.post("/api/tasks/ingest")
@@ -1299,8 +1332,12 @@ def api_release(tid):
     """Not a failure: the worker is wanted for something else (a game on the Mac). Back on the board, progress kept."""
     if (denied := compute_auth()):
         return denied
-    board.release_task(tid, _worker())
-    return jsonify(ok=True)
+    body = request.get_json(silent=True) or {}
+    try:
+        identity = _claim_identity(body)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(ok=board.release_task(tid, _worker(), **identity))
 
 
 @app.get("/api/tasks/<int:tid>/audio")
@@ -2063,7 +2100,7 @@ def cast_start():
                           data.get("position", 0))
     except (ValueError, RuntimeError) as e:
         return jsonify(error=str(e)), 502
-    return jsonify(ok=True, name=name)
+    return jsonify(ok=True, name=name, preparing=True)
 
 
 @app.post("/api/cast/control")
@@ -2142,6 +2179,7 @@ def setup_app():
 # The other modules, imported last: they import this one too, and are only used at run time
 from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
 __import__(__package__ + '.share')  # register sharing routes
+__import__(__package__ + '.devices')  # home television status and administration
 
 
 def _request_crashed(sender, exception, **extra):

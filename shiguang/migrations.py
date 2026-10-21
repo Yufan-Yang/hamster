@@ -153,6 +153,7 @@ STEPS = [
     (22, _live_editorial_titles),
     (23, _live_topic_review),
     (24, lambda db: add(db, 'live_sources', 'archived', 'INTEGER NOT NULL DEFAULT 0')),
+    (25, lambda db: add(db, 'live_clips', 'removed_at', 'REAL')),
 ]
 
 

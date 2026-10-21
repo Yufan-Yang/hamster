@@ -70,11 +70,18 @@ def send(iid):
     sent = q("SELECT COUNT(*) n FROM tasks WHERE kind='heal' AND created > ?", (time.time() - 86400,), one=True)["n"]
     if sent >= HEAL_PER_DAY:
         return
-    _write("UPDATE incidents SET tries=tries+1, state='healing' WHERE id=?", (iid,))
-    board.publish("heal", f"incident:{iid}", 40, force=True, payload={
-        "incident": iid, "title": f"{row['label']}：{row['error'][:40]}", "kind": row["kind"], "label": row["label"],
-        "error": row["error"], "trace": row["trace"], "context": json.loads(row["context"] or "{}"),
-        "count": row["count"], "about": row["title"], "before": row["summary"] if row["state"] == "back" else ""})
+    if not _write("UPDATE incidents SET tries=tries+1, state='healing' "
+                  "WHERE id=? AND tries=? AND state IN ('new','back')", (iid, row["tries"])):
+        return
+    try:
+        board.publish("heal", f"incident:{iid}", 40, force=True, payload={
+            "incident": iid, "title": f"{row['label']}：{row['error'][:40]}", "kind": row["kind"], "label": row["label"],
+            "error": row["error"], "trace": row["trace"], "context": json.loads(row["context"] or "{}"),
+            "count": row["count"], "about": row["title"], "before": row["summary"] if row["state"] == "back" else ""})
+    except Exception:
+        _write("UPDATE incidents SET tries=tries-1, state=? WHERE id=? AND tries=? AND state='healing'",
+               (row["state"], iid, row["tries"] + 1))
+        raise
 
 
 def task_failed(tid, error, trace="", expected=False):
@@ -145,10 +152,21 @@ def heal_done(task, result):
     """What the Mac found (and did): kept with the incident; after a fix (or when it says so) the tasks that failed
     are tried again."""
     iid = json.loads(task["payload"])["incident"]
+    state = result.get("state") or "diagnosed"
+    verification = result.get("verification") or {}
+    verified = (verification.get("status") == "passed"
+                and bool(re.fullmatch(r"[a-f0-9]{40}", str(verification.get("revision") or "")))
+                and bool(result.get("commit"))
+                and verification["revision"].startswith(str(result["commit"]))
+                and {"source_hashes", "page", "task_api", "fresh_pi_cpu"}.issubset(verification.get("checks") or []))
+    diagnosis = str(result.get("diagnosis") or "")[:3500]
+    if state == "fixed" and not verified:
+        state = "diagnosed"
+        diagnosis += "（缺少有效的上线验收记录，未标为已修复，也未自动重试。）"
     _write("UPDATE incidents SET state=?, diagnosis=?, summary=?, commit_id=?, healed=? WHERE id=?",
-           (result.get("state") or "diagnosed", str(result.get("diagnosis") or "")[:4000],
+           (state, diagnosis,
             str(result.get("summary") or "")[:1000], str(result.get("commit") or ""), time.time(), iid))
-    if result.get("retry"):
+    if result.get("retry") and state == "fixed" and verified:
         row = q("SELECT tasks FROM incidents WHERE id=?", (iid,), one=True)
         ids = [int(i) for i in json.loads(row["tasks"] or "[]")] if row else []
         if ids:
@@ -163,12 +181,19 @@ board.TASK_KINDS["heal"]["then"] = heal_done
 def recent(n=8):
     """For 资源使用: the latest incidents and how healing went."""
     out = []
-    for r in q("SELECT i.*, t.state task_state, t.error task_error FROM incidents i LEFT JOIN tasks t "
+    for r in q("SELECT i.*, t.state task_state, t.error task_error, t.result task_result FROM incidents i LEFT JOIN tasks t "
                "ON t.kind='heal' AND t.target='incident:' || i.id ORDER BY i.last DESC LIMIT ?", (n,)):
         state = r["state"]
         if state == "healing" and r["task_state"] == "failed":
             state = "error"
+        try:
+            result = json.loads(r["task_result"] or "{}")
+            result = result if isinstance(result, dict) else {}
+        except (TypeError, ValueError):
+            result = {}
         out.append({"id": r["id"], "label": r["label"], "title": r["title"], "error": (r["error"] or "")[:200],
                     "count": r["count"], "state": state, "diagnosis": r["diagnosis"], "summary": r["summary"],
+                    "evidence": str(result.get("evidence") or "")[:2000],
+                    "verification": result.get("verification") if isinstance(result.get("verification"), dict) else {},
                     "commit": r["commit_id"], "last": r["last"], "why": (r["task_error"] or "")[:200] if state == "error" else ""})
     return out

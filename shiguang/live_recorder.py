@@ -66,11 +66,13 @@ def capture(source, info):
     directory = live.workspace() / "recordings" / key
     directory.mkdir(parents=True, mode=0o700)
     origin = {k: source[k] for k in ('name', 'room_id', 'url', 'uid')}
+    origin['live_start'] = info.get('live_start') or ''
     q("INSERT INTO live_sessions (key, source_id, owner, title, started, origin) VALUES (?,?,?,?,?,?)",
       (key, source["id"], source["owner"], info["title"], now, json.dumps(origin, ensure_ascii=False)))
     session = {"key": key, "source_id": source["id"], "owner": source["owner"], "title": info["title"]}
     proc = None
     error = ""
+    stopped = False
     try:
         url = bili.stream_url(source["room_id"], source["owner"])
         command = ["ffmpeg", "-v", "error", "-rw_timeout", "20000000", "-user_agent", core.UA,
@@ -84,6 +86,7 @@ def capture(source, info):
             ingest_closed(session, directory)
             current = q("SELECT enabled FROM live_sources WHERE id=?", (source["id"],), one=True)
             if not current or not current["enabled"]:
+                stopped = True
                 break
             if shutil.disk_usage(live.ROOT).free < RESERVE:
                 error = "剩余空间不足 10GiB，已暂停录制"
@@ -107,10 +110,25 @@ def capture(source, info):
             except subprocess.TimeoutExpired:
                 proc.kill(); proc.wait()
         ingest_closed(session, directory)
-        q("UPDATE live_sessions SET status='ended', ended=?, error=? WHERE key=?", (time.time(), error, key))
+        status = 'ended'
+        retry_delay = 60
+        if not stopped:
+            # ffmpeg can exit cleanly when a live connection expires; that does not prove the UP went offline.
+            try:
+                current_info = bili.room_info(source['url'], source['owner'])
+                if current_info['live']:
+                    status = 'interrupted'
+                    error = error or '录制连接结束，主播仍在直播，等待重新连接'
+                    # A healthy connection expiring should reconnect promptly; repeated short failures back off.
+                    if time.time() - now >= 30:
+                        retry_delay = 5
+            except Exception:
+                status = 'interrupted'
+                error = error or '录制连接结束，暂未确认主播是否下播'
+        q("UPDATE live_sessions SET status=?, ended=?, error=? WHERE key=?", (status, time.time(), error, key))
         q("UPDATE live_sources SET live_status=?, error=?, updated=? WHERE id=?",
           ("waiting" if not error else "error", error, time.time(), source["id"]))
-        live_events.request_check(source, "recording-ended", delay=60)
+        live_events.request_check(source, "recording-ended", delay=retry_delay)
         ACTIVE.pop(source["id"], None)
 
 

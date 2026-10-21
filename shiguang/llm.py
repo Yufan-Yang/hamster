@@ -116,7 +116,7 @@ def record_balance():
 # ---- Codex through the Mac mini; DeepSeek when unavailable or unsuccessful.
 # Keep the old enable/wait environment settings as fallbacks for existing installs.
 CODEX_VIA_MAC = os.environ.get("CODEX_VIA_MAC", os.environ.get("CLAUDE_VIA_MAC", "1")) != "0"
-CODEX_URGENT = {"search", "ask", "live-curator"}
+CODEX_URGENT = {"search", "ask", "live-curator", "learning-plan", "live-copy"}
 CODEX_CLAIM_WAIT = int(os.environ.get("CODEX_CLAIM_WAIT", os.environ.get("CLAUDE_CLAIM_WAIT", "90")))
 CODEX_RUN_WAIT = 360  # the Mac CLI times out after 300 seconds
 

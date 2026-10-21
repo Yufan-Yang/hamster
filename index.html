@@ -362,10 +362,17 @@
   .badge.tr { top: 0; right: 0; bottom: auto; background: var(--green); color: #fff; }
   .watched { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; background: rgba(0,0,0,.45); }
   .watched > div { height: 100%; background: var(--accent); }
-  #continue { margin: 0 0 22px; }
-  .contitle { font-size: 24px; line-height: 1.3; margin-bottom: 10px; }
-  .controw { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 240px); gap: 16px; overflow-x: auto;
-             padding: 0 8px 10px 0; scrollbar-width: thin; }
+  #continue, #contRead { margin: 0 0 26px; }
+  .contitle { font-size: 20px; line-height: 1.4; margin-bottom: 12px; }
+  .controw { display: grid; grid-auto-flow: column; gap: 20px; overflow-x: auto; align-items: start;
+             padding: 2px 6px 10px 2px; scrollbar-width: thin; scrollbar-color: var(--faint) var(--soft);
+             scroll-snap-type: x proximity; }
+  .controw > .card { scroll-snap-align: start; }
+  #controw { grid-auto-columns: calc((100% - (var(--resume-columns) - 1) * 20px) / var(--resume-columns)); padding-left: 0; padding-right: 0; }
+  #controwRead { grid-auto-columns: 144px; }
+  .controw::-webkit-scrollbar { height: 6px; }
+  .controw::-webkit-scrollbar-track { background: var(--soft); }
+  .controw::-webkit-scrollbar-thumb { background: var(--faint); }
   .clear-watch { position: absolute; z-index: 3; top: 6px; right: 6px; width: 26px; height: 26px; padding: 0;
                  border: 2px solid var(--ink); background: var(--panel); color: var(--accent); font: inherit; line-height: 1; }
   .otd { padding: 10px 14px; margin-bottom: 18px; background: var(--panel); }
@@ -643,15 +650,85 @@
 button.link, a.link, .chip, .btn, .seg button, #bookTabs .t {min-height: 40px; min-width: 40px;}
 button.link, a.link {padding: 8px 6px;}
 a.link {display: inline-block; max-width: 100%;}
+  /* Workspace navigation stays separate from the library's content filters. */
+  header, .workspace-nav, main { max-width: 1440px; margin-left: auto; margin-right: auto; }
+  main { --resume-columns: 5; }
+  @media (max-width: 1327px) { main { --resume-columns: 4; } }
+  @media (max-width: 1067px) { main { --resume-columns: 3; } }
+  @media (max-width: 807px) { main { --resume-columns: 2; } }
+  .workspace-nav { display: flex; gap: 8px; overflow-x: auto; padding: 2px 24px 12px; scrollbar-width: thin; }
+  .workspace-nav .chip { min-height: 44px; padding: 0 18px; font-size: 14px; }
+  .workspace-nav .chip.on { background: var(--yellow); color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
+  .workspace-heading { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding: 18px 0 12px; }
+  .workspace-heading > :first-child { min-width: 0; overflow-wrap: anywhere; }
+  .workspace-heading h1 { margin: 0 0 6px; font-size: 24px; line-height: 1.35; font-weight: normal; }
+  .workspace-heading p { margin: 0; max-width: 720px; color: var(--muted); }
+  .view-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex: none; }
+  .view-tools .sort-chip { background: var(--panel); }
+  main > .chips { padding: 0 0 10px; gap: 8px; }
+  main > .chips .chip { min-height: 40px; }
+  #searchOptions { margin: 0 0 14px; padding: 8px 12px; border-left: 3px solid var(--blue); background: var(--panel); }
+  .toolbar { flex-wrap: wrap; gap: 6px 12px; padding-bottom: 8px; margin-bottom: 16px; border-bottom: 2px dashed var(--soft); }
+  .toolbar .scope { min-width: 200px; }
+  .toolbar-actions { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .workspace-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 20px; padding: 12px 16px; border: 2px solid var(--ink); background: var(--panel); }
+  .workspace-status.error { border-color: var(--accent); }
+  .workspace-status p { margin: 0; }
+  .empty { padding: 52px 20px; background: var(--panel); border: 2px dashed var(--soft); }
+  .empty strong { display: block; margin-bottom: 8px; font-size: 20px; font-weight: normal; color: var(--ink); }
+  .empty p { margin: 0 auto 18px; max-width: 520px; }
+  .search input:disabled { color: var(--muted); background: var(--soft); cursor: default; opacity: 1; }
+  .learning-goal { display: block; width: 100%; min-height: 100px; padding: 10px; margin: 6px 0 10px; border: 2px solid var(--ink); background: var(--bg); color: var(--ink); font: inherit; resize: vertical; }
+  .learning-examples { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .learning-examples .chip { white-space: normal; text-align: left; }
+  .learning-status { margin: 12px 0; color: var(--muted); }
+  .learning-steps { padding-left: 26px; }
+  .learning-steps > li { padding: 12px 0 16px 6px; border-bottom: 2px dashed var(--soft); }
+  .learning-steps h3 { margin: 0 0 8px; font-size: 18px; font-weight: normal; }
+  .learning-steps p { margin: 8px 0; overflow-wrap: anywhere; }
+  .learning-source { display: block; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  .learning-practice { padding: 10px 12px; border-left: 3px solid var(--blue); background: var(--bg); }
+  :where(button,a,input,select,textarea):focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+  @media (max-width: 640px) {
+    #controw { grid-auto-columns: min(76vw, 300px); }
+    #controwRead { grid-auto-columns: 128px; gap: 16px; }
+    .workspace-nav { gap: 6px; padding: 2px 12px 10px; }
+    .workspace-nav .chip { padding: 0 12px; }
+    .workspace-heading { align-items: start; flex-direction: column; gap: 12px; padding: 20px 0 14px; }
+    .workspace-heading h1 { font-size: 24px; }
+    .view-tools { width: 100%; justify-content: space-between; }
+    .toolbar { align-items: start; }
+    .toolbar .scope { flex-basis: 100%; min-width: 0; }
+    .toolbar-actions { width: 100%; gap: 4px 12px; }
+    .workspace-status { align-items: start; flex-wrap: wrap; }
+    .workspace-status .btn { min-height: 44px; }
+    .avatar { width: 44px; height: 44px; }
+    .empty { padding: 36px 16px; }
+    .learning-goal { font-size: 16px; }
+  }
+  .live-view .workspace-heading { padding-top: 14px; padding-bottom: 10px; }
+  .live-view .toolbar { margin-bottom: 8px; padding-bottom: 6px; gap: 4px 10px; align-items: center; }
+  .live-view .toolbar .scope { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .live-view .toolbar-actions { width: auto; gap: 4px; }
+  .heal-entry { margin: 10px 0; border-bottom: 1px solid var(--soft); padding-bottom: 8px; overflow-wrap: anywhere; }
+  .heal-entry summary { cursor: pointer; min-height: 40px; }
+  .heal-entry p { margin: 6px 0; }
+  .heal-entry pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; padding: 10px; background: var(--bg); }
+  @media (max-width: 640px) {
+    .live-view .search { display: none; }
+    .live-view .toolbar .scope { flex-basis: auto; }
+    .live-view .workspace-heading { gap: 0; }
+    .live-view .view-tools:empty { display: none; }
+  }
 </style>
-<link rel="stylesheet" href="/static/live.css?v=20261019-management-v1">
+<link rel="stylesheet" href="/static/live.css?v=20261020-assistant-v1">
 </head>
 <body>
 <div class="topbar">
 <header>
   <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
   <form class="search" onsubmit="return false">
-    <input type="search" id="search" placeholder="搜索标题、简介、字幕…  #标签 只搜标签" autocomplete="off">
+    <input type="search" id="search" aria-label="搜索片库" placeholder="搜索标题、简介、字幕…  #标签 只搜标签" autocomplete="off">
   </form>
   <div class="right">
     <button class="btn plain" onclick="openAsk()" title="问拾光：用片库和随记回答问题">问</button>
@@ -660,11 +737,14 @@ a.link {display: inline-block; max-width: 100%;}
   </div>
 </header>
 
-<div class="chips" id="chips"></div>
+<nav class="workspace-nav" id="workspaceNav" aria-label="主要功能"></nav>
 <div class="castNotice" id="castNotice" hidden></div>
 </div>
 <main>
-  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div>
+  <div class="workspace-heading"><div><h1 id="workspaceTitle">片库</h1><p id="workspaceDescription">留存喜欢的内容，随时接着看。</p></div><div class="view-tools" id="viewTools"></div></div>
+  <div class="chips" id="chips" aria-label="片库分类"></div>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><div class="toolbar-actions"><a class="link" href="/devices">设备状态</a><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div></div>
+  <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite" hidden><p id="workspaceStatusText"></p><button class="btn plain" id="workspaceRetry" onclick="refresh()">重新连接</button></div>
   <div class="understood" id="understood" hidden></div>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
@@ -766,6 +846,27 @@ a.link {display: inline-block; max-width: 100%;}
     </form>
     <p class="hint">用视频里说过的话和你的随记回答，每句后面的编号点了会跳到出处。</p>
     <div id="askOut"></div>
+  </div>
+</div>
+
+<div class="sheet-bg" id="learningSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet wide-sheet">
+    <div class="lv-bar"><h2>智能学习清单</h2><button class="link" onclick="hide($('#learningSheet'))">关闭</button></div>
+    <p class="hint">写下想学会的事情，拾光会从你可见的片库中挑选相关视频，安排观看顺序和练习建议。</p>
+    <form onsubmit="generateLearningPlan(event)">
+      <label for="learningGoal">这次想学什么？</label>
+      <textarea class="learning-goal" id="learningGoal" minlength="2" maxlength="300" required rows="3" placeholder="例如：从零学习 Python，先理解基本语法，再做一个小工具。" autofocus></textarea>
+      <div class="learning-examples" aria-label="目标示例">
+        <button class="chip" type="button" onclick="learningExample('从零学习 Python，先理解基本语法，再做一个小工具。')">从零学习 Python</button>
+        <button class="chip" type="button" onclick="learningExample('学会拍摄和剪辑一条日常短视频，安排从入门到实践的顺序。')">做一条日常短视频</button>
+        <button class="chip" type="button" onclick="learningExample('结合片库里的内容，理解人工智能的基本原理和实际应用。')">理解人工智能</button>
+      </div>
+      <button class="btn" id="learningGo" type="submit">生成学习清单</button>
+      <p class="learning-status" id="learningStatus" role="status" aria-live="polite"></p>
+      <p class="form-err" id="learningError" role="alert" hidden></p>
+    </form>
+    <div id="learningResult"></div>
+    <p class="hint">点击生成后才会使用 AI。建议以片库现有内容为依据，可能不够完整；可打开每一步的视频核对，再决定如何学习。</p>
   </div>
 </div>
 
@@ -871,6 +972,7 @@ const ACTIVE = ["queued", "downloading", "processing"];
 let state = {jobs: [], user: null, admin: false}, query = "", chip = "all", watching = null, deviceFilter = null, castTimer = null, casting = null, castVolumeTimer = null;
 let castQueue = Promise.resolve();
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
+let workspaceLoaded = false, workspaceLoading = false, workspaceError = "";
 let videoSort = lsGet("videoSort", "added");
 let storageOwner = lsGet("shiguangOwner", "unidentified"), refreshEpoch = 0, notesEpoch = 0, booksEpoch = 0;
 const privateKey = (key, owner = storageOwner) => `${key}:${owner}`;
@@ -891,16 +993,18 @@ function setStorageOwner(owner) {
   cacheIndex.clear(); coverUrls.forEach(u => URL.revokeObjectURL(u)); coverUrls.clear();
   $('#noteList').innerHTML = ''; $('#noteList').dataset.html = '';
   $('#bookGrid').innerHTML = ''; $('#bookGrid').dataset.html = '';
-  liveData = null; ++liveEpoch; clearTimeout(livePoll); lvClose();
+  liveData = null; liveDataKey = ''; liveError = ''; liveCursor = ''; livePageHistory = []; liveSourceFilter = ''; liveSelected.clear(); ++liveEpoch; clearTimeout(livePoll); lvClose();
   $('#liveWorkspace').innerHTML = ''; delete $('#liveWorkspace').dataset.html;
   digestState = {digests: [], pending: false, at: 0}; digestPick = 0; fltOpen = fltDraft = null;
   $('#subs').innerHTML = ''; $('#subs').dataset.html = '';
-  for (const id of ['usageBody','weeklyBody','bookSheetBody','privacyBody','askOut','accountBody','biliLoginBody']) $('#'+id).innerHTML = '';
+  for (const id of ['usageBody','weeklyBody','bookSheetBody','privacyBody','askOut','accountBody','biliLoginBody','learningResult']) $('#'+id).innerHTML = '';
+  cancelLearningPlan(); $('#learningGoal').value = ''; $('#learningError').hidden = true;
   $('#askText').value = ''; $('#noteWhen').value = ''; whenChanged(); $('#bookUp').innerHTML = ''; pickFor = replacing = null;
   $('#lightbox').hidden = true; lb.list = []; $('#lightbox').querySelectorAll('img,video').forEach(el => el.removeAttribute('src'));
   saving = false; $('#noteGo').disabled = false; $('#upState').textContent = '';
   privacyToken = null; selected.clear(); selecting = false; lastBody = ''; cardHtml = [];
   state = {jobs: [], user: null, admin: false}; $('#grid').innerHTML = ''; $('#grid').dataset.ids = '';
+  workspaceLoaded = false; workspaceError = "";
   for (const el of document.querySelectorAll('.sheet-bg:not([hidden])')) hide(el);
 }
 window.addEventListener('storage', e => {
@@ -912,6 +1016,7 @@ const openSeries = new Set();
 
 // Close a sheet / the watch page with a short exit animation instead of vanishing
 function hide(el, after) {
+  if (el?.id === "learningSheet") cancelLearningPlan();
   if (!el || el.hidden || el.classList.contains("closing")) return;
   el.classList.add("closing");
   setTimeout(() => { el.hidden = true; el.classList.remove("closing"); after && after(); }, 170);
@@ -1024,22 +1129,62 @@ function renderChips() {
   if (!state.cats) state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
   const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
   const failed = state.jobs.filter(j => j.status === "failed").length;
-  const list = [["all", "全部"], ["live", "直播切片"], ["notes", `随记${state.notes ? " " + state.notes : ""}`], ["books", `书架${state.books ? " " + state.books : ""}`]];
+  const primary = [["all", "片库"], ["live", "直播切片"], ["notes", "随记"], ["books", "书架"], ["subs", "追更"]];
+  const workspace = chip.startsWith("sub:") ? "subs" : primary.some(([key]) => key === chip) ? chip : "all";
+  const navHtml = primary.map(([key, label]) => `<button class="chip${workspace === key ? " on" : ""}" aria-pressed="${workspace === key}" onclick="setChip('${key}')">${label}</button>`).join("");
+  if ($("#workspaceNav").innerHTML !== navHtml) $("#workspaceNav").innerHTML = navHtml;
+  const library = !["notes", "books", "subs", "live"].includes(chip);
+  $("#chips").hidden = !library;
+  const list = [["all", "全部内容"]];
   if (deviceFilter) list.push(["device", `设备：${deviceFilter} ✕`]);
-  list.push(["subs", `追更${(state.subs || []).length ? " " + state.subs.length : ""}`]);
   const sf = chip.startsWith("sub:") && (state.subs || []).find(s => "sub:" + s.id === chip);
   if (sf) list.push([chip, `UP：${sf.name} ✕`]);
-  if (active) list.push(["active", `下载中 ${active}`]);
-  // every category is always listed; ones with content first
+  if (active || chip === "active") list.push(["active", `下载中 ${active}`]);
+  // Keep category positions stable while download counts change.
   const all = [...Object.keys(FOLDERS), ...Object.keys(LIBS)];
-  all.sort((a, b) => (counts[b] || 0) - (counts[a] || 0)).forEach(c => list.push([c, catName(c)]));
-  if (failed) list.push(["failed", `失败 ${failed}`]);
-  if (!list.some(([k]) => k === chip)) chip = "all";
-  const sort = !["notes", "books", "subs", "live"].includes(chip) ? `<label class="chip sort-chip">排序
+  all.forEach(c => list.push([c, catName(c)]));
+  if (failed || chip === "failed") list.push(["failed", `失败 ${failed}`]);
+  const sort = library ? `<label class="chip sort-chip">排序
     <select onchange="setVideoSort(this.value)">${[["published", "网页创建时间"], ["added", "添加时间"], ["title", "标题"], ["author", "作者"]]
       .map(([k, n]) => `<option value="${k}"${k === videoSort ? " selected" : ""}>${n}</option>`).join("")}</select></label>` : "";
-  const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${counts[k] === undefined && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("") + sort;
+  const toolsHtml = library ? `<button class="btn plain" onclick="openLearningPlan()">智能学习清单</button>${sort}` : "";
+  if ($("#viewTools").innerHTML !== toolsHtml) $("#viewTools").innerHTML = toolsHtml;
+  const chipsHtml = list.map(([k, n]) => `<button class="chip${k === chip ? " on" : ""}${!counts[k] && (FOLDERS[k] || LIBS[k]) ? " dim" : ""}" aria-pressed="${k === chip}" onclick="setChip('${esc(k)}')">${esc(n)}</button>`).join("");
   if ($("#chips").innerHTML !== chipsHtml) $("#chips").innerHTML = chipsHtml;
+  const headings = {
+    all: ["片库", "留存喜欢的内容，随时接着看。按分类浏览，或搜索标题、字幕和标签。"],
+    live: ["直播切片", "优先处理待确认片段，也可以连续预览。"],
+    notes: ["随记", "随手记录文字、照片和声音，也能找回以前记下的细节。"],
+    books: ["书架", "收藏电子书、接着阅读，也可以把书缓存到当前设备。"],
+    subs: ["追更", "关注喜欢的创作者，让新的内容自动来到片库。"],
+    active: ["下载中", "查看下载与处理进度。完成的内容会自动回到对应分类。"],
+    failed: ["需要处理", "打开内容查看失败原因，再决定重试或移除。"],
+    device: ["设备内容", deviceFilter ? `查看由 ${deviceFilter} 添加的内容。` : "查看指定设备添加的内容。"],
+  };
+  const [title, description] = headings[chip] || (sf ? [sf.name, "已关注创作者的内容与下载进度。"] : [catName(chip), "这一分类中的全部内容。"]);
+  $("#workspaceTitle").textContent = query && library ? `搜索：${query}` : title;
+  $("#workspaceDescription").textContent = query && library ? "搜索当前范围内的内容；清空搜索即可返回浏览。" : description;
+  syncSearchControl();
+}
+function syncSearchControl() {
+  const search = $("#search"), live = chip === "live", wasDisabled = search.disabled;
+  $("body").classList.toggle("live-view", live);
+  search.disabled = live;
+  if (live) search.value = ""; else if (wasDisabled) search.value = query;
+  search.placeholder = live ? "直播切片请使用下方的主播、状态筛选" : chip === "notes" ? "搜索随记（文字和语音里说的话）…" : chip === "books" ? "搜索书名、作者、书里的文字…" : "搜索标题、简介、标签、字幕…";
+  search.setAttribute("aria-label", live ? "直播切片使用工作台内筛选" : chip === "notes" ? "搜索随记" : chip === "books" ? "搜索书架" : "搜索片库");
+}
+function renderWorkspaceStatus() {
+  const box = $("#workspaceStatus"), firstLoad = !workspaceLoaded && workspaceLoading;
+  box.hidden = !workspaceError && !firstLoad;
+  box.classList.toggle("error", !!workspaceError);
+  $("#workspaceStatusText").textContent = workspaceError
+    ? (workspaceLoaded ? "连接暂时中断，当前内容已保留。联网后会自动恢复，也可以手动重试。" : "暂时无法加载内容。请检查连接后重试。")
+    : "正在加载你的内容…";
+  $("#workspaceRetry").hidden = !workspaceError;
+  $("#workspaceRetry").disabled = workspaceLoading;
+  $("#workspaceRetry").textContent = workspaceLoading ? "正在连接…" : "重新连接";
+  $("#grid").setAttribute("aria-busy", String(workspaceLoading));
 }
 function setChip(k) {
   if (k === "device" && chip === "device") { deviceFilter = null; k = "all"; }  // click the device chip again to clear it
@@ -1047,10 +1192,10 @@ function setChip(k) {
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
   const isCat = x => !!(FOLDERS[x] || LIBS[x]);
   const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || k === "live" || chip === "live" || isCat(k) || isCat(chip);
-  chip = k; saveNavigation(true); render();
+  clearTimeout(searchTimer); $("#search").value = query;
+  chip = k; pageLimit = 100; saveNavigation(true); render();
   updateSearchOptions();
-  if (k === "live") loadLive();
-  $("#search").placeholder = k === "notes" ? "搜索随记（文字和语音里说的话）…" : k === "books" ? "搜索书名、作者、书里的文字…" : "搜索标题、简介、标签、字幕…";
+  if (k === "live" && liveData) loadLive();
   if (refetch) { lastBody = ""; refresh(); }
   if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
 }
@@ -1114,13 +1259,14 @@ function openNote(id) { focusNote = id; setChip("notes"); window.scrollTo(0, 0);
 
 function render() {
   renderChips();
+  renderWorkspaceStatus();
   const notes = chip === "notes", shelf = chip === "books", list = chip === "subs" || chip === "live" || notes || shelf;
   $("#liveWorkspace").hidden = chip !== "live";
   $("#subs").hidden = chip !== "subs";
   $("#notes").hidden = !notes;
   $("#books").hidden = !shelf;
   $("#grid").hidden = list;
-  $("#manageBtn").hidden = notes || shelf || chip === "live";
+  $("#manageBtn").hidden = list;
   if (chip === "live") renderLive();
   if (chip === "subs") renderSubs();
   if (notes) renderNotes();
@@ -1158,7 +1304,7 @@ function render() {
   // 继续阅读: books you're in the middle of
   const reading = chip === "all" && !query && !selecting ? state.reading || [] : [];
   $("#contRead").hidden = !reading.length;
-  const readHtml = reading.map(b => `<div class="card" onclick="openReader(${b.id})"><div class="cover">${b.cover ? `<img src="/bookcover/${b.id}?v=${b.version}" alt="" loading="lazy" style="object-fit:contain;background:var(--soft)">` : bookCoverHtml(b)}
+  const readHtml = reading.map(b => `<div class="card book" onclick="openReader(${b.id})"><div class="bcover">${b.cover ? `<img src="/bookcover/${b.id}?v=${b.version}" alt="" loading="lazy" style="object-fit:contain;background:var(--soft)">` : bookCoverHtml(b)}
       <div class="watched"><div style="width:${Math.min(100, b.read.pct * 100).toFixed(1)}%"></div></div></div>
       <div class="info"><div class="title">${esc(b.title)}</div><div class="meta">读到 ${pctStr(b.read.pct)} · ${esc(ago(b.read.at))}</div></div></div>`).join("");
   if ($("#controwRead").dataset.html !== readHtml) { $("#controwRead").innerHTML = readHtml; $("#controwRead").dataset.html = readHtml; }
@@ -1178,11 +1324,19 @@ function render() {
   cardHtml = htmls;
   updateSelbar();
   $("#more").hidden = !state.more || list || !!query || !!(FOLDERS[chip] || LIBS[chip]);
-  $("#empty").hidden = items.length > 0 || list;
-  if (shelf) return renderAvatar();
-  $("#empty").textContent = query ? "没有找到匹配的内容" : chip.startsWith("sub:") ? "还没有这个 UP 主的视频，列表获取后会自动开始下载"
-    : "还没有内容，点右上角「＋ 添加」，或者直接把链接拖进来";
-  $("#scope").textContent = notes ? (state.user ? `${state.user} 的随记 · 只有你自己看得到` : "这台设备的随记 · 只有你自己看得到，登录后各设备合并")
+  $("#empty").hidden = items.length > 0 || list || !workspaceLoaded;
+  const emptyTitle = query ? "没有找到匹配的内容" : chip === "active" ? "目前没有下载任务" : chip === "failed" ? "没有需要处理的内容" : chip !== "all" ? "这里还没有内容" : "从第一条收藏开始";
+  const emptyDescription = query ? "试试更短的关键词，或清空搜索继续浏览。"
+    : chip.startsWith("sub:") ? "这个 UP 主的内容会在列表获取后自动开始下载。"
+    : chip === "all" ? "粘贴视频、音频或网页链接，拾光会帮你下载留存。也可以直接把链接拖到页面上。"
+    : "可以先浏览片库中的其他内容，或添加新的链接。";
+  const emptyAction = query ? '<button class="btn plain" onclick="searchFor(\'\')">清空搜索</button>'
+    : chip === "all" ? '<button class="btn" onclick="openAdd()">＋ 添加内容</button>'
+    : '<button class="btn plain" onclick="setChip(\'all\')">浏览全部内容</button>';
+  const emptyHtml = `<strong>${emptyTitle}</strong><p>${emptyDescription}</p>${emptyAction}`;
+  if ($("#empty").innerHTML !== emptyHtml) $("#empty").innerHTML = emptyHtml;
+  $("#scope").textContent = chip === "live" ? (state.admin ? "管理员 · 全部来源" : state.user ? `${state.user} · 跨设备同步` : "当前设备的直播内容")
+    : notes ? (state.user ? `${state.user} 的随记 · 只有你自己看得到` : "这台设备的随记 · 只有你自己看得到，登录后各设备合并")
     : state.admin ? "所有人的内容（管理员）"
     : state.user ? `${state.user} 的内容（登录过这个账号的所有设备）`
     : "只显示这台设备添加的内容 · 登录后，同一账号在不同设备上的内容会合并";
@@ -1201,6 +1355,7 @@ function renderAvatar() {
 
 async function refresh() {
   const epoch = ++refreshEpoch;
+  workspaceLoading = true; renderWorkspaceStatus();
   try {
     const params = new URLSearchParams({compact:"1"});
     if (chip === 'live') params.set('metadata', '1');
@@ -1218,6 +1373,7 @@ async function refresh() {
     if (epoch !== refreshEpoch) return;
     const next = JSON.parse(body);
     setStorageOwner(next.storage_owner);
+    workspaceLoaded = true; workspaceError = "";
     if (chip === "notes") loadNotes();
     if (chip === "books") loadBooks();
     if (body !== lastBody) {  // nothing changed: leave the page alone
@@ -1231,6 +1387,7 @@ async function refresh() {
     }
   } catch (e) {
     if (epoch !== refreshEpoch) return;
+    workspaceError = e.message || "连接中断";
     if (chip === 'books') { await loadBooks(); render(); schedule(); return; }
     // no Pi: if this device has books cached, the shelf still works
     if (!state.jobs.length && chip !== "books" && !wentOffline) {
@@ -1238,7 +1395,9 @@ async function refresh() {
       await refreshCacheIndex();
       if (cacheIndex.size) { setChip("books"); toast("连不上 Pi：显示这台设备上缓存的书"); schedule(); return; }
     }
-    if (!(chip === "books" && booksState.offline)) toast("连不上 Pi");
+    render();
+  } finally {
+    if (epoch === refreshEpoch) { workspaceLoading = false; renderWorkspaceStatus(); }
   }
   schedule();
 }
@@ -1484,6 +1643,7 @@ async function chooseBiliCookies() {
 
 /* ---------- 随记: everyday notes ---------- */
 let notesState = {notes: [], more: false, q: null}, notesBody = "", editingNote = null, noteFiles = [];
+let notesOlderRequest = null;
 const WEEK = "日一二三四五六";
 function dayLabel(t) {
   const d = new Date(t * 1000), today = new Date(); today.setHours(0, 0, 0, 0);
@@ -1496,7 +1656,20 @@ function hhmm(t) { const d = new Date(t * 1000); return String(d.getHours()).pad
 function noteHtml(s, marks) { return hl(s, marks).replace(/https?:\/\/[^\s<>"']+/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`); }
 
 async function loadNotes(older) {
+  if (notesOlderRequest && notesOlderRequest.owner === storageOwner && notesOlderRequest.query === query && notesOlderRequest.visual === visualSearch) {
+    if (!older) notesOlderRequest.refreshAfter = true;
+    return;
+  }
+  if (notesOlderRequest) {
+    notesOlderRequest = null; $("#noteMore").disabled = false; $("#noteMore").textContent = "更早的";
+  }
+  if (older && notesState.q !== query) return;
   const epoch = ++notesEpoch, owner = storageOwner, requestedQuery = query;
+  const pagination = older ? {owner, query, visual: visualSearch, refreshAfter: false} : null;
+  if (pagination) {
+    notesOlderRequest = pagination;
+    $("#noteMore").disabled = true; $("#noteMore").textContent = "正在加载…";
+  }
   const p = new URLSearchParams();
   if (query) p.set("q", query);
   if (visualSearch) p.set("visual", "1");
@@ -1523,6 +1696,12 @@ async function loadNotes(older) {
     }
     if (chip === "notes") { renderNotes(); schedule(); }
   } catch (e) { if (epoch === notesEpoch && owner === storageOwner) toast("随记加载失败，联网后会自动恢复"); }
+  finally {
+    if (pagination && notesOlderRequest === pagination) {
+      notesOlderRequest = null; $("#noteMore").disabled = false; $("#noteMore").textContent = "更早的";
+      if (pagination.refreshAfter && owner === storageOwner && requestedQuery === query) loadNotes();
+    }
+  }
 }
 
 function noteMedia(n) {
@@ -2166,7 +2345,7 @@ async function findCast(id, part) {
     box.innerHTML = r.devices && r.devices.length
       ? `<div class="answer"><b>选择电视</b><div class="actions">${r.devices.map(d =>
           `<button onclick="startCast(${id},${part},${esc(JSON.stringify(d.id))})">${esc(d.name)}</button>`).join("")}</div></div>`
-      : `<p class="hint">没找到 DLNA 电视。确认电视和树莓派在同一局域网，并在电视设置中打开投屏。</p>`;
+      : `<p class="hint">没找到 DLNA 电视。确认电视和树莓派在同一局域网，并在电视设置中打开投屏。<a href="/devices">查看设备状态与恢复投屏</a></p>`;
   } catch (e) { box.innerHTML = `<p class="err">寻找电视失败</p>`; }
 }
 // Serialize transport commands: a slow start must finish before a chapter seek or the next video.
@@ -2189,7 +2368,7 @@ function castError(session, error) {
 }
 function renderCastNotice() {
   const c = casting;
-  const label = c ? `${c.error ? '投屏连接异常' : c.pending ? '正在连接电视' : c.state === 'PAUSED_PLAYBACK' ? '投屏已暂停' : c.state === 'STOPPED' || c.state === 'NO_MEDIA_PRESENT' ? '投屏已停止' : '投屏中'} · ${c.name || '电视'}` : "";
+  const label = c ? `${c.error ? '投屏连接异常' : c.pending ? '正在连接电视' : c.state === 'TRANSITIONING' ? '电视正在准备播放' : c.state === 'PAUSED_PLAYBACK' ? '投屏已暂停' : c.state === 'STOPPED' || c.state === 'NO_MEDIA_PRESENT' ? '投屏已停止' : '投屏中'} · ${c.name || '电视'}` : "";
   for (const selector of ["#castNotice", "#watchCastNotice"]) {
     const el = $(selector); if (!el) continue;
     el.hidden = !c;
@@ -2226,9 +2405,9 @@ async function startCast(id, part, device, position = null) {
   try {
     const r = await castRequest(c, "/api/cast/start", {id, part, device, position});
     if (casting !== c || !r) return;
-    c.name = r.name; c.pending = false; c.ready = true; c.state = 'PLAYING';
+    c.name = r.name; c.pending = false; c.ready = true; c.state = r.preparing ? 'TRANSITIONING' : 'PLAYING';
     renderCastNotice();
-    toast(`投屏中 · ${r.name}，切换视频将继续投到电视`);
+    toast(r.preparing ? `已发送到 ${r.name}，电视正在准备播放` : `投屏中 · ${r.name}，切换视频将继续投到电视`);
     castStatus(device);
   } catch (e) { c.pending = false; castError(c, e); }
 }
@@ -2285,7 +2464,7 @@ async function castSeek(device, position) {
   if (casting !== c) return;
   c.seekDeadline = Date.now() + 5000;
   if (!ok) c.seeking = false;
-  else toast(`已跳转电视到 ${dur(+position) || '0:00'}`);
+  else toast(c.state === 'TRANSITIONING' ? `电视开始播放后跳转到 ${dur(+position) || '0:00'}` : `已跳转电视到 ${dur(+position) || '0:00'}`);
   setTimeout(() => { if (casting === c) castStatus(device); }, 800);
 }
 function castVolume(device, volume) {
@@ -2411,6 +2590,7 @@ function avatarTap() {
 function lockPrivacy(quiet) {
   if (!privacyToken) return;
   privacyToken = null; clearTimeout(privacyTimer);
+  cancelLearningPlan(); $("#learningResult").innerHTML = ""; $("#learningError").hidden = true;
   if (!$("#privacySheet").hidden) hide($("#privacySheet"));
   if (selecting) toggleSelect();
   if (!quiet) toast("已隐藏");
@@ -3756,6 +3936,68 @@ async function ask(e) {
 }
 function askOpenNote(id) { hide($("#askSheet")); focusNote = id; setChip("notes"); }
 
+/* ---------- 智能学习清单 ---------- */
+let learningEpoch = 0, learningRequest = null;
+function openLearningPlan() {
+  $("#learningSheet").hidden = false;
+  setTimeout(() => { if (!$("#learningSheet").hidden) $("#learningGoal").focus(); }, 50);
+}
+function learningExample(goal) {
+  if (learningRequest) return;
+  $("#learningGoal").value = goal; $("#learningGoal").focus();
+}
+function cancelLearningPlan() {
+  ++learningEpoch;
+  learningRequest?.controller.abort(); learningRequest = null;
+  $("#learningGo").disabled = false; $("#learningGo").textContent = "生成学习清单";
+  $("#learningGoal").disabled = false; $("#learningStatus").textContent = "";
+}
+function learningPlanHtml(plan) {
+  const steps = (Array.isArray(plan.steps) ? plan.steps : []).filter(step => step && Number.isSafeInteger(step.job_id) && step.job_id > 0);
+  const limits = (Array.isArray(plan.limitations) ? plan.limitations : []).filter(value => typeof value === "string" && value.trim());
+  const source = Number.isSafeInteger(plan.candidate_count) ? `参考 ${plan.candidate_count} 条片库候选内容` : "基于当前可见的片库内容";
+  return `<div class="learning-result"><p>${esc(plan.overview || (steps.length ? "按下面的顺序开始学习。" : "暂时没有找到适合这个目标的素材。"))}</p>
+    <p class="hint">${source}${plan.cached ? " · 使用已生成的清单" : ""}</p>
+    ${steps.length ? `<ol class="learning-steps">${steps.map(step => `<li><h3>${esc(step.title || "观看与理解")}</h3>
+      <button class="link learning-source" onclick="openLearningSource(${step.job_id})">来源：${esc(step.source_title || "打开片库视频")} ↗</button>
+      <p>${esc(step.reason || "")}</p>${step.exercise ? `<p class="learning-practice">看完试一试：${esc(step.exercise)}</p>` : ""}</li>`).join("")}</ol>`
+      : '<p class="hint">可以把目标写得更具体，或先添加相关视频再试。</p><button class="btn plain" onclick="hide($(\'#learningSheet\'),openAdd)">添加相关内容</button>'}
+    ${limits.length ? `<div class="learning-practice"><b>这份清单的范围</b><ul>${limits.map(text => `<li>${esc(text)}</li>`).join("")}</ul></div>` : ""}</div>`;
+}
+async function generateLearningPlan(event) {
+  event.preventDefault();
+  if (learningRequest) return;
+  const goal = $("#learningGoal").value.trim(), error = $("#learningError");
+  error.hidden = true;
+  if (goal.length < 2 || goal.length > 300) { error.textContent = "请用 2–300 个字描述学习目标。"; error.hidden = false; return; }
+  const request = {epoch: ++learningEpoch, owner: storageOwner, privacy: privacyToken, controller: new AbortController()};
+  learningRequest = request;
+  $("#learningGo").disabled = true; $("#learningGo").textContent = "正在生成…";
+  $("#learningGoal").disabled = true;
+  $("#learningStatus").textContent = "正在从片库挑选素材并安排学习顺序，请稍候…";
+  $("#learningResult").innerHTML = "";
+  const current = () => learningRequest === request && request.epoch === learningEpoch && request.owner === storageOwner && request.privacy === privacyToken
+    && !$("#learningSheet").hidden && !$("#learningSheet").classList.contains("closing");
+  try {
+    const response = await fetch("/api/intelligence/learning-plan", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({goal}), signal: request.controller.signal});
+    let plan;
+    try { plan = await response.json(); } catch { throw Error("没有收到可用的清单，请稍后重试。"); }
+    if (!current()) return;
+    if (!plan || typeof plan !== "object") throw Error("没有收到可用的清单，请稍后重试。");
+    if (!response.ok || plan.error) throw Error(plan.error || "清单生成失败，请稍后重试。");
+    $("#learningResult").innerHTML = learningPlanHtml(plan);
+  } catch (err) {
+    if (!current() || err.name === "AbortError") return;
+    error.textContent = err.message || "连接中断，目标已保留，请稍后重试。"; error.hidden = false;
+  } finally {
+    if (learningRequest === request) {
+      learningRequest = null; $("#learningGo").disabled = false; $("#learningGo").textContent = "生成学习清单";
+      $("#learningGoal").disabled = false; $("#learningStatus").textContent = "";
+    }
+  }
+}
+function openLearningSource(id) { hide($("#learningSheet")); openWatch(id); }
+
 /* ---------- 资源使用 ---------- */
 async function retryTask(id) {
   try {
@@ -3774,6 +4016,19 @@ function bytes(n) {
 function yuan(n, digits) { n = n || 0; return "¥" + n.toFixed(digits ?? (n >= 10 ? 2 : n >= 0.1 ? 3 : 4)); }
 const HEAL_STATES = {new: "待诊断", healing: "诊断中", back: "修复后又出现", fixed: "已修复", diagnosed: "已诊断",
   not_a_bug: "不是代码问题", error: "诊断出错"};
+function healEntryHtml(h) {
+  const v = h.verification || {}, checked = v.status === "passed" || v.status === "rejected";
+  const labels = {source_hashes:"发布文件校验",page:"页面访问",task_api:"任务接口",fresh_pi_cpu:"Pi CPU 工作进程心跳"};
+  const short = value => esc(String(value || "").slice(0, 12));
+  const checks = Array.isArray(v.checks) ? v.checks : [], regressions = Array.isArray(v.regressions) ? v.regressions : [];
+  const verified = Number(v.verified_at), when = Number.isFinite(verified) && verified > 0 ? ago(verified) : "";
+  return `<details class="heal-entry"><summary><b>${esc(HEAL_STATES[h.state] || h.state || "待诊断")}</b> ${esc(h.label || "")}${h.title ? "「" + esc(String(h.title).slice(0,20)) + "」" : ""}${h.count > 1 ? `（${num(h.count)} 次）` : ""} · ${esc(ago(h.last))}<br><span class="hint">${esc(h.diagnosis || h.why || String(h.error || "").slice(0,120))}</span></summary>
+    <p><b>${checked ? (v.status === "passed" ? "上线验收通过" : "上线验收未通过") : "旧记录未包含上线验收"}</b>${when ? " · " + esc(when) : ""}</p>
+    <p class="hint">基线 ${v.base ? short(v.base) : "未记录"} · 发布 ${v.revision || h.commit ? short(v.revision || h.commit) : "未记录"}</p>
+    ${checks.length ? `<p>验收项：${checks.map(k => esc(labels[k] || k)).join("、")}</p>` : ""}
+    ${regressions.length ? `<p>回归复现：${regressions.map(p => `<code>${esc(p)}</code>`).join("、")}</p>` : ""}
+    <p>诊断与验证证据</p><pre>${esc(String(h.evidence || "这条记录未保存验证证据。").slice(0,2000))}</pre></details>`;
+}
 function workerName(n) {
   const c = /^mac.*-(?:claude|codex)-(\d+)$/i.exec(n || "");
   return {"pi": "Pi", "pi-cpu": "Pi（CPU）", "pi-ai": "Pi（AI）", "pi-ai-2": "Pi（AI 2）", "pi-now": "Pi（立刻）"}[n]
@@ -3882,9 +4137,8 @@ async function openUsage(days) {
     ${kinds.length ? `<div class="uscroll"><table class="ut"><tr><th>任务</th><th>排队</th><th>进行中</th><th>完成</th><th>失败</th><th>待处理的视频总长</th></tr>
       ${kinds.map(k => `<tr><td>${esc(k.label)}</td><td>${num(k.queued)}</td><td>${num(k.running)}</td><td>${num(k.done)}</td><td>${num(k.failed)}</td><td>${k.hours ? k.hours + " 小时" : ""}</td></tr>`).join("")}</table></div>` : ""}
     ${board.failed.length ? `<p class="hint">最近失败：${board.failed.map(f => `${esc(f.label)}「${esc((f.title || "").slice(0, 20))}」${esc(f.error.slice(0, 160))}${f.retryable?` <button class="link" onclick="retryTask(${f.id})">重试此步骤</button>`:""}`).join("；")}</p>` : ""}
-    ${(board.heal || []).length ? `<div class="usec"><b>自修复</b><span class="sub">报错交给 Mac 上的 Codex 诊断；改了代码、测试通过就自动上线</span></div>
-      ${board.heal.map(h => `<p style="margin:6px 0"><b>${esc(HEAL_STATES[h.state] || h.state)}</b> ${esc(h.label)}${h.title ? "「" + esc(h.title.slice(0, 20)) + "」" : ""}${h.count > 1 ? `（${num(h.count)} 次）` : ""} · ${esc(ago(h.last))}<br>
-        <span class="hint">${esc(h.diagnosis || h.why || h.error.slice(0, 120))}${h.commit ? " · 提交 " + esc(h.commit) : ""}</span></p>`).join("")}` : ""}
+    ${(board.heal || []).length ? `<div class="usec"><b>自修复</b><span class="sub">诊断 → 回归复现 → 发布 → 上线验收，失败回滚</span></div>
+      ${board.heal.map(healEntryHtml).join("")}` : ""}
     <button class="btn plain wide" onclick="hide($('#usageSheet'))">关闭</button>`;
 }
 
@@ -4064,7 +4318,8 @@ function saveNavigation(push = false) {
   if (restoringNavigation) return;
   const url = new URL(location.href);
   for (const [k,v] of Object.entries({tab: chip === 'all' ? '' : chip, q: query, sort: videoSort === 'added' ? '' : videoSort,
-                                    live: chip === 'live' ? liveTab : '', status: chip === 'live' && liveStatus !== 'all' ? liveStatus : ''})) {
+                                    live: chip === 'live' ? liveTab : '', status: chip === 'live' && liveStatus !== 'all' ? liveStatus : '',
+                                    live_source: chip === 'live' ? liveSourceFilter : '', live_cursor: chip === 'live' ? liveCursor : ''})) {
     if (v) url.searchParams.set(k,v); else url.searchParams.delete(k);
   }
   if (url.href === location.href) return;
@@ -4077,11 +4332,14 @@ function restoreNavigation() {
   videoSort = ['published','added','title','author'].includes(p.get('sort')) ? p.get('sort') : 'added';
   const tab = p.get('tab') || 'all';
   chip = ['all','notes','books','live','subs','active','failed','device',...Object.keys(FOLDERS),...Object.keys(LIBS)].includes(tab) || /^sub:\d+$/.test(tab) ? tab : 'all';
-  liveTab = ['highlight','topic','sources','recordings','calibration'].includes(p.get('live')) ? p.get('live') : 'highlight';
+  liveTab = ['review','highlight','topic','sources','recordings','calibration'].includes(p.get('live')) ? p.get('live') : 'review';
   liveStatus = Object.hasOwn(LV_STATES, p.get('status')) ? p.get('status') : 'all';
+  liveSourceFilter = /^\d+$/.test(p.get('live_source') || '') ? p.get('live_source') : '';
+  liveCursor = p.get('live_cursor') || ''; livePageHistory = [];
   smartSearch = false; lastBody = '';
 }
 window.addEventListener('popstate', async () => {
+  clearTimeout(searchTimer);
   restoringNavigation = true; restoreNavigation();
   const y = history.state?.scrollY || 0;
   await refresh(); if (chip === 'live') loadLive();
@@ -4091,6 +4349,7 @@ window.addEventListener('popstate', async () => {
 function looksLikeSentence(t) { return !/^[#＃]/.test(t) && t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
 $("#search").oninput = () => {
   clearTimeout(searchTimer);
+  if (chip === "live") return;
   const t = $("#search").value.trim();
   exactSearch = false;
   searchTimer = setTimeout(() => { query = t; visualSearch = false; smartSearch = looksLikeSentence(t); saveNavigation(); refresh(); }, looksLikeSentence(t) ? 900 : 250);
@@ -4125,6 +4384,6 @@ refreshCacheIndex();
 // over https (from outside) the page itself is kept too, so cached books open without the Pi
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
-<script src="/static/live.js?v=20261019-management-v1"></script>
+<script src="/static/live.js?v=20261020-assistant-v1"></script>
 </body>
 </html>

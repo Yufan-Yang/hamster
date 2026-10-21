@@ -85,7 +85,13 @@ def jobs_list():
     some_job = next(j for j in d["jobs"] if j["status"] == "done" and j.get("media"))
 
 
-check("page", lambda: get("/"))
+def page_loaded():
+    response = c.get("/")
+    assert response.status_code == 200
+    assert b"<html" in response.data.lower() and len(response.data) > 1000, "homepage returned empty/incomplete HTML"
+
+
+check("page content", page_loaded)
 check("jobs list", jobs_list)
 check("video sort choices", lambda: [get(f"/api/jobs?sort={sort}") for sort in ("published", "added", "title", "author")])
 check("search text", lambda: get("/api/jobs?q=%E4%BC%8A%E6%9C%97"))  # 伊朗
@@ -847,7 +853,9 @@ def heal_incidents():
     sent = G.q("SELECT * FROM tasks WHERE kind='heal' AND target=?", (f"incident:{inc['id']}",), one=True)
     assert sent and json.loads(sent["payload"])["error"].startswith("ZeroDivisionError")
     G.q("UPDATE tasks SET state='running', worker='mac' WHERE id=?", (sent["id"],))
-    assert B.complete_task(sent["id"], "mac", {"state": "fixed", "diagnosis": "d", "summary": "s", "retry": True})
+    assert B.complete_task(sent["id"], "mac", {"state": "fixed", "diagnosis": "d", "summary": "s", "retry": True,
+        "commit": "a" * 10, "verification": {"status": "passed", "revision": "a" * 40,
+        "checks": ["source_hashes", "page", "task_api", "fresh_pi_cpu"]}})
     assert G.q("SELECT state FROM incidents WHERE id=?", (inc["id"],), one=True)["state"] == "fixed"
     assert all(G.q("SELECT state FROM tasks WHERE id=?", (t,), one=True)["state"] == "queued" for t in tids)
     B.fail_task(tids[0], None, "x", expected=True)  # (not running: nothing happens)

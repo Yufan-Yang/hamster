@@ -12,7 +12,13 @@ const restarted = [session('old-a', 7, 10, 'interrupted', 100), session('old-b',
 const grouped = context.lvRecordingGroups(restarted.reverse());
 assert.equal(grouped.length, 2);
 assert.deepEqual(Array.from(grouped, g => g.sessions.length), [2, 2]);
-assert.equal(context.lvRecordingGroups([session('ended', 7, 0, 'ended', 100), session('next', 7, 110, 'recording')]).length, 2);
+assert.equal(context.lvRecordingGroups([session('ended', 7, 0, 'ended', 100), session('next', 7, 163, 'recording')]).length, 1);
+const broadcast = (s, start) => ({...s, origin:JSON.stringify({room_id:7,uid:8,live_start:start})});
+assert.equal(context.lvRecordingGroups([broadcast(session('old',7,0,'ended',100),'first'),broadcast(session('new',7,110,'recording'),'second')]).length,2);
+assert.equal(context.lvRecordingGroups([broadcast(session('old',7,0,'ended',100),'first'),broadcast(session('new',7,900,'recording'),'first')]).length,1);
+const guo = [session('guo-1',5,0,'ended',3606),session('guo-2',5,3669,'ended',7276),session('guo-3',5,7340,'ended',8050)];
+assert.equal(context.lvRecordingGroups(guo).length,1);
+assert.equal(context.lvRecordingGroups(guo)[0].sessions.length,3);
 assert.equal(context.lvRecordingGroups([session('old', 7, 0, 'interrupted', 100), session('late', 7, 1000, 'recording')]).length, 2);
 assert.equal(context.lvRecordingGroups([session('old', 7, 0, 'interrupted'), session('next', 7, 110, 'recording')]).length, 2);
 assert.equal(context.lvRecordingGroups([session('old', 7, 0, 'interrupted', 100), {...session('next', 7, 110, 'recording'), owner: 'user:other'}]).length, 2);

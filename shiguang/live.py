@@ -12,7 +12,7 @@ from pathlib import Path
 from flask import Response, g, jsonify, request, send_file
 from . import board, core, library, llm, tasks
 from . import live_bilibili as bili
-from .live_curator import CURATOR_FIELDS, CURATOR_PROMPT, evaluate_highlight, finite
+from .live_curator import BOUNDARY_PROMPT, CURATOR_FIELDS, CURATOR_PROMPT, confirmed_boundaries, evaluate_highlight, finite
 from .core import MEDIA, app, q, _write
 
 
@@ -20,7 +20,7 @@ ROOT = MEDIA / ".live-clips"
 SEGMENT_SECONDS = 60
 DEFAULTS = {"auto_highlights": True, "auto_topics": False, "score_min": 80, "min_seconds": 15,
             "max_seconds": 180, "topic_minutes": 20, "daily_limit": 10, "tid": 138,
-            "preferences": "", "calibration_enabled": True, "calibration_days": 7}
+            "preferences": "", "topic_unit": "auto", "calibration_enabled": True, "calibration_days": 7}
 LOGINS = {}
 
 
@@ -29,6 +29,10 @@ def settings(value=None):
     if not isinstance(value, dict):
         raise ValueError("设置必须是对象")
     out = dict(DEFAULTS)
+    if 'topic_unit' in value:
+        if value['topic_unit'] not in ('auto', 'story', 'topic'):
+            raise ValueError('切片单位应为自动、完整故事或完整话题')
+        out['topic_unit'] = value['topic_unit']
     for key in ("auto_highlights", "auto_topics", "calibration_enabled"):
         if key in value:
             if not isinstance(value[key], bool):
@@ -83,7 +87,8 @@ def media_path(value):
 def owned(table, item):
     if table not in ("live_sources", "live_recordings", "live_clips", "live_references"):
         raise ValueError("unknown table")
-    return q(f"SELECT * FROM {table} WHERE id=? AND owner=?", (item, g.owner), one=True)
+    visible = ' AND removed_at IS NULL' if table == 'live_clips' else ''
+    return q(f"SELECT * FROM {table} WHERE id=? AND owner=?{visible}", (item, g.owner), one=True)
 
 
 def login_required():
@@ -225,28 +230,42 @@ def queue_upload(cid, automatic=False):
     return True
 
 
-def automatic_allowed(clip, source):
-    """Apply the same current eligibility checks when queuing and immediately before publishing."""
+def automatic_block_reason(clip, source, validated=None):
+    """One source of automatic-publication eligibility and its explanation."""
     from .live_editorial import normalized_scores
     if clip['content_kind'] == 'advertisement' or clip['merged_into']:
-        return False
+        return 'excluded', '广告或已合并片段不自动投稿'
     if clip['lane'] == 'topic':
         rated = normalized_scores(json.loads(clip['scores'] or '{}'))
-        if not rated or rated[1]['completeness'] < 80:
-            return False
+        if not rated:
+            return 'score', '话题片段尚未完成有效评分'
+        if rated[1]['completeness'] < 80:
+            return 'quality', '话题完整度未达到自动投稿标准'
     from .live_calibration import active_rubric
     config = source_settings(source)
-    if (not source['enabled'] or clip['needs_review'] or clip['error']
-            or clip['version'] != clip['render_version']
-            or not config['auto_' + ('highlights' if clip['lane'] == 'highlight' else 'topics')]
-            or not active_rubric(source['id']).get('validated')):
-        return False
+    if not source['enabled']:
+        return 'configure', '主播追踪已暂停，自动投稿也已暂停'
+    if clip['needs_review']:
+        return 'edit', '手动新增或编辑过的片段需要你确认'
+    if clip['error']:
+        return 'edit', str(clip['error'])
+    if clip['version'] != clip['render_version']:
+        return 'retry', '当前编辑版本尚未制作完成'
+    if not config['auto_' + ('highlights' if clip['lane'] == 'highlight' else 'topics')]:
+        return 'publish', '此类片段未开启自动投稿，需要手动确认'
+    if not (active_rubric(source['id']).get('validated') if validated is None else validated):
+        return 'calibrate', '当前主播的评分标准尚未通过有效校准'
     if clip['lane'] == 'highlight':
         scores = json.loads(clip['scores'] or '{}')
         if (clip['score'] < config['score_min'] or finite(scores.get('completeness')) < 80
                 or min(finite(scores.get(k)) for k in ('topic', 'traffic', 'fun')) < 55):
-            return False
-    return True
+            return 'quality', '亮点评分或完整度未达到自动投稿标准'
+    return None, ''
+
+
+def automatic_allowed(clip, source):
+    """Apply the same current eligibility checks when queuing and immediately before publishing."""
+    return automatic_block_reason(clip, source)[0] is None
 
 
 def after_transcribe(task, result):
@@ -322,7 +341,7 @@ def analyze(task, beat):
     payload = {"up": source["name"], "title_name": bili.title_name(dict(source)), "preferences": config["preferences"], "rubric": rubric,
                "already_processed_until": cursor, "available_start": earliest, "available_end": latest,
                "topic_start": session["topic_start"], "known_topic": session["topic_title"],
-               "known_summary": session['topic_summary'], "known_kind": session['topic_kind'],
+               "known_summary": session['topic_summary'], "known_kind": session['topic_kind'], "topic_unit": config['topic_unit'],
                "clip_seconds": [config["min_seconds"], config["max_seconds"]], "transcript": transcript}
     if transcript:
         out = llm.llm_json(CURATOR_PROMPT, json.dumps(payload, ensure_ascii=False), CURATOR_FIELDS,
@@ -332,6 +351,22 @@ def analyze(task, beat):
         if not session["topic_title"]:
             q("UPDATE live_sessions SET cursor=?, topic_start=? WHERE key=? AND cursor=?", (latest, latest, key, cursor))
             return {"silence": True, "until": latest}
+    finished = session['status'] != 'recording' and latest >= max((r['offset'] + r['duration'] for r in rows), default=0) - 1
+    # Wait for some dialogue after a possible switch; reconsider recent unclosed boundaries next time.
+    boundary_end = latest if finished else latest - 30
+    changes = sorted([x for x in (out.get('topic_changes') or [])[:10] if isinstance(x, dict)
+                      and max(session['topic_start'] + 30, cursor - 60, earliest) <= finite(x.get('at'), -1) <= boundary_end],
+                     key=lambda x: finite(x.get('at')))
+    if changes:
+        beat({'phase': 'checking-boundaries', 'until': latest})
+        review = llm.llm_json(BOUNDARY_PROMPT, json.dumps({
+            'up': source['name'], 'preferences': config['preferences'], 'topic_unit': config['topic_unit'],
+            'known_topic': session['topic_title'], 'known_summary': session['topic_summary'],
+            'topic_start': session['topic_start'], 'transcript': transcript,
+            'candidates': [dict(change, index=index) for index, change in enumerate(changes)]}, ensure_ascii=False),
+            {'boundaries': [{'index': 'integer', 'previous_complete': 'boolean', 'next_independent': 'boolean',
+                             'confidence': '0-1', 'reason': 'string'}]}, 1800, {}, 'live-boundary', think=False)
+        changes = confirmed_boundaries(review, changes)
     beat({"phase": "curating", "until": latest})
     count = 0
     for candidate in (out.get("highlights") or [])[:5]:
@@ -340,10 +375,9 @@ def analyze(task, beat):
             count += 1
     topic_start, topic_title = session["topic_start"], session["topic_title"] or str(out.get("current_topic") or source["name"])[:80]
     topic_kind = session['topic_kind'] or 'content'
-    changes = sorted([x for x in (out.get("topic_changes") or [])[:10] if isinstance(x, dict)], key=lambda x: finite(x.get("at")))
     for change in changes:
         at = finite(change.get("at"), -1)
-        if not max(topic_start + 30, cursor - 20, earliest) <= at <= latest:
+        if not max(topic_start + 30, cursor - 60, earliest) <= at <= boundary_end:
             continue
         create_clip(session["owner"], source, key, "topic", {"start": topic_start, "end": at,
                     "title": str(change.get('previous_title') or topic_title)[:45],
@@ -353,13 +387,8 @@ def analyze(task, beat):
         topic_start, topic_title = at, str(change.get("next_title") or out.get("current_topic") or "下一话题")[:80]
         topic_kind = change.get('next_kind') or 'content'
     topic_kind = out.get('current_kind') or topic_kind
-    # Long discussions get consecutive parts; an ordinary one-minute chunk never forces a topic boundary.
-    if latest - topic_start >= config["topic_minutes"] * 60:
-        create_clip(session["owner"], source, key, "topic", {"start": topic_start, "end": latest,
-                    "title": topic_title[:45], "content_kind": topic_kind, 'scores': out.get('current_scores'),
-                    "reason": "同一话题达到设定时长，接续分段"})
-        topic_start, topic_title = latest, topic_title[:75] + "（续）"
-    if session["status"] != "recording" and latest >= max((r["offset"] + r["duration"] for r in rows), default=0) - 1:
+    # A long case stays together until an actual switch or the recording ends.
+    if finished:
         if latest - topic_start >= 30:
             create_clip(session["owner"], source, key, "topic", {"start": topic_start, "end": latest,
                         "title": topic_title[:45], "content_kind": topic_kind, 'scores': out.get('current_scores'),
@@ -456,6 +485,158 @@ def upload(task, beat):
     return result
 
 
+def review_context(sources, account, uploader_ready):
+    """Shared read-only facts, fetched once for the whole list."""
+    midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    return {
+        'sources': sources, 'rubrics': {},
+        'account_ready': bool(account and account['status'] == 'ready' and bili.account_path(g.owner).exists()),
+        'uploader_ready': uploader_ready,
+        'daily': {r['source_id']: r['n'] for r in q(
+            "SELECT source_id,COUNT(*) n FROM live_clips WHERE owner=? "
+            "AND (submit_started>=? OR state='awaiting_upload') GROUP BY source_id", (g.owner, midnight))},
+        'scoring': {r['clip'] for r in q(
+            "SELECT json_extract(t.payload,'$.clip') clip FROM tasks t JOIN live_clips c "
+            "ON c.id=json_extract(t.payload,'$.clip') WHERE c.owner=? AND t.kind='live_score' "
+            "AND t.state IN ('queued','running')", (g.owner,))},
+        'published_highlights': q(
+            "SELECT session_key,start,end FROM live_clips WHERE owner=? AND lane='highlight' "
+            "AND state IN ('awaiting_upload','uploading','submitted','uncertain')", (g.owner,)),
+    }
+
+
+def clip_review(clip, context):
+    """Explain the next useful action without reserving a slot or changing posting policy."""
+    source = context['sources'].get(clip['source_id'])
+    state = clip['state']
+    result = {'needs_attention': False, 'review_reason': '', 'next_action': '', 'action': 'none',
+              'can_upload': False, 'can_edit': state not in ('uploading', 'submitted', 'uncertain')}
+
+    def explain(reason, next_action, action, attention=True):
+        return {**result, 'review_reason': reason, 'next_action': next_action,
+                'action': action, 'needs_attention': attention}
+
+    if state == 'uncertain':
+        return explain('投稿结果尚未核实，系统不会重复投稿',
+                       '先到 B站创作中心确认，再填写 BV 号或确认未成功后重试', 'check_publish')
+    if state == 'failed':
+        return explain(clip['error'] or '切片制作失败', '检查原始素材后重试制作', 'retry')
+    if state in ('queued', 'rendering'):
+        return explain('正在等待或进行成片制作', '等待制作完成后预览', 'wait', False)
+    if state in ('awaiting_upload', 'uploading'):
+        return explain('已进入投稿队列', '等待投稿结果，避免重复提交', 'wait', False)
+    if state in ('submitted', 'rejected') or clip['merged_into'] or clip['content_kind'] == 'advertisement':
+        return result
+    if state != 'ready':
+        return result
+    if not source:
+        return explain('原主播追踪信息已不存在', '检查该片段的来源信息', 'none')
+    if clip['version'] != clip['render_version'] or not clip['file']:
+        return explain('当前编辑版本还没有可用成片', '重新制作后再预览或投稿', 'retry')
+    config = source_settings(source)
+    daily_full = context['daily'].get(source['id'], 0) >= config['daily_limit']
+    result['can_upload'] = bool(context['account_ready'] and context['uploader_ready'] and not daily_full)
+    if not context['account_ready']:
+        return explain('尚未绑定可用的 B站投稿账号，或账号需要重新登录', '扫码绑定或重新登录投稿账号', 'bind_account')
+    if not context['uploader_ready']:
+        return explain('投稿组件尚未安装', '请管理员安装投稿组件后再试', 'none')
+    if daily_full:
+        return explain('已达到该主播今天的投稿上限', '等待次日，或在追踪设置中调整上限', 'configure')
+    if source['id'] not in context['rubrics']:
+        from .live_calibration import active_rubric
+        context['rubrics'][source['id']] = bool(active_rubric(source['id']).get('validated'))
+    code, reason = automatic_block_reason(clip, source, context['rubrics'][source['id']])
+    if code == 'score' and clip['id'] in context['scoring']:
+        return explain('评分任务正在排队或处理中', '等待评分完成；也可先预览成片', 'wait', False)
+    if code:
+        actions = {
+            'score': ('重新安排评分，或预览后手动决定', 'score'),
+            'quality': ('预览并检查内容，可编辑、忽略或手动决定投稿', 'edit'),
+            'configure': ('恢复追踪，或预览后手动决定投稿', 'configure'),
+            'edit': ('预览并确认内容后，再手动投稿', 'edit'),
+            'retry': ('重新制作成片', 'retry'),
+            'publish': ('预览确认后，手动投稿', 'publish'),
+            'calibrate': ('到评分校准页完成验证，或预览后手动决定投稿', 'calibrate'),
+        }
+        next_action, action = actions.get(code, ('检查片段后再决定', 'edit'))
+        return explain(reason, next_action, action)
+    if clip['lane'] == 'topic' and any(
+            r['session_key'] == clip['session_key'] and r['start'] < clip['end'] and r['end'] > clip['start']
+            for r in context['published_highlights']):
+        return explain('相同时间范围已有亮点进入投稿流程，完整话题不会重复自动投稿',
+                       '核对已有投稿，再决定是否手动投稿完整话题', 'publish')
+    return explain('已满足自动投稿条件，等待后台安排', '等待投稿队列更新', 'wait', False)
+
+
+def clip_page(raw_sources, account, uploader_ready, tab):
+    """Apply owner/source/state filters before limiting, with full counts and a stable cursor."""
+    source_arg, state = request.args.get('source', ''), request.args.get('state', 'all')
+    states = {'all', 'queued', 'rendering', 'ready', 'awaiting_upload', 'uploading', 'submitted',
+              'uncertain', 'rejected', 'failed'}
+    if source_arg and (len(source_arg) > 19 or not source_arg.isascii() or not source_arg.isdigit()
+                       or not 0 < int(source_arg) <= 9223372036854775807):
+        raise ValueError('主播筛选无效')
+    if state not in states:
+        raise ValueError('片段状态无效')
+    try:
+        limit = int(request.args.get('limit', '150'))
+    except (ValueError, TypeError):
+        raise ValueError('列表数量无效') from None
+    if not 1 <= limit <= 300:
+        raise ValueError('列表数量应为 1–300')
+    cursor = request.args.get('cursor', '')
+    cursor_match = re.fullmatch(r'([0-2]):([1-9][0-9]{0,18})', cursor) if cursor else None
+    if cursor and not cursor_match:
+        raise ValueError('分页位置无效')
+    if cursor_match and int(cursor_match.group(2)) > 9223372036854775807:
+        raise ValueError('分页位置无效')
+    scope, args = "c.owner=? AND c.removed_at IS NULL", [g.owner]
+    if source_arg:
+        scope += " AND c.source_id=?"
+        args.append(int(source_arg))
+    ordinary = "COALESCE(c.content_kind,'content')!='advertisement' AND c.merged_into IS NULL"
+    counts = {'review': 0, 'highlight': 0, 'topic': 0}
+    for row in q(f"SELECT c.lane,COUNT(*) n FROM live_clips c WHERE {scope} AND {ordinary} GROUP BY c.lane", args):
+        if row['lane'] in counts:
+            counts[row['lane']] = row['n']
+    context = review_context(raw_sources, account, uploader_ready)
+    attention = {}
+    rows = q("SELECT c.id,c.source_id,c.session_key,c.state,c.lane,c.start,c.end,c.version,c.render_version,"
+             "c.file,c.error,c.needs_review,c.content_kind,c.merged_into,c.scores,c.score "
+             f"FROM live_clips c WHERE {scope} AND {ordinary} AND c.state IN ('ready','failed','uncertain')", args)
+    for row in rows:
+        attention[row['id']] = clip_review(row, context)
+    review_ids = [cid for cid, details in attention.items() if details['needs_attention']]
+    counts['review'] = len(review_ids)
+    if tab == 'review':
+        scope += " AND c.id IN (SELECT value FROM json_each(?))"
+        args.append(json.dumps(review_ids))
+    elif tab in ('highlight', 'topic'):
+        scope += " AND c.lane=?"
+        args.append(tab)
+    if state != 'all':
+        scope += " AND c.state=?"
+        args.append(state)
+    elif tab in ('highlight', 'topic'):
+        scope += " AND " + ordinary
+    total = q(f"SELECT COUNT(*) n FROM live_clips c WHERE {scope}", args, one=True)['n']
+    priority = "CASE c.state WHEN 'uncertain' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END" if tab == 'review' else "0.0"
+    page_scope, page_args = scope, list(args)
+    if cursor_match:
+        rank, cid = map(int, cursor_match.groups())
+        page_scope += f" AND (({priority})>? OR (({priority})=? AND c.id<?))"
+        page_args.extend((rank, rank, cid))
+    found = q("SELECT c.*,s.origin FROM live_clips c LEFT JOIN live_sessions s ON s.key=c.session_key "
+              f"WHERE {page_scope} ORDER BY ({priority}),c.id DESC LIMIT ?", (*page_args, limit + 1))
+    more, rows = len(found) > limit, found[:limit]
+    clips = [dict(clip_dict(row, raw_sources.get(row['source_id'])),
+                  **(attention.get(row['id']) or clip_review(row, context))) for row in rows]
+    rank = (0 if rows[-1]['state'] == 'uncertain' else 1 if rows[-1]['state'] == 'failed' else 2) \
+        if rows and tab == 'review' else 0
+    return {'clips': clips, 'counts': counts, 'total': total, 'has_more': more,
+            'next_cursor': f"{rank}:{rows[-1]['id']}" if more and rows else None}
+
+
 @app.get("/api/live")
 def overview():
     if denied := login_required():
@@ -463,9 +644,10 @@ def overview():
     from .live_calibration import PROTOCOL_VERSION
     tab = request.args.get('tab', 'calibration')
     sources = []
-    for row in q("SELECT * FROM live_sources WHERE owner=? ORDER BY id DESC", (g.owner,)):
+    raw_sources = {r['id']: r for r in q("SELECT * FROM live_sources WHERE owner=? ORDER BY id DESC", (g.owner,))}
+    for row in raw_sources.values():
         d = dict(row); d["settings"] = source_settings(row)
-        if tab in ('highlight', 'topic', 'recordings'):
+        if tab in ('review', 'highlight', 'topic', 'recordings'):
             sources.append(d)
             continue
         monitor = core.kv_get(f"live-monitor:{row['id']}", None)
@@ -498,10 +680,14 @@ def overview():
         sources.append(d)
     by_source = {s['id']: s for s in sources}
     account = q("SELECT mid, name, status, updated FROM live_accounts WHERE owner=?", (g.owner,), one=True)
-    return jsonify(sources=sources, account=dict(account) if account else None, uploader_ready=bili.ready(),
+    uploader_ready = bili.ready()
+    try:
+        page = clip_page(raw_sources, account, uploader_ready, tab)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(sources=sources, account=dict(account) if account else None, uploader_ready=uploader_ready,
                    segment_seconds=SEGMENT_SECONDS,
-                   clips=[clip_dict(r, by_source.get(r['source_id'])) for r in q("SELECT c.*, s.origin FROM live_clips c "
-                          "LEFT JOIN live_sessions s ON s.key=c.session_key WHERE c.owner=? ORDER BY c.id DESC LIMIT 150", (g.owner,))],
+                   **page,
                    recordings=[{k: r[k] for k in ("id", "source_id", "session_key", "seq", "offset", "duration", "state", "error", "created")}
                                for r in q("SELECT * FROM live_recordings WHERE owner=? ORDER BY id DESC LIMIT 60", (g.owner,))],
                    sessions=[dict(r) for r in q("SELECT * FROM live_sessions WHERE owner=? ORDER BY started DESC LIMIT 30", (g.owner,))],
@@ -667,7 +853,7 @@ def batch_clips():
     with core.db_lock:
         try:
             core.DB.execute('BEGIN IMMEDIATE')
-            rows = core.DB.execute(f"SELECT * FROM live_clips WHERE owner=? AND id IN ({','.join('?' for _ in ids)})", (g.owner, *ids)).fetchall()
+            rows = core.DB.execute(f"SELECT * FROM live_clips WHERE owner=? AND removed_at IS NULL AND id IN ({','.join('?' for _ in ids)})", (g.owner, *ids)).fetchall()
             if len(rows) != len(ids):
                 core.DB.rollback()
                 return jsonify(error='部分片段不存在或不属于当前账号，请刷新后重试'), 404
@@ -676,8 +862,6 @@ def batch_clips():
                 reason = ''
                 if row['state'] in ('awaiting_upload', 'uploading', 'submitted', 'uncertain') or row['bvid'] or row['aid'] or row['submit_started'] is not None:
                     reason = '已进入投稿流程，保留投稿记录'
-                elif action == 'delete' and core.DB.execute("SELECT 1 FROM live_clips WHERE merged_into=?", (cid,)).fetchone():
-                    reason = '包含合并记录，保留关联'
                 elif action == 'delete' and core.DB.execute("SELECT 1 FROM tasks WHERE kind IN ('live_render','live_score','live_upload') AND state='running' AND json_extract(payload,'$.clip')=?", (cid,)).fetchone():
                     reason = '片段正在处理，请稍后删除'
                 if reason:
@@ -687,7 +871,13 @@ def batch_clips():
                     core.DB.execute("UPDATE live_clips SET state='rejected',updated=? WHERE id=?", (time.time(), cid))
                 else:
                     delete_clip_files(cid)
-                    core.DB.execute('DELETE FROM live_clips WHERE id=?', (cid,))
+                    core.DB.execute("DELETE FROM tasks WHERE kind IN ('live_render','live_score','live_upload') AND state='queued' AND json_extract(payload,'$.clip')=?", (cid,))
+                    if core.DB.execute('SELECT 1 FROM live_clips WHERE merged_into=?', (cid,)).fetchone():
+                        # Keep only the association metadata for merged publication history; remove the visible draft and media.
+                        core.DB.execute("UPDATE live_clips SET state='rejected',removed_at=?,file='',cover='',updated=? WHERE id=?",
+                                        (time.time(),time.time(),cid))
+                    else:
+                        core.DB.execute('DELETE FROM live_clips WHERE id=?', (cid,))
                 changed.append(cid)
             core.DB.commit()
         except BaseException:
@@ -804,12 +994,18 @@ def remote_source(tid):
 
 @app.post("/api/tasks/<int:tid>/live-result")
 def remote_result(tid):
-    from .web import compute_auth, my_task
+    from .web import compute_auth, my_task, _claim_identity, _worker
     if denied := compute_auth():
         return denied
+    try:
+        token = _claim_identity({"claim_token": request.args.get("claim_token")})["claim_token"]
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
     task = my_task(tid)
     if not task or task["kind"] != "live_render":
         return "", 404
+    if token is not None and token != task.get("claim_token"):
+        return jsonify(error="这次制作任务已被重新领取"), 409
     request.max_content_length = 2 << 30
     p = task["payload"]
     row = q("SELECT * FROM live_clips WHERE id=? AND version=?", (p["clip"], p["version"]), one=True)
@@ -820,13 +1016,35 @@ def remote_result(tid):
         return jsonify(error="缺少成片"), 400
     destination = workspace() / "clips" / f"{row['id']}-v{row['version']}.mp4"
     destination.parent.mkdir(exist_ok=True)
-    temporary = destination.with_suffix(".remote.partial.mp4")
+    # Two attempts can overlap while uploading. They must never write the same temporary file.
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.stem}-",
+                                     suffix=".remote.partial.mp4", delete=False) as output:
+        temporary = Path(output.name)
     try:
         uploaded.save(temporary)
         duration = library.duration_of(str(temporary)) or 0
         if abs(duration - (row["end"] - row["start"])) > 3:
             return jsonify(error="成片时长与切片范围不符"), 400
-        temporary.replace(destination)
+        # Validation/upload may take minutes; serialize the final rename with task reclamation
+        # and clip edits, checking the exact claim captured before accepting the upload.
+        with core.db_lock:
+            try:
+                core.DB.execute("BEGIN IMMEDIATE")
+                current = core.DB.execute(
+                    "SELECT 1 FROM tasks WHERE id=? AND worker=? AND kind='live_render' AND state='running' "
+                    "AND attempts=? AND json_extract(payload,'$._claim_token') IS ? AND lease_until>?",
+                    (tid, _worker(), task["attempt"], task.get("claim_token"), time.time())).fetchone()
+                clip = core.DB.execute(
+                    "SELECT 1 FROM live_clips WHERE id=? AND version=? AND state IN ('queued','rendering')",
+                    (row["id"], row["version"])).fetchone()
+                if not current or not clip:
+                    core.DB.rollback()
+                    return jsonify(error="任务或切片已更新，本次成片未保存"), 409
+                temporary.replace(destination)
+                core.DB.commit()
+            except BaseException:
+                core.DB.rollback()
+                raise
     finally:
         temporary.unlink(missing_ok=True)
     return jsonify(ok=True)

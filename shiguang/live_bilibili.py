@@ -121,7 +121,7 @@ def room_info(value, owner=None, lookup_name=False):
             pass  # Room tracking still works when the optional profile lookup is unavailable.
     return {"room_id": room, "url": f"https://live.bilibili.com/{room}",
             "title": str(data.get("title") or "直播"), "live": int(data.get("live_status") or 0) == 1,
-            "uid": uid, "name": name}
+            "uid": uid, "name": name, "live_start": str(data.get('live_time') or '')}
 
 
 def stream_url(room, owner):

@@ -18,6 +18,7 @@ from websockets.sync.client import connect
 MOCKS = r"""
 window.requests = []; window.localPlays = 0; window.failStart = false;
 window.browserErrors = []; window.addEventListener('error', e => browserErrors.push(e.message));
+window.addEventListener('unhandledrejection', e => browserErrors.push(String(e.reason)));
 window.tv = {position: 20, duration: 600, state: 'PLAYING', volume: 50};
 window.fixtureJobs = [1,2,3].map(id => ({id, title: '测试视频 ' + id, url: 'https://example.invalid/video',
   created: 1, status: 'done', analysis: {}, media: [0,1].map(part => ({name: '分集 ' + part,
@@ -68,6 +69,13 @@ TESTS = r"""
   await startCast(1, 0, 'tv'); await settle();
   silent('first cast pauses phone');
   assert(!$('#castNotice').hidden && $('#watchCastNotice').textContent.includes('客厅电视'), 'visible device status');
+  tv.state = 'TRANSITIONING'; tv.duration = 0;
+  await castStatus('tv');
+  assert($('#castNotice').textContent.includes('电视正在准备播放'), 'slow TV startup is visible');
+  silent('preparing TV must not start phone playback');
+  tv.state = 'PLAYING'; tv.duration = 600;
+  await castStatus('tv');
+  passed.push('slow renderer startup has a distinct preparing state');
   $('#chapters button').click(); await settle();
   assert(calls('control').length, 'chapter click produced no command: ' + JSON.stringify({browserErrors, casting, requests}));
   assert(calls('control').at(-1).body.action === 'seek' && calls('control').at(-1).body.position === 123, 'chapter seeks TV');
@@ -160,10 +168,12 @@ def main():
                 call("Emulation.setScriptExecutionDisabled", {"value": False})
                 call("Network.setBlockedURLs", {"urls": ["http://*", "https://*"]})
                 call("Page.enable")
-                call("Page.addScriptToEvaluateOnNewDocument", {"source": MOCKS})
+                # file:// cannot resolve the page's absolute /static/live.js URL.
+                # Load the real workspace helpers rather than replacing their globals.
+                call("Page.addScriptToEvaluateOnNewDocument", {"source": MOCKS + "\n" + (app / "static/live.js").read_text()})
                 call("Page.navigate", {"url": (app / "index.html").resolve().as_uri()})
                 for _ in range(100):
-                    loaded = call("Runtime.evaluate", {"expression": "typeof openWatch === 'function' && document.readyState === 'complete'"})
+                    loaded = call("Runtime.evaluate", {"expression": "typeof openWatch === 'function' && document.readyState === 'complete' && state.jobs.length === 3"})
                     if loaded["result"].get("value"):
                         break
                     time.sleep(.1)

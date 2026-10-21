@@ -14,7 +14,7 @@ import traceback
 
 from pathlib import Path
 from .migrations import once
-from .core import (AUDIO_EXT, Cancelled, DOWNLOAD_WORKERS, ENTRY, INCOMPLETE, LLM_API_KEY, MEDIA, SUB_EXT, UA, VIDEO_EXT, bell_mark, bell_wait, check_cancel, db_lock, ffprobe, finishing_touch, human, job_dict, link_key, log_usage, q, ring, safe_name, unique_path, update)
+from .core import (AUDIO_EXT, Cancelled, DOWNLOAD_WORKERS, ENTRY, INCOMPLETE, LLM_API_KEY, MEDIA, SUB_EXT, UA, VIDEO_EXT, bell_mark, bell_wait, check_cancel, db_lock, ffprobe, finishing_touch, human, job_dict, link_key, log_usage, q, ring, unique_path, update)
 
 
 SHARED_FIELDS = ("status", "kind", "title", "files", "thumb", "analysis", "error", "transcript", "progress")
@@ -339,6 +339,7 @@ def process(job_id):
     os.chmod(workdir, 0o2775)
     update(job_id, status="downloading", stage="starting", progress=0, error="")
     meta = {}
+    download_dir = workdir
 
     # 1. download
     if url.startswith("magnet:") or url.endswith(".torrent") or url.startswith("torrent-file:"):
@@ -349,43 +350,40 @@ def process(job_id):
                        "--bt-remove-unselected-file=true", "--enable-dht=true", "--bt-enable-lpd=true", src], as_bt=True)
         meta["source"] = "torrent"
     else:
-        info = download.ytdlp_probe(url)
-        if info:
+        probe_error = None
+        try:
+            info = download.ytdlp_probe(url)
+        except Exception as error:
+            check_cancel(job_id)
+            if not download.can_fallback(error):
+                raise
+            info, probe_error = None, error
+        check_cancel(job_id)
+        if info or probe_error:
             kind = "video"
-            update(job_id, kind=kind, title=info.get("title") or "")
-            meta = download.ytdlp_download(job_id, url, workdir, info.get("_net"))
-            meta["source"] = "ytdlp"
+            update(job_id, kind=kind, title=(info or {}).get("title") or "")
+            meta, download_dir = download.page_video_download(job_id, url, workdir, info, probe_error)
         elif download.head_is_file(url):
             kind = "file"
             update(job_id, kind=kind, stage="downloading file")
-            download.aria2(job_id, ["--dir", str(workdir), "-x", "8", "-s", "8", "--user-agent", UA,
+            download_dir = workdir / ".file"
+            if not download_dir.exists():
+                download_dir.mkdir()
+                for old in workdir.iterdir():
+                    if not old.name.startswith("."):
+                        shutil.move(str(old), str(download_dir / old.name))
+            download.aria2(job_id, ["--dir", str(download_dir), "-x", "8", "-s", "8", "--user-agent", UA,
                            "--content-disposition-default-utf8=true", url])
             meta["source"] = "file"
         else:
             kind = "video"
             update(job_id, kind=kind)
-            found = download.sniff_page(job_id, url)
-            if not found:
-                raise RuntimeError("No video found on that page")
-            check_cancel(job_id)
-            update(job_id, title=found["title"])
-            urls = found["media_urls"]
-            try:
-                for i, media_url in enumerate(urls, 1):
-                    suffix = f" {i:02}" if len(urls) > 1 else ""
-                    extra = {"cookiefile": found["cookiefile"], "http_headers": {"Referer": url, "User-Agent": UA},
-                             "outtmpl": str(workdir / f"{safe_name(found['title'])}{suffix}.%(ext)s")}
-                    if len(urls) > 1:
-                        update(job_id, stage=f"downloading video {i}/{len(urls)}")
-                    meta = download.ytdlp_download(job_id, media_url, workdir, extra)
-            finally:
-                Path(found["cookiefile"]).unlink(missing_ok=True)
-            meta.update(title=found["title"], webpage_url=url, source="sniffed")
+            meta, download_dir = download.page_video_download(job_id, url, workdir)
 
     # 2. post-process each media file
     check_cancel(job_id)
     update(job_id, status="processing", stage="inspecting", progress=0, speed="")
-    files = sorted((p for p in workdir.rglob("*") if p.is_file() and not p.name.endswith(".aria2")),
+    files = sorted((p for p in download_dir.rglob("*") if p.is_file() and not p.name.endswith(".aria2")),
                    key=lambda p: p.stat().st_size, reverse=True)
     if not files:
         raise RuntimeError("Download finished but produced no files")
@@ -470,9 +468,9 @@ def process(job_id):
         results.append(a)
 
     # Leftovers (non-media torrents/files, extras) go to Downloads as-is
-    leftovers = [p for p in workdir.rglob("*") if p.is_file() and not p.name.endswith(".aria2")]
+    leftovers = [p for p in download_dir.rglob("*") if p.is_file() and not p.name.endswith(".aria2")]
     if leftovers and (not media or kind in ("torrent", "file")):
-        root_items = list(workdir.iterdir())
+        root_items = list(download_dir.iterdir())
         for item in root_items:
             if item.name.endswith(".aria2"):
                 continue
@@ -536,8 +534,10 @@ def run_job(job_id):
         # Keep the partial download so a retry continues where it stopped. Network trouble is retried
         # automatically a few times (1, 5, then 15 minutes later); errors that won't fix themselves aren't.
         attempts = (q("SELECT attempts FROM jobs WHERE id=?", (job_id,), one=True)["attempts"] or 0) + 1
-        permanent = re.search(r"No video found|Unsupported URL|no longer supported|produced no files|404|"
-                              r"Private video|removed|not available|Cloudflare 人机验证", str(e), re.I)
+        permanent = (download.terminal_download_reason(e)
+                     or isinstance(e, download.DownloadFailure) and not e.retryable
+                     or re.search(r"No video found|Unsupported URL|no longer supported|produced no files|404|"
+                                  r"Private video|removed|not available|Cloudflare 人机验证", str(e), re.I))
         # Being taken for a bot passes after a while: wait longer and try more often
         delays = (1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600) if download.BOT_CHECK.search(str(e)) or "机器人" in str(e) else (60, 300, 900)
         if attempts <= len(delays) and not permanent:

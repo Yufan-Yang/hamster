@@ -1,5 +1,6 @@
 """What each kind of task does on the Pi, and what follows it."""
 import base64
+import copy
 import json
 import os
 import re
@@ -15,19 +16,48 @@ from pathlib import Path
 
 from . import board, books, channels, download, library, llm, notes, search
 from .migrations import once
-from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, kv_set, log_usage, q, update)
+from .core import (AUDIO_EXT, INCOMPLETE, LLM_API_KEY, NOTES_DIR, NOTE_WHISPER_MODEL, STATE, UA, VIDEO_EXT, WHISPER_FAST, ffprobe, heavy_slot, job_dict, log_usage)
 
 
 IDLE_WHISPER_MODEL = os.environ.get("IDLE_WHISPER_MODEL", "small")
+
+
+def q(sql, args=(), one=False):
+    # Local tasks may outlive their lease while waiting on a model or an external tool.
+    # Serialize their DB mutations with the ownership check, including across processes.
+    if sql.lstrip().split(None, 1)[0].upper() in ("SELECT", "PRAGMA", "EXPLAIN"):
+        return board.q(sql, args, one)
+    return board.guarded_q(sql, args, one)
+
+
+def update(job_id, **fields):
+    fields["updated"] = time.time()
+    for key in ("files", "analysis"):
+        if key in fields and not isinstance(fields[key], str):
+            fields[key] = json.dumps(fields[key], ensure_ascii=False)
+    q("UPDATE jobs SET " + ", ".join(f"{key}=?" for key in fields) + " WHERE id=?",
+      (*fields.values(), job_id))
+
+
+def kv_set(key, value):
+    q("INSERT OR REPLACE INTO kv(k,v) VALUES (?,?)", (key, json.dumps(value)))
 
 
 # ---- what happens when a task is done (on the Pi, whoever did it)
 
 def after_transcribe(task, result):
     p = json.loads(task["payload"])
-    log_usage("whisper", "mac" if task["worker"] != board.PI_WORKERS["cpu"] else "idle", p["job"],
-              amount=float(result.get("audio_seconds") or 0), seconds=float(result.get("seconds") or 0))
+    amount, seconds = float(result.get("audio_seconds") or 0), float(result.get("seconds") or 0)
     board.publish("save_subs", task["target"], task["priority"], parent=task["id"], force=True)
+    # Follow-ups are replayable. Count this completed transcription once even if a replay
+    # happens after its save task was already published.
+    marker = f"transcribe-usage:{task['id']}:{task['updated']}"
+    with board.mutation() as conn:
+        if not conn.execute("SELECT 1 FROM kv WHERE k=?", (marker,)).fetchone():
+            conn.execute("INSERT INTO usage(ts,kind,purpose,job_id,amount,seconds) VALUES (?,'whisper',?,?,?,?)",
+                         (time.time(), "mac" if task["worker"] != board.PI_WORKERS["cpu"] else "idle",
+                          p["job"], amount, round(seconds, 1)))
+            conn.execute("INSERT INTO kv(k,v) VALUES (?, 'true')", (marker,))
 
 
 @board.task("save_subs", "保存字幕", "light")
@@ -93,7 +123,10 @@ def ai_when(priority):
 def pi_summarize(task, beat):
     jid = task["payload"]["job"]
     row = q("SELECT analysis, transcript, files FROM jobs WHERE id=?", (jid,), one=True)
+    if not row:
+        return {"skipped": "video deleted"}
     a = json.loads(row["analysis"] or "{}")
+    before = copy.deepcopy(a)
     if not row["transcript"]:
         return {"skipped": "no transcript"}
     a.pop("note", None)
@@ -103,7 +136,33 @@ def pi_summarize(task, beat):
         with_chapters = llm.summarize_timed(jid, a, text, end)
     else:
         a = llm.summarize(jid, a, row["transcript"], "(subtitles of the whole video)")
-    update(jid, analysis=a, stage="")
+    with board.mutation() as conn:
+        latest = conn.execute("SELECT analysis,transcript FROM jobs WHERE id=?", (jid,)).fetchone()
+        if not latest or latest["transcript"] != row["transcript"]:
+            return {"skipped": "video or transcript changed"}
+        current = json.loads(latest["analysis"] or "{}")
+        points_unchanged = current.get("key_points") == before.get("key_points")
+        # Only fields owned by this generation may change. Concurrent manual edits win.
+        for key in ("summary", "key_points", "point_times", "note"):
+            if key == "point_times" and not points_unchanged:
+                continue
+            if current.get(key) == before.get(key):
+                if key in a:
+                    current[key] = a[key]
+                else:
+                    current.pop(key, None)
+        additions = [tag for tag in a.get("tags", []) if tag not in before.get("tags", [])]
+        current["tags"] = list(dict.fromkeys(current.get("tags", []) + additions))[:12]
+        if with_chapters and current.get("chapters", {}).get("0") == before.get("chapters", {}).get("0"):
+            current.setdefault("chapters", {})["0"] = a["chapters"]["0"]
+        for key, value in a.get("usage", {}).items():
+            old = before.get("usage", {}).get(key, 0)
+            if isinstance(value, (int, float)) and isinstance(old, (int, float)):
+                usage = current.setdefault("usage", {})
+                usage[key] = usage.get(key, 0) + max(0, value - old)
+        conn.execute("UPDATE jobs SET analysis=?,stage='',updated=? WHERE id=?",
+                     (json.dumps(current, ensure_ascii=False), time.time(), jid))
+        a = current
     llm.merge_tags_if_new()  # tags it brought that mean the same as ones in the library: folded in
     if not with_chapters and lines >= 20:  # they didn't come back: asked on their own (the key points changed)
         # DeepSeek takes a few seconds to keep a request's opening for reuse; asked at once, the subtitles were paid

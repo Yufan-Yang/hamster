@@ -72,7 +72,7 @@ def normalized_scores(value):
 
 def queue_score(clip_id, force=False):
     clip = q('SELECT * FROM live_clips WHERE id=?', (clip_id,), one=True)
-    if not clip or clip['merged_into'] or clip['content_kind'] == 'advertisement':
+    if not clip or clip['removed_at'] or clip['merged_into'] or clip['content_kind'] == 'advertisement':
         return None
     return board.publish('live_score', f"live-score:{clip_id}:v{clip['version']}", 45,
                          payload={'clip': clip_id, 'version': clip['version'], 'title': clip['title']}, force=force)

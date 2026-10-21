@@ -5,6 +5,8 @@ therefore belong on the Pi: browsers cannot send SSDP multicast packets.
 """
 import hashlib
 import html
+import math
+import os
 import socket
 import threading
 import time
@@ -20,17 +22,69 @@ RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 _devices = {}  # opaque id -> descriptor; a short cache also prevents forged control URLs
 _refresh_lock = threading.Lock()
 _last_refresh = -float("inf")
+_pending = {}  # renderer id -> requested media, seek and pause until the TV has opened it
+_known_locations = set()
+_http = requests.Session()
+_http.trust_env = False  # private TV traffic must never take the internet proxy
 
 
 def _tag(node, name):
     return next((x.text or "" for x in node.iter() if x.tag.rsplit("}", 1)[-1] == name), "")
 
 
+def _description(location):
+    response = _http.get(location, timeout=2)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    renderer = next((x for x in root.iter() if x.tag.rsplit("}", 1)[-1] == "device"
+                     and _tag(x, "deviceType").startswith("urn:schemas-upnp-org:device:MediaRenderer:")), None)
+    if renderer is None:
+        return None
+    services = [x for x in renderer.iter() if x.tag.rsplit("}", 1)[-1] == "service"]
+    service = next((x for x in services if _tag(x, "serviceType").startswith(AV_TRANSPORT.rsplit(":", 1)[0] + ":")), None)
+    if service is None or not _tag(service, "controlURL"):
+        return None
+    base = _tag(root, "URLBase") or location
+    control = urllib.parse.urljoin(base, _tag(service, "controlURL"))
+    if "/bilibili/" in control.lower():
+        return None
+    host = urllib.parse.urlsplit(location).hostname
+    rendering = next((x for x in services if _tag(x, "serviceType").startswith(RENDERING_CONTROL.rsplit(":", 1)[0] + ":")), None)
+    return {"id": hashlib.sha256(host.encode()).hexdigest()[:20], "host": host,
+            "name": _tag(renderer, "friendlyName") or "DLNA 设备", "control": control,
+            "transport_type": _tag(service, "serviceType"),
+            "rendering": urllib.parse.urljoin(base, _tag(rendering, "controlURL")) if rendering is not None else "",
+            "rendering_type": _tag(rendering, "serviceType") if rendering is not None else RENDERING_CONTROL,
+            "location": location, "until": time.time() + 300}
+
+
+def _direct_locations():
+    configured = os.environ.get("CAST_DEVICE_URLS", "").split(",")
+    host = os.environ.get("TV_ADB_HOST", "192.168.3.214")
+    return {x.strip() for x in configured if x.strip()} | _known_locations | {f"http://{host}:49152/description.xml"}
+
+
+def renderer_at(host):
+    """Read-only probe of this home's known LeTV descriptor, also works without multicast."""
+    for location in sorted(_direct_locations()):
+        if urllib.parse.urlsplit(location).hostname != host:
+            continue
+        try:
+            descriptor = _description(location)
+            if descriptor:
+                _devices[descriptor["id"]] = descriptor
+                _known_locations.add(location)
+                return descriptor
+        except (requests.RequestException, ET.ParseError, OSError, ValueError):
+            continue
+    return None
+
+
 def discover(timeout=2.0):
     """Return DLNA MediaRenderers found by SSDP, refreshing the five-minute cache."""
     query = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
              "MX: 2\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n").encode()
-    found, end = set(), time.monotonic() + timeout
+    found, end = _direct_locations(), time.monotonic() + timeout
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         sock.settimeout(.2)
@@ -47,36 +101,22 @@ def discover(timeout=2.0):
                     headers[key.lower()] = value.strip()
             if headers.get("location"):
                 found.add(headers["location"])
+    except OSError:
+        pass  # a configured descriptor still works when multicast is unavailable
     finally:
         sock.close()
     now, fresh = time.time(), {}
-    for location in found:
+    for location in sorted(found):
         try:
-            root = ET.fromstring(requests.get(location, timeout=4).content)
-            if _tag(root, "deviceType") != "urn:schemas-upnp-org:device:MediaRenderer:1":
-                continue
-            services = [x for x in root.iter() if x.tag.rsplit("}", 1)[-1] == "service"]
-            service = next((x for x in services if _tag(x, "serviceType").startswith(AV_TRANSPORT)), None)
-            control = _tag(service, "controlURL") if service is not None else ""
-            if not control:
-                continue
-            control = urllib.parse.urljoin(location, control)
-            # A Huawei screen advertises both its ordinary DLNA renderer and a
-            # Bilibili-only AVTransport endpoint from the same address.  The
-            # latter answers generic SetAVTransportURI with HTTP 500, so it
-            # cannot play the Pi's local media and is deliberately omitted.
-            if "/bilibili/" in control.lower():
-                continue
-            host = urllib.parse.urlsplit(location).hostname or location
-            name = _tag(root, "friendlyName") or "DLNA 设备"
-            did = hashlib.sha256(host.encode()).hexdigest()[:20]
-            rendering = next((x for x in services if _tag(x, "serviceType").startswith(RENDERING_CONTROL)), None)
-            fresh[host] = {"id": did, "name": name, "control": control,
-                           "rendering": urllib.parse.urljoin(location, _tag(rendering, "controlURL")) if rendering is not None else "",
-                           "until": now + 300}
-        except (requests.RequestException, ET.ParseError, OSError):
+            descriptor = _description(location)
+            if descriptor:
+                fresh.setdefault(descriptor["host"], descriptor)
+                _known_locations.add(location)
+        except (requests.RequestException, ET.ParseError, OSError, ValueError):
             continue
-    _devices.clear()
+    for did in list(_devices):
+        if _devices[did]["until"] <= now:
+            _devices.pop(did, None)
     _devices.update({d["id"]: d for d in fresh.values()})
     return [{"id": d["id"], "name": d["name"]} for d in _devices.values() if d["until"] > now]
 
@@ -103,15 +143,21 @@ def _soap(did, action, service=AV_TRANSPORT, **args):
     control = d["control"] if service == AV_TRANSPORT else d.get("rendering")
     if not control:
         raise ValueError(f"{d['name']} 不支持这个投屏控制")
+    service = d.get("transport_type", AV_TRANSPORT) if service == AV_TRANSPORT else d.get("rendering_type", RENDERING_CONTROL)
     fields = "".join(f"<{k}>{html.escape(str(v))}</{k}>" for k, v in args.items())
     body = (f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
             f's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:{action} '
             f'xmlns:u="{service}"><InstanceID>0</InstanceID>{fields}</u:{action}></s:Body></s:Envelope>')
     try:
-        r = requests.post(control, data=body.encode(), timeout=8, headers={
+        r = _http.post(control, data=body.encode(), timeout=8, headers={
             "Content-Type": 'text/xml; charset="utf-8"', "SOAPACTION": f'"{service}#{action}"'})
         if not r.ok:
-            raise RuntimeError(f"电视返回 HTTP {r.status_code}")
+            try:
+                fault = ET.fromstring(r.content)
+                detail = _tag(fault, "errorDescription") or _tag(fault, "errorCode")
+            except ET.ParseError:
+                detail = ""
+            raise RuntimeError(f"电视返回 HTTP {r.status_code}" + (f"：{detail}" if detail else ""))
         d["until"] = time.time() + 300
         return r.content
     except requests.RequestException as e:
@@ -119,29 +165,42 @@ def _soap(did, action, service=AV_TRANSPORT, **args):
 
 
 def start(did, url, title, thumb="", mime="video/mp4", position=0):
+    position = float(position or 0)
+    if not math.isfinite(position) or position < 0:
+        raise ValueError("播放位置不对")
     meta = ("<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" "
             "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">"
             "<item id=\"0\" parentID=\"0\" restricted=\"1\"><dc:title>" + html.escape(title) + "</dc:title>"
+            + ("<upnp:class>object.item.audioItem.musicTrack</upnp:class>" if mime.startswith("audio/")
+               else "<upnp:class>object.item.videoItem</upnp:class>")
             + (f"<upnp:albumArtURI>{html.escape(thumb)}</upnp:albumArtURI>" if thumb else "")
             + f"<res protocolInfo=\"http-get:*:{mime}:*\">{html.escape(url)}</res></item></DIDL-Lite>")
     _soap(did, "SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
     _soap(did, "Play", Speed="1")
-    if position and float(position) >= 1:
-        # TVs commonly accept Play before the stream is ready, then silently
-        # discard an immediate Seek. Repeat after the renderer has had time to
-        # open the Range-capable stream.
-        for delay in (.25, .6, 1.2):
-            time.sleep(delay)
-            control(did, "seek", position)
+    # This LeTV takes 15–20 seconds to open its first stream. Immediate Seek is
+    # acknowledged but discarded, so status polling completes it only on the
+    # matching, actually opened track. Replacing this entry cancels an old seek.
+    _pending[did] = {"url": url, "position": position, "paused": False, "until": time.monotonic() + 60}
     return _device(did)["name"]
 
 
 def control(did, action, position=None, volume=None):
+    pending = _pending.get(did)
+    if pending and action in ("seek", "pause", "play"):
+        if action == "seek":
+            value = float(position or 0)
+            if not math.isfinite(value):
+                raise ValueError("播放位置不对")
+            pending["position"] = max(0, value)
+        else:
+            pending["paused"] = action == "pause"
+        return
     if action == "play":
         _soap(did, "Play", Speed="1")
     elif action == "pause":
         _soap(did, "Pause")
     elif action == "stop":
+        _pending.pop(did, None)
         _soap(did, "Stop")
     elif action == "seek":
         seconds = max(0, int(float(position or 0)))
@@ -169,6 +228,26 @@ def status(did):
     info = ET.fromstring(_soap(did, "GetTransportInfo"))
     out = {"position": _clock(_tag(pos, "RelTime")), "duration": _clock(_tag(pos, "TrackDuration")),
            "state": _tag(info, "CurrentTransportState"), "volume": None}
+    pending = _pending.get(did)
+    if pending:
+        track = _tag(pos, "TrackURI")
+        if (out["duration"] > 0 and out["position"] >= 1 and out["state"] == "PLAYING"
+                and (not track or track == pending["url"])):
+            # Clear only this request; a newly selected episode owns its own seek.
+            if _pending.get(did) is pending:
+                _pending.pop(did, None)
+                if pending["position"] >= 1:
+                    control(did, "seek", min(pending["position"], max(0, out["duration"] - 1)))
+                    pos = ET.fromstring(_soap(did, "GetPositionInfo"))
+                    out["position"] = _clock(_tag(pos, "RelTime"))
+                if pending["paused"]:
+                    control(did, "pause")
+                    out["state"] = "PAUSED_PLAYBACK"
+        elif time.monotonic() > pending["until"]:
+            _pending.pop(did, None)
+            raise RuntimeError("电视已收到视频，但尚未开始播放，请检查电视画面后重试")
+        else:
+            out.update(state="TRANSITIONING", position=int(pending["position"]), duration=0)
     try:
         volume = ET.fromstring(_soap(did, "GetVolume", service=RENDERING_CONTROL, Channel="Master"))
         out["volume"] = max(0, min(100, int(_tag(volume, "CurrentVolume"))))

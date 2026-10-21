@@ -629,6 +629,34 @@ def recorder_lifecycle():
             core.q("DELETE FROM tasks WHERE kind LIKE 'live_%'")
 
 
+def recorder_connection_end():
+    owner='user:recorder-connection-test'
+    core.q("INSERT INTO live_sources(owner,room_id,uid,url,name,settings) VALUES (?,992,1,'https://live.bilibili.com/992','重连测试','{}')", (owner,))
+    source=dict(core.q('SELECT * FROM live_sources WHERE owner=?',(owner,),one=True))
+    clock=[1000]
+    process=Mock();process.poll.return_value=0
+    try:
+        with tempfile.TemporaryDirectory() as directory, patch.object(live,'ROOT',Path(directory)):
+            for still_live, runtime, status, delay in [(True,3600,'interrupted',5),(True,1,'interrupted',60),
+                                                       (False,3600,'ended',60),(None,3600,'interrupted',60)]:
+                def start(*args,**kwargs):
+                    clock[0]+=runtime
+                    return process
+                with patch.object(live_recorder.time,'time',side_effect=lambda:clock[0]), \
+                        patch.object(live_recorder.subprocess,'Popen',side_effect=start), \
+                        patch.object(live_recorder.bili,'stream_url',return_value='https://example.test/live'), \
+                        patch.object(live_recorder.bili,'room_info',return_value={'live':still_live},
+                                     side_effect=RuntimeError('unavailable') if still_live is None else None), \
+                        patch.object(live_events,'request_check') as wake:
+                    live_recorder.capture(source,{'title':'直播','live_start':'2026-10-19 20:00:00'})
+                row=core.q('SELECT * FROM live_sessions WHERE owner=? ORDER BY started DESC LIMIT 1',(owner,),one=True)
+                assert row['status']==status and wake.call_args.kwargs['delay']==delay
+                assert json.loads(row['origin'])['live_start']=='2026-10-19 20:00:00'
+    finally:
+        core.q('DELETE FROM live_sessions WHERE owner=?',(owner,))
+        core.q('DELETE FROM live_sources WHERE owner=?',(owner,))
+
+
 def workspace_roundtrip():
     from flask import g
     owner = "user:live-regression"
@@ -802,8 +830,10 @@ def workspace_roundtrip():
             # The topic lane continues when highlights are empty.
             core.q("UPDATE live_recordings SET duration=60, offset=seq*60, segments=? WHERE session_key=?",
                    (json.dumps([[0, 20, "讨论开店成本和选址。"]]), key))
-            with patch.object(live.llm, "llm_json", return_value={"highlights": [], "topic_changes": [
-                    {"at": 60, "next_title": "店铺选址", "previous_summary": "先算成本再开店"}], "current_topic": "店铺选址"}):
+            with patch.object(live.llm, "llm_json", side_effect=[{"highlights": [], "topic_changes": [
+                    {"at": 60, "next_title": "店铺选址", "previous_summary": "先算成本再开店"}], "current_topic": "店铺选址"},
+                    {"boundaries": [{"index": 0, "previous_complete": True, "next_independent": True,
+                                     "confidence": .95, "reason": "成本咨询结束，下一位观众开始咨询另一家店的选址"}]}]):
                 live.analyze({"payload": {"session": key}}, lambda _: True)
             assert core.q("SELECT id FROM live_clips WHERE session_key=? AND lane='topic' AND end=60", (key,), one=True)
             assert not core.q("SELECT id FROM live_clips WHERE session_key=? AND lane='highlight'", (key,), one=True)
@@ -833,4 +863,5 @@ def run(check):
     check('live publication: original streamer and canonical room survive edited summaries', publication_attribution)
     check("live events: compressed packets, 30-minute fallback, immediate wakeups, reconnects and capacity", event_monitoring)
     check("live recorder: permanent ASR gaps and unfinished-topic retention", recorder_lifecycle)
+    check('live recorder: clean exits, upstream live state, fast reconnection and short-failure backoff', recorder_connection_end)
     check("live workspace: ownership, cross-segment rendering, two lanes, safe upload retries", workspace_roundtrip)

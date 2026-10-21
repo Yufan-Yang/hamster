@@ -1,14 +1,18 @@
 """The task board: publishing, claiming with leases, the Pi's own workers."""
+import contextlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
 from pathlib import Path
 from .migrations import once
+from . import core
 from .core import (ENTRY, VIDEO_EXT, _write, bell_mark, bell_wait, job_dict, kv_set, mem_available_mb, q, ring)
 
 
@@ -49,6 +53,49 @@ PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops
 # ("mac": kinds only the Mac does, e.g. asking Codex; no Pi worker takes them)
 PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now",
               "publish": "pi-publish", "live-io": "pi-live-io", "live-search": "pi-live-search"}
+_execution = threading.local()
+
+
+class LostLease(Exception):
+    """This local attempt no longer owns the task; its results must not be committed."""
+
+
+def _check_claim(conn):
+    claim = getattr(_execution, "claim", None)
+    if claim and not conn.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND worker=? AND attempts=? "
+            "AND json_extract(payload,'$._claim_token') IS ? AND state='running' AND lease_until>?",
+            (*claim, time.time())).fetchone():
+        raise LostLease("task was reclaimed or its lease expired")
+
+
+@contextlib.contextmanager
+def mutation():
+    """Fence a local task's write against another process reclaiming its lease."""
+    with core.db_lock:
+        try:
+            core.DB.execute("BEGIN IMMEDIATE")
+            _check_claim(core.DB)
+            yield core.DB
+            core.DB.commit()
+        except BaseException:
+            core.DB.rollback()
+            raise
+
+
+def guarded_q(sql, args=(), one=False):
+    if not getattr(_execution, "claim", None):
+        return q(sql, args, one)
+    with mutation() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return (rows[0] if rows else None) if one else rows
+
+
+def _guarded_write(sql, args=()):
+    if not getattr(_execution, "claim", None):
+        return _write(sql, args)
+    with mutation() as conn:
+        return conn.execute(sql, args).rowcount
 
 
 def task(kind, label, pool, prefer=None, remote=False, then=None, prefer_wait=PREFER_WAIT):
@@ -108,12 +155,12 @@ def publish(kind, target, priority=0, parent=None, by="pi", force=False, not_bef
         raise ValueError(f"unknown kind {kind}")
     payload = json.dumps(payload if payload is not None else task_payload(kind, target), ensure_ascii=False)
     now = time.time()
-    _write("INSERT OR IGNORE INTO tasks (kind, target, priority, payload, parent, published_by, not_before, created, "
+    _guarded_write("INSERT OR IGNORE INTO tasks (kind, target, priority, payload, parent, published_by, not_before, created, "
            "updated) VALUES (?,?,?,?,?,?,?,?,?)", (kind, target, priority, payload, parent, by, not_before, now, now))
     row = q("SELECT id, state FROM tasks WHERE kind=? AND target=?", (kind, target), one=True)
     ring("tasks")
     if force and row["state"] in ("done", "failed"):
-        _write("UPDATE tasks SET state='queued', priority=?, payload=?, parent=?, published_by=?, result=NULL, "
+        _guarded_write("UPDATE tasks SET state='queued', priority=?, payload=?, parent=?, published_by=?, result=NULL, "
                "progress=NULL, error='', attempts=0, worker=NULL, lease_until=NULL, not_before=?, updated=? "
                "WHERE id=? AND state IN ('done','failed')", (priority, payload, parent, by, not_before, now, row["id"]))
     return row["id"]
@@ -154,8 +201,10 @@ def seen_worker(name, caps, task=None, paused=None):
 
 
 def task_dict(row):
+    payload = json.loads(row["payload"])
     return {"id": row["id"], "kind": row["kind"], "target": row["target"], "priority": row["priority"],
-            "payload": json.loads(row["payload"]), "progress": json.loads(row["progress"] or "null")}
+            "claim_token": payload.pop("_claim_token", None),
+            "payload": payload, "progress": json.loads(row["progress"] or "null"), "attempt": row["attempts"]}
 
 
 def claim_task(worker, caps):
@@ -187,52 +236,104 @@ def claim_task(worker, caps):
         row = q(f"SELECT * FROM tasks WHERE {cond} ORDER BY priority DESC, id DESC LIMIT 1", args, one=True)
         if not row:
             return None
-        if _write("UPDATE tasks SET state='running', worker=?, lease_until=?, attempts=attempts+1, updated=? "
-                  "WHERE id=? AND state='queued'", (worker, now + LEASE, now, row["id"])):
+        token = secrets.token_hex(16)
+        if _write("UPDATE tasks SET state='running', worker=?, lease_until=?, attempts=attempts+1, updated=?, "
+                  "payload=json_set(payload,'$._claim_token',?) WHERE id=? AND state='queued'",
+                  (worker, now + LEASE, now, token, row["id"])):
             seen_worker(worker, caps, row["id"])
-            return task_dict(row) | {"lease": LEASE}
+            return task_dict(row) | {"lease": LEASE, "attempt": row["attempts"] + 1, "claim_token": token}
     return None
 
 
-def heartbeat_task(tid, worker, progress=None):
+def heartbeat_task(tid, worker, progress=None, attempt=None, claim_token=None):
     """Still on it (and how far): the lease is renewed. False if the task isn't this worker's any more."""
     seen_worker(worker, json.loads((q("SELECT caps FROM workers WHERE name=?", (worker,), one=True) or {"caps": "[]"})["caps"]), tid)
+    condition = " AND attempts=?" if attempt is not None else ""
+    if claim_token is not None:
+        condition += " AND json_extract(payload,'$._claim_token')=?"
     return bool(_write("UPDATE tasks SET lease_until=?, progress=COALESCE(?, progress), updated=? "
-                       "WHERE id=? AND worker=? AND state='running'",
+                       "WHERE id=? AND worker=? AND state='running'" + condition,
                        (time.time() + LEASE, None if progress is None else json.dumps(progress, ensure_ascii=False),
-                        time.time(), tid, worker)))
+                        time.time(), tid, worker, *((attempt,) if attempt is not None else ()),
+                        *((claim_token,) if claim_token is not None else ()))))
 
 
-def complete_task(tid, worker, result):
-    if not _write("UPDATE tasks SET state='done', result=?, lease_until=NULL, updated=? WHERE id=? AND worker=? "
-                  "AND state='running'", (json.dumps(result, ensure_ascii=False), time.time(), tid, worker)):
-        return False
-    task = q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
-    if not task:  # removed meanwhile (its job was deleted): nothing to follow up
-        return True
-    try:
-        then = TASK_KINDS.get(task["kind"], {}).get("then")
-        if isinstance(then, str):  # a Pi task writes the result into the library
-            publish(then, task["target"], task["priority"], parent=task["id"], force=True)
-        elif then:
-            then(task, result)
-    except Exception:
-        traceback.print_exc()
+def complete_task(tid, worker, result, attempt=None, claim_token=None):
+    """Persist completion and its follow-up together; retry the follow-up without redoing compute."""
+    followup = None
+    now = time.time()
+    with core.db_lock:
+        try:
+            core.DB.execute("BEGIN IMMEDIATE")
+            task = core.DB.execute("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'",
+                                   (tid, worker)).fetchone()
+            if (not task or (attempt is not None and task["attempts"] != attempt)
+                    or (claim_token is not None and json.loads(task["payload"]).get("_claim_token") != claim_token)):
+                core.DB.rollback()
+                return False
+            core.DB.execute("UPDATE tasks SET state='done',result=?,lease_until=NULL,updated=? WHERE id=?",
+                            (json.dumps(result, ensure_ascii=False), now, tid))
+            if TASK_KINDS.get(task["kind"], {}).get("then"):
+                payload = {**json.loads(task["payload"]), "_completed_task": tid, "_completed_at": now}
+                cur = core.DB.execute(
+                    "INSERT INTO tasks(kind,target,priority,payload,parent,published_by,created,updated) "
+                    "VALUES('task_followup',?,?,?,?,?,?,?)",
+                    (f"followup:{tid}:{secrets.token_hex(8)}", task["priority"],
+                     json.dumps(payload, ensure_ascii=False), tid, "pi", now, now))
+                followup = cur.lastrowid
+            core.DB.commit()
+        except BaseException:
+            core.DB.rollback()
+            raise
+    if followup:
+        # Preserve the immediate result handling expected by remote workers, while leaving a durable retry.
+        followup_worker = f"followup:{followup}"
+        if _write("UPDATE tasks SET state='running',worker=?,attempts=attempts+1,lease_until=?,updated=?, "
+                  "payload=json_set(payload,'$._claim_token',?) WHERE id=? AND state='queued'",
+                  (followup_worker, now + LEASE, now, secrets.token_hex(16), followup)):
+            row = q("SELECT * FROM tasks WHERE id=?", (followup,), one=True)
+            run_claimed(task_dict(row), followup_worker)
+        ring("tasks")
     return True
 
 
-def fail_task(tid, worker, error, retry=True, trace="", expected=False):
+@task("task_followup", "保存任务结果 / 后续步骤", "light")
+def run_followup(task, beat):
+    p = task["payload"]
+    parent = q("SELECT * FROM tasks WHERE id=?", (p["_completed_task"],), one=True)
+    if not parent or parent["state"] != "done" or parent["updated"] != p["_completed_at"]:
+        return {"skipped": "source task was removed or rerun"}
+    result = json.loads(parent["result"] or "null")
+    if result is None or (isinstance(result, dict) and result.get("saved")):
+        return {"skipped": "result already consumed"}
+    then = TASK_KINDS.get(parent["kind"], {}).get("then")
+    if isinstance(then, str):
+        publish(then, parent["target"], parent["priority"], parent=parent["id"], force=True)
+    elif then:
+        then(parent, result)
+    return {"source": parent["id"]}
+
+
+def fail_task(tid, worker, error, retry=True, trace="", expected=False, attempt=None, claim_token=None):
     """retry: try again later (after 1, 4, 9... minutes; at most 5 times); else it stays failed, and unless it was
     `expected` (the target is gone...) it goes to 自修复 (heal.py) with its traceback."""
     row = q("SELECT * FROM tasks WHERE id=? AND worker=? AND state='running'", (tid, worker), one=True)
-    if not row:
+    if (not row or (attempt is not None and row["attempts"] != attempt)
+            or (claim_token is not None and json.loads(row["payload"]).get("_claim_token") != claim_token)):
         return False
+    # A lease may be reclaimed between the read and this write. Only fail the attempt we read.
+    token = json.loads(row["payload"]).get("_claim_token")
+    claim = (tid, worker, row["attempts"], token)
     if retry and row["attempts"] < 5:
-        _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, error=?, not_before=?, updated=? WHERE id=?",
-               (str(error)[:1000], time.time() + 60 * row["attempts"] ** 2, time.time(), tid))
+        if not _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, error=?, not_before=?, updated=? "
+                      "WHERE id=? AND worker=? AND state='running' AND attempts=? AND json_extract(payload,'$._claim_token') IS ?",
+                      (str(error)[:1000], time.time() + 60 * row["attempts"] ** 2, time.time(), *claim)):
+            return False
     else:
-        _write("UPDATE tasks SET state='failed', worker=NULL, lease_until=NULL, error=?, updated=? WHERE id=?",
-               (str(error)[:1000], time.time(), tid))
+        if not _write("UPDATE tasks SET state='failed', worker=NULL, lease_until=NULL, error=?, updated=? "
+                      "WHERE id=? AND worker=? AND state='running' AND attempts=? AND json_extract(payload,'$._claim_token') IS ?",
+                      (str(error)[:1000], time.time(), *claim)):
+            return False
         if row['kind'] == 'live_render':
             payload = json.loads(row['payload'])
             q("UPDATE live_clips SET state='failed', error=?, updated=? WHERE id=? AND version=? AND state IN ('queued','rendering')",
@@ -247,11 +348,16 @@ def fail_task(tid, worker, error, retry=True, trace="", expected=False):
     return True
 
 
-def release_task(tid, worker):
+def release_task(tid, worker, attempt=None, claim_token=None):
     """Paused for other work (not a failure): back on the board with its progress, the try not counted."""
     ring("tasks")
-    _write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, attempts=MAX(attempts-1, 0), updated=? "
-           "WHERE id=? AND worker=? AND state='running'", (time.time(), tid, worker))
+    condition = " AND attempts=?" if attempt is not None else ""
+    if claim_token is not None:
+        condition += " AND json_extract(payload,'$._claim_token')=?"
+    return bool(_write("UPDATE tasks SET state='queued', worker=NULL, lease_until=NULL, attempts=MAX(attempts-1, 0), updated=? "
+                       "WHERE id=? AND worker=? AND state='running'" + condition,
+                       (time.time(), tid, worker, *((attempt,) if attempt is not None else ()),
+                        *((claim_token,) if claim_token is not None else ()))))
 
 
 def task_media(task):
@@ -285,7 +391,7 @@ def parent_result(task):
 
 def drop_parent_result(task, summary):
     """Once written into the library, the bulky result (vectors, every subtitle line) isn't needed on the board."""
-    _write("UPDATE tasks SET result=? WHERE id=(SELECT parent FROM tasks WHERE id=?)",
+    _guarded_write("UPDATE tasks SET result=? WHERE id=(SELECT parent FROM tasks WHERE id=?)",
            (json.dumps({**summary, "saved": True}, ensure_ascii=False), task["id"]))
 
 
@@ -296,24 +402,62 @@ class Paused(Exception):
 
 
 def run_claimed(task, worker):
-    """Do a claimed task here and report back."""
-    beat = lambda progress=None: heartbeat_task(task["id"], worker, progress)  # noqa: E731
+    """Keep local work leased even while a model blocks; fence attempts through completion."""
+    attempt = task.get("attempt")
+    token = task.get("claim_token")
+    if attempt is None:
+        row = q("SELECT attempts,payload FROM tasks WHERE id=? AND worker=? AND state='running'", (task["id"], worker), one=True)
+        if not row:
+            return "lost"
+        attempt = row["attempts"]
+        token = json.loads(row["payload"]).get("_claim_token")
+    previous = getattr(_execution, "claim", None)
+    _execution.claim = (task["id"], worker, attempt, token)
+    stopped = threading.Event()
+    lost = threading.Event()
+
+    def beat(progress=None):
+        if lost.is_set() or not heartbeat_task(task["id"], worker, progress, attempt=attempt, claim_token=token):
+            lost.set()
+            return False
+        return True
+
+    def renew():
+        while not stopped.wait(max(.05, min(60, LEASE / 3))):
+            try:
+                if not beat():
+                    return
+            except Exception:
+                traceback.print_exc()
+
+    pulse = threading.Thread(target=renew, daemon=True)
     try:
+        with core.db_lock:
+            _check_claim(core.DB)
+        pulse.start()
         result = TASK_KINDS[task["kind"]]["run"](task, beat)
+        with core.db_lock:
+            _check_claim(core.DB)
+    except LostLease:
+        return "lost"
     except Paused:
-        release_task(task["id"], worker)
+        release_task(task["id"], worker, attempt=attempt, claim_token=token)
         return "paused"
     except AlreadySaved:
         result = {"skipped": "saved by an earlier run"}
     except ValueError as e:  # the target is gone or doesn't fit: no point trying again
-        fail_task(task["id"], worker, e, retry=False, expected=True)
+        fail_task(task["id"], worker, e, retry=False, expected=True, attempt=attempt, claim_token=token)
         return "failed"
     except Exception as e:
         traceback.print_exc()
-        fail_task(task["id"], worker, e, trace=traceback.format_exc())
+        fail_task(task["id"], worker, e, trace=traceback.format_exc(), attempt=attempt, claim_token=token)
         return "failed"
-    complete_task(task["id"], worker, result)
-    return "done"
+    finally:
+        stopped.set()
+        if pulse.ident is not None:
+            pulse.join(timeout=1)
+        _execution.claim = previous
+    return "done" if complete_task(task["id"], worker, result, attempt=attempt, claim_token=token) else "lost"
 
 
 def box_busy():
@@ -386,6 +530,10 @@ def run_task_process(tid, worker):
 
 def retry_allowed(task, owner, admin=False):
     # Re-running computation is safe; publishing and arbitrary model requests have separate review flows.
+    if task["kind"] == "task_followup":
+        payload = json.loads(task["payload"] or "{}")
+        parent = q("SELECT * FROM tasks WHERE id=?", (payload.get("_completed_task"),), one=True)
+        return bool(parent and parent["kind"] != "task_followup" and retry_allowed(parent, owner, admin))
     if task['kind'] not in {'live_calibrate', 'live_refine', 'live_verify', 'live_style', 'live_reference', 'live_transcribe', 'live_analyze',
                              'live_render', 'live_score', 'book_import', 'note_media', 'note_ai', 'transcribe', 'chapters', 'frames',
                              'cover', 'index_subs', 'save_subs', 'translate', 'summarize', 'explain_failure', 'digest', 'notes_recap'}:

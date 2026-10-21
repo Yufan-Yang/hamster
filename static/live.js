@@ -1,6 +1,7 @@
 // Live clipping workspace; loaded after the shared page helpers.
-let liveData = null, liveTab = "highlight", liveStatus = "all", livePoll = null, liveQrPoll = null, liveQrEpoch = 0, liveEpoch = 0;
+let liveData = null, liveTab = "review", liveStatus = "all", livePoll = null, liveQrPoll = null, liveQrEpoch = 0, liveEpoch = 0;
 let liveSourceFilter = "";
+let liveRequest = null, liveError = "", liveDataKey = "", liveCursor = "", livePageHistory = [];
 const liveSelected = new Set();
 const LV_STATES = {queued:"等待制作",rendering:"正在制作",ready:"可预览 / 待投稿",awaiting_upload:"排队投稿",uploading:"正在投稿",
   submitted:"已投稿",uncertain:"投稿结果待核实",rejected:"已忽略",failed:"处理失败",transcribing:"正在转写",expired:"原始缓存已清理"};
@@ -13,81 +14,144 @@ async function lvApi(url, body) {
   const response=await fetch(url,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const data=await response.json(); if(!response.ok) throw Error(data.error||"操作失败"); return data;
 }
-async function loadLive() {
-  clearTimeout(livePoll); if(chip!=="live"||document.hidden)return;
-  const epoch = ++liveEpoch, owner = storageOwner;
-  try { const data=await lvApi("/api/live?tab="+encodeURIComponent(liveTab)); if(epoch!==liveEpoch||owner!==storageOwner)return; liveData=data; renderLive(); }
-  catch(e) { if(epoch!==liveEpoch||owner!==storageOwner)return; if(liveData){toast("直播工作台连接中断，保留当前内容，稍后自动重连");}else $("#liveWorkspace").innerHTML=`<div class="lv-panel">${esc(e.message)}${!state.user?'<p><button class="btn" onclick="openAccount()">登录拾光</button></p>':""}</div>`; }
-  if(chip==="live")livePoll=setTimeout(loadLive,5000);
+function lvQuery() {
+  const params=new URLSearchParams({tab:liveTab});
+  if(["review","highlight","topic"].includes(liveTab)){
+    if(liveSourceFilter)params.set("source",liveSourceFilter);
+    if(liveStatus!=="all")params.set("state",liveStatus);
+    if(liveCursor)params.set("cursor",liveCursor);
+  }
+  return params.toString();
 }
-function lvTab(tab) {liveSelected.clear();liveTab=tab;saveNavigation(true);renderLive();loadLive();}
-function lvVisibleClips(){return (liveData?.clips||[]).filter(c=>c.lane===liveTab&&(!liveSourceFilter||String(c.source_id)===liveSourceFilter)&&(liveStatus==="all"?c.content_kind!=="advertisement"&&!c.merged_into:c.state===liveStatus));}
+async function loadLive({force = false} = {}) {
+  clearTimeout(livePoll); if(chip!=="live"||document.hidden)return;
+  const key=lvQuery();
+  if(!force&&liveRequest&&liveRequest.epoch===liveEpoch&&liveRequest.owner===storageOwner&&liveRequest.key===key)return liveRequest.promise;
+  const request = {epoch:++liveEpoch, owner:storageOwner, tab:liveTab, key};
+  liveRequest=request;
+  const current=()=>request.epoch===liveEpoch&&request.owner===storageOwner&&request.key===lvQuery()&&chip==="live";
+  request.promise=(async()=>{
+    try {
+      const data=await lvApi("/api/live?"+request.key);
+      if(!current())return;
+      liveData=data;liveDataKey=request.key;liveError="";renderLive();
+    } catch(e) {
+      if(!current())return;
+      liveError=e.message||"连接中断";renderLive();
+    } finally {
+      if(liveRequest===request)liveRequest=null;
+      if(current()&&!document.hidden)livePoll=setTimeout(loadLive,5000);
+    }
+  })();
+  return request.promise;
+}
+function lvTab(tab) {liveSelected.clear();liveTab=tab;liveCursor="";livePageHistory=[];saveNavigation(true);renderLive();return loadLive();}
+function lvFilter(kind,value){if(kind==="source")liveSourceFilter=value;else liveStatus=value;liveCursor="";livePageHistory=[];liveSelected.clear();document.activeElement?.blur();saveNavigation();renderLive();return loadLive();}
+function lvNextPage(){if(!liveData?.has_more||!liveData.next_cursor)return;livePageHistory.push(liveCursor);liveCursor=liveData.next_cursor;liveSelected.clear();saveNavigation(true);renderLive();return loadLive();}
+function lvPreviousPage(){liveCursor=livePageHistory.pop()||"";liveSelected.clear();saveNavigation(true);renderLive();return loadLive();}
+function lvVisibleClips(){return (liveData?.clips||[]).filter(c=>(liveTab==="review"?c.needs_attention!==false:c.lane===liveTab)&&(!liveSourceFilter||String(c.source_id)===liveSourceFilter)&&(liveStatus==="all"?c.content_kind!=="advertisement"&&!c.merged_into:c.state===liveStatus));}
 function lvSelectable(c){return !['awaiting_upload','uploading','submitted','uncertain'].includes(c.state);}
 function renderLive() {
-  if(!liveData){$("#liveWorkspace").innerHTML='<p class="hint">正在加载直播切片…</p>';return;}
-  const data=liveData, account=data.account;
-  const clips=lvVisibleClips();
+  const connection=liveError?`<div class="lv-panel lv-connection" role="status"><span>${liveData?"连接中断，保留上次内容；稍后自动重试。":"暂时无法加载直播工作台。"} ${esc(liveError)}</span><button class="btn plain" onclick="loadLive({force:true})">重新加载</button>${!state.user?'<button class="btn" onclick="openAccount()">登录拾光</button>':""}</div>`:"";
+  if(!liveData){$("#liveWorkspace").innerHTML=connection||'<p class="hint" role="status">正在加载直播切片…</p>';delete $("#liveWorkspace").dataset.html;return;}
+  const data=liveData, account=data.account, fresh=!liveDataKey||liveDataKey===lvQuery();
+  const clips=fresh?lvVisibleClips():[];
   const selectable=new Set(clips.filter(lvSelectable).map(c=>c.id));
   for(const id of liveSelected)if(!selectable.has(id))liveSelected.delete(id);
   const workspace=$('#liveWorkspace');
   if(workspace.contains(document.activeElement)&&['SELECT','INPUT','TEXTAREA'].includes(document.activeElement.tagName)&&document.activeElement.type!=='checkbox')return;
   const detailKey=el=>el.dataset.lvDetail||`${el.closest('[data-lv-source]')?.dataset.lvSource||''}|${el.querySelector('summary')?.textContent||''}`;
   const expanded=new Set([...workspace.querySelectorAll('details[open]')].map(detailKey));
-  const html=`<div class="lv-bar"><div><b>直播切片工作台</b><div class="lv-meta">每分钟分段 · 两条线并行 · 跨分段保留上下文</div></div>
-    <div class="lv-actions"><button class="btn plain" onclick="lvLogin()">${account?`投稿账号：${esc(account.name)}`:"扫码绑定 B站投稿账号"}</button><button class="btn" onclick="lvEditSource()">＋ 追踪 UP</button></div></div>
-    <p class="lv-intro">亮点线按话题性、传播潜力和趣味性评分，话题线按讨论内容切换分段。低于 75 分、创建满 12 小时仍未投稿的片段会自动清除；待评分、投稿处理中和已投稿的片段保留。自动投稿会先等待评分预校准通过，也可以预览、编辑并手动投稿。</p>
-    ${!data.uploader_ready?'<p class="lv-error">投稿组件尚未就绪；录制、分析和预览仍可使用。</p>':""}
-    <div class="lv-tabs">${[["highlight","亮点切片"],["topic","话题分段"],["sources","追踪 UP"],["recordings","直播记录"],["calibration","评分校准"]].map(([key,label])=>`<button class="chip${liveTab===key?" on":""}" onclick="lvTab('${key}')">${label}</button>`).join("")}</div>
-    ${["highlight","topic"].includes(liveTab)?`<div class="lv-bar"><span class="lv-meta">${clips.length} 个${liveTab==="topic"?"话题片段":"亮点"}</span><label>主播 <select onchange="liveSourceFilter=this.value;liveSelected.clear();this.blur();renderLive()"><option value="">全部主播</option>${data.sources.map(s=>`<option value="${s.id}"${liveSourceFilter===String(s.id)?' selected':''}>${esc(s.name)}${s.archived?'（已取消追踪）':''}</option>`).join('')}</select></label><label>状态 <select onchange="liveStatus=this.value;liveSelected.clear();saveNavigation();this.blur();renderLive()"><option value="all">全部</option>${Object.entries(LV_STATES).filter(([k])=>!["transcribing","expired"].includes(k)).map(([k,v])=>`<option value="${k}"${liveStatus===k?" selected":""}>${v}</option>`).join("")}</select></label><button class="btn plain" onclick="lvEditClip()">＋ 手动切片</button></div><div class="lv-actions lv-bulk"><button class="btn plain" onclick="lvSelectAll()">${liveSelected.size&&liveSelected.size===selectable.size?'取消全选':'全选当前列表'}</button><span>已选 ${liveSelected.size} 条</span><button class="btn plain" onclick="lvBulk('reject')" ${!liveSelected.size?'disabled':''}>批量忽略</button><button class="btn plain" onclick="lvBulk('delete')" ${!liveSelected.size?'disabled':''}>批量删除</button><span class="lv-meta">忽略保留文件；删除释放空间。投稿记录会保留。</span></div><div class="lv-grid">${clips.map(lvCard).join("")||'<p class="hint">当前筛选下没有片段。</p>'}</div>`:
+  const html=`${connection}<div class="lv-tabs">${[["review","待处理"],["highlight","亮点切片"],["topic","话题分段"],["sources","追踪 UP"],["recordings","直播记录"],["calibration","评分校准"]].map(([key,label])=>`<button class="chip${liveTab===key?" on":""}" aria-pressed="${liveTab===key}" onclick="lvTab('${key}')">${label}${fresh&&Number.isInteger(data.counts?.[key])?` ${data.counts[key]}`:""}</button>`).join("")}
+    <div class="lv-setup"><button class="link lv-account" onclick="lvLogin()" title="管理 B站投稿账号">${account?`投稿账号：${esc(account.name)}`:"绑定 B站投稿账号"}</button><button class="btn plain" onclick="lvEditSource()">＋ 追踪 UP</button></div></div>
+    ${!data.uploader_ready?'<p class="lv-error lv-uploader-note">投稿组件尚未就绪；录制、分析和预览仍可使用。</p>':""}
+    ${["review","highlight","topic"].includes(liveTab)?lvClipList(data,clips,selectable,fresh):
       liveTab==="sources"?`<div class="lv-grid">${data.sources.filter(s=>!s.archived).map(lvSourceCard).join("")||'<p class="hint">添加一个直播 UP 主开始追踪。</p>'}</div>${data.sources.some(s=>s.archived)?`<details class="lv-rule"><summary>已取消追踪的 UP</summary>${data.sources.filter(s=>s.archived).map(s=>`<p>${esc(s.name)} <button class="link" onclick="lvManageSource(${s.id})">管理已有切片</button><button class="link" onclick="lvPause(${s.id})">重新追踪</button></p>`).join('')}</details>`:''}`:
-      liveTab==="recordings"?lvRecordings():lvCalibrations()}`;
+      liveTab==="recordings"?lvRecordings():lvCalibrations()}
+    <details class="lv-guide" data-lv-detail="guide"><summary>切片规则与自动投稿说明</summary><p class="lv-meta">每分钟分段，两条线并行，跨分段保留上下文。亮点按话题性、传播潜力和趣味性评分，话题线按讨论内容切换分段。低于 75 分、创建满 12 小时仍未投稿的片段会自动清除；待评分、投稿处理中和已投稿的片段保留。自动投稿须通过评分预校准；正常制作与投稿队列不计入待处理。</p></details>`;
   if(workspace.dataset.html===html)return;
   const y=window.scrollY;
   workspace.innerHTML=html;workspace.dataset.html=html;
   workspace.querySelectorAll('details').forEach(el=>{el.open=expanded.has(detailKey(el));});
   window.scrollTo(0,y);
 }
+function lvClipList(data,clips,selectable,fresh){
+  const total=Number.isInteger(data.total)?` · 共 ${data.total} 条`:"";
+  const empty=liveTab==="review"&&!liveSourceFilter&&liveStatus==="all"
+    ? '<div class="lv-panel lv-empty"><h3>当前没有待处理片段</h3><p class="lv-meta">制作或投稿中的片段会继续处理。可以查看亮点、完整话题或录制进度。</p><button class="btn plain" onclick="lvTab(\'highlight\')">浏览亮点切片</button><button class="link" onclick="lvTab(\'recordings\')">查看直播记录</button></div>'
+    : '<div class="lv-panel lv-empty"><h3>当前筛选下没有片段</h3><p class="lv-meta">试试其他主播或状态。</p><button class="btn plain" onclick="liveSourceFilter=\'\';lvFilter(\'state\',\'all\')">清空筛选</button></div>';
+  return `<div class="lv-bar lv-filters"><span class="lv-meta lv-filter-count">${fresh?`本页 ${clips.length} 条${total}`:"正在加载当前列表…"}<span class="lv-filter-hint"> · 按主播、状态筛选</span></span>
+    <label>主播 <select aria-label="筛选主播" onchange="lvFilter('source',this.value)"><option value="">全部主播</option>${data.sources.map(s=>`<option value="${s.id}"${liveSourceFilter===String(s.id)?' selected':''}>${esc(s.name)}${s.archived?'（已取消追踪）':''}</option>`).join("")}</select></label>
+    <label>状态 <select aria-label="筛选状态" onchange="lvFilter('state',this.value)"><option value="all">全部</option>${Object.entries(LV_STATES).filter(([k])=>!["transcribing","expired"].includes(k)).map(([k,v])=>`<option value="${k}"${liveStatus===k?" selected":""}>${v}</option>`).join("")}</select></label></div>
+    ${fresh&&clips.length?`<div class="lv-actions lv-bulk"><button class="link" onclick="lvSelectAll()">${liveSelected.size&&liveSelected.size===selectable.size?"取消全选":"全选本页"}</button><span>已选 ${liveSelected.size} 条</span>${liveSelected.size?'<button class="btn plain" onclick="lvBulk(\'reject\')">批量忽略</button><button class="btn plain" onclick="lvBulk(\'delete\')">批量删除</button>':'<span class="lv-meta">勾选片段后可批量管理</span>'}</div>`:""}
+    <div class="lv-grid">${fresh?(clips.map(lvCard).join("")||empty):'<p class="hint" role="status">正在加载…</p>'}</div>
+    <div class="lv-list-tools"><button class="link" onclick="lvEditClip()">＋ 手动切片</button></div>
+    ${fresh&&(liveCursor||data.has_more)?`<div class="lv-pages"><button class="btn plain" onclick="lvPreviousPage()" ${!liveCursor?"disabled":""}>${livePageHistory.length?"上一页":"回到第一页"}</button><span class="lv-meta">本页 ${clips.length} 条${total}</span><button class="btn plain" onclick="lvNextPage()" ${!data.has_more?"disabled":""}>下一页</button></div>`:""}`;
+}
 function lvSourceCard(s) {const c=s.settings;return `<div class="lv-panel"><h3>${esc(s.name)}</h3><span class="lv-label">${s.enabled?(LV_SOURCE[s.live_status]||s.live_status):"已暂停"}</span>
   ${s.enabled?`<p class="lv-meta">${s.monitor?.state==="connected"&&Date.now()/1000-s.monitor.updated<120?"开播事件监听中":s.monitor?.state==="retrying"?"开播监听重连中":"正在连接开播监听"} · 每 30 分钟补查${s.monitor?.error?`<br>${esc(s.monitor.error)}`:""}</p>`:""}
   <p class="lv-meta">亮点门槛 ${c.score_min} 分 · ${c.min_seconds}–${c.max_seconds} 秒<br>亮点${c.auto_highlights?"自动投稿":"手动投稿"} · 话题${c.auto_topics?"自动投稿":"手动投稿"} · 每天最多 ${c.daily_limit} 个<br>${s.rubric?`专属标准 v${s.rubric.version}`:"使用默认标准 · 专属规则待校准"}</p>
   ${s.error?`<p class="lv-error">${esc(s.error)}</p>`:""}<div class="lv-actions"><button class="btn plain" onclick="lvEditSource(${s.id})">编辑</button><button class="link" onclick="lvSourceAction(${s.id},'check')">立即检查</button><button class="link" onclick="lvPause(${s.id})">${s.enabled?"暂停":"恢复"}</button><button class="link" onclick="lvUnfollow(${s.id})">取消追踪</button><button class="link" onclick="lvManageSource(${s.id})">管理已有切片</button><a class="link" href="${esc(s.url)}" target="_blank" rel="noopener">直播间 ↗</a></div></div>`;}
+function lvCanEdit(c){return typeof c.can_edit==="boolean"?c.can_edit:!["uploading","submitted","uncertain"].includes(c.state);}
+function lvNextButton(c){
+  const action=c.action||(c.state==="uncertain"?"check_publish":c.state==="failed"?"retry":c.state==="ready"?"publish":"wait");
+  const labels={retry:"重试制作",check_publish:"核实投稿结果",calibrate:"查看评分校准",bind_account:"绑定投稿账号",configure:"调整主播设置",score:"重新评分"};
+  const label=labels[action]||(c.preview?"预览并处理":action==="edit"||action==="publish"?"编辑处理":"");
+  return label?`<button class="btn" onclick="lvHandleNext(${c.id})">${label}</button>`:"";
+}
+function lvHandleNext(id){
+  const c=lvClip(id);if(!c)return;
+  const action=c.action||(c.state==="uncertain"?"check_publish":c.state==="failed"?"retry":c.state==="ready"?"publish":"wait");
+  if(action==="retry")return lvClipAction(id,"render");
+  if(action==="score")return lvClipAction(id,"score");
+  if(action==="bind_account")return lvLogin();
+  if(action==="configure")return lvEditSource(c.source_id);
+  if(action==="calibrate")return lvTab("calibration");
+  if(c.preview||action==="check_publish")return lvPreview(id);
+  if(lvCanEdit(c)&&(action==="edit"||action==="publish"))lvEditClip(id);
+}
 function lvCard(c) {const s=lvSource(c.source_id); const stat=c.performance?.stats;
   const scored=['topic','traffic','fun','completeness'].every(k=>typeof c.scores?.[k]==='number'&&Number.isFinite(c.scores[k]));
   const showCover=c.preview&&c.cover_revision&&['awaiting_upload','uploading','submitted','uncertain'].includes(c.state);
-  return `<article class="lv-panel">
+  return `<article class="lv-panel lv-clip" data-lv-clip="${c.id}">
   ${lvSelectable(c)?`<label class="lv-select"><input type="checkbox" aria-label="选择切片：${esc(c.title)}" ${liveSelected.has(c.id)?'checked':''} onchange="lvSelect(${c.id},this.checked)">选择</label>`:''}
   ${showCover?`<img class="lv-cover" src="/api/live/clips/${c.id}/cover?v=${c.version}&c=${encodeURIComponent(c.cover_revision||'')}" alt="" loading="lazy">`:""}<span class="lv-label${c.lane==="highlight"?" lv-hot":""}">${c.lane==="highlight"?"亮点":"完整话题"} · ${scored?`${c.score} 分`:"待评分"}</span><span class="lv-label">${LV_STATES[c.state]||c.state}</span>
   ${c.needs_review?'<span class="lv-label">已编辑 · 待人工确认</span>':""}<h3>${esc(c.title)}</h3><div class="lv-meta">${esc(c.source_name||s?.name||"直播")} · ${lvTime(c.start)}–${lvTime(c.end)} · ${Math.round(c.duration)} 秒</div>
+  ${c.review_reason||c.next_action?`<div class="lv-next"><strong>${esc(c.next_action||"查看当前处理状态")}</strong><p>${esc(c.review_reason||"")}</p></div>`:""}
+  <div class="lv-actions lv-primary">${lvNextButton(c)}${c.preview&&["retry","calibrate","bind_account","configure","score"].includes(c.action)?`<button class="link" onclick="lvPreview(${c.id})">预览成片</button>`:""}</div>
+  <details class="lv-card-details" data-lv-detail="clip:${c.id}"><summary>评分依据与更多操作</summary>
   ${scored?`<div class="lv-score">话题 ${c.scores.topic} · 传播 ${c.scores.traffic} · 趣味 ${c.scores.fun} · 完整 ${c.scores.completeness}</div>${c.scores.reason?`<p class="lv-meta">评分依据：${esc(c.scores.reason)}</p>`:''}`:""}
   <p class="lv-meta">${esc(c.reason||c.description||"")}</p>${stat?`<p class="lv-meta">实际表现：播放 ${stat.view||0} · 赞 ${stat.like||0} · 收藏 ${stat.favorite||0}</p>`:""}
   ${c.error?`<p class="lv-error">${esc(c.error)}</p>`:""}<div class="lv-actions">
   ${(liveData.clips||[]).some(part=>part.merged_into===c.id&&part.state==='submitted')?'<p class="hint">其中短片段已有投稿记录；完整版本待你确认，不会因合并而重复投稿。</p>':''}
-  ${c.preview?`<button class="btn plain" onclick="lvPreview(${c.id})">预览成片</button>`:""}
-  ${!["uploading","submitted","uncertain"].includes(c.state)?`<button class="link" onclick="lvEditClip(${c.id})">编辑</button>`:""}
-  ${c.state==="ready"?`<button class="btn" onclick="lvClipAction(${c.id},'upload')">投稿 B站</button>`:""}
-  ${c.state==="failed"?`<button class="btn plain" onclick="lvClipAction(${c.id},'render')">重试制作</button>`:""}
+  ${lvCanEdit(c)?`<button class="link" onclick="lvEditClip(${c.id})">编辑</button>`:""}
   ${!["uploading","submitted","uncertain","rejected"].includes(c.state)?`<button class="link" onclick="lvClipAction(${c.id},'reject')">忽略</button>`:""}
+  ${lvSelectable(c)?`<button class="link" onclick="lvBulk('delete',[${c.id}])">删除</button>`:""}
   ${c.state==="uncertain"?`<a class="link" href="https://member.bilibili.com/platform/upload-manager/article" target="_blank" rel="noopener">去创作中心核实 ↗</a><button class="link" onclick="lvReconcile(${c.id})">填写已投稿 BV 号</button><button class="link" onclick="lvRetryUpload(${c.id})">确认未成功后重试</button>`:""}
-  ${c.state==="submitted"?`<a class="link" href="${c.bvid?`https://www.bilibili.com/video/${esc(c.bvid)}`:"https://member.bilibili.com/platform/upload-manager/article"}" target="_blank" rel="noopener">查看投稿 ↗</a>`:""}</div></article>`;}
+  ${c.state==="submitted"?`<a class="link" href="${c.bvid?`https://www.bilibili.com/video/${esc(c.bvid)}`:"https://member.bilibili.com/platform/upload-manager/article"}" target="_blank" rel="noopener">查看投稿 ↗</a>`:""}</div></details></article>`;}
 function lvRecordingGroups(sessions) {
   const groups=[],latest=new Map();
   for(const session of [...sessions].sort((a,b)=>a.started-b.started)){
     let origin={};try{origin=JSON.parse(session.origin||'{}');}catch{}
     const identity=JSON.stringify([session.owner,session.source_id,origin.room_id,origin.uid]);
     const group=latest.get(identity),previous=group?.sessions.at(-1),gap=session.started-(previous?.ended||0);
-    if(previous?.status==='interrupted'&&previous.ended&&gap>=0&&gap<=300){group.sessions.push(session);}
+    let previousOrigin={};try{previousOrigin=JSON.parse(previous?.origin||'{}');}catch{}
+    const identified=origin.live_start&&previousOrigin.live_start;
+    const sameBroadcast=identified&&origin.live_start===previousOrigin.live_start;
+    const reconnect=previous&&previous.status!=='recording'&&previous.ended&&gap>=0&&(gap<=300||sameBroadcast);
+    if(reconnect&&(!identified||sameBroadcast)){group.sessions.push(session);}
     else{const next={source_id:session.source_id,started:session.started,sessions:[session]};groups.push(next);latest.set(identity,next);}
   }
   return groups.sort((a,b)=>b.sessions.at(-1).started-a.sessions.at(-1).started);
 }
-function lvRecordingStatus(session){return session.status==='recording'?'正在录制':session.status==='interrupted'?'录制中断':'录制已停止';}
+function lvRecordingStatus(session){return session.status==='recording'?'正在录制':session.status==='interrupted'?'录制连接中断':'录制已停止';}
 function lvRecordingPart(session) {return `<div data-lv-recording-part="${esc(session.key)}"><p class="lv-meta">${esc(new Date(session.started*1000).toLocaleString('zh-CN',{hour12:false}))} · ${lvRecordingStatus(session)}</p><p>${esc(session.title)}</p>
   <p class="lv-meta">已分析至 ${lvTime(session.cursor)} · 当前话题：${esc(session.topic_title||"等待分析")}</p><button class="btn plain" onclick="lvEditClip(null,'${session.key}')">从这段录制新增切片</button>
   ${liveData.recordings.some(r=>r.session_key===session.key&&r.state==="failed")?'<p class="hint">有分段未能识别文字，后续分析会继续；可点击该分段预览原始视频。</p>':""}
-  <div class="lv-actions">${liveData.recordings.filter(r=>r.session_key===session.key).map(r=>`<button class="link" ${r.state==="expired"?"disabled":""} onclick="lvRecording(${r.id})">${lvTime(r.offset)} · ${LV_STATES[r.state]||r.state}</button>`).join("")}</div>${session.status==='interrupted'?'<p class="hint">后台重启使录制连接中断，不表示主播下播。</p>':''}${session.error?`<p class="lv-error">${esc(session.error)}</p>`:""}</div>`;}
+  <div class="lv-actions">${liveData.recordings.filter(r=>r.session_key===session.key).map(r=>`<button class="link" ${r.state==="expired"?"disabled":""} onclick="lvRecording(${r.id})">${lvTime(r.offset)} · ${LV_STATES[r.state]||r.state}</button>`).join("")}</div>${session.status==='interrupted'?'<p class="hint">录制连接中断，不表示主播下播。</p>':''}${session.error?`<p class="lv-error">${esc(session.error)}</p>`:""}</div>`;}
 function lvRecordings(){return lvRecordingGroups(liveData.sessions).map(group=>{
   const latest=group.sessions.at(-1),name=lvSource(group.source_id)?.name||'直播';
-  return `<details class="lv-panel lv-session" data-lv-detail="broadcast:${esc(group.sessions[0].key)}"><summary>${esc(name)} · ${esc(new Date(group.started*1000).toLocaleString('zh-CN',{hour12:false}))} · ${lvRecordingStatus(latest)}${group.sessions.length>1?` · ${group.sessions.length} 段录制连接`:''}</summary>${group.sessions.length>1?'<p class="hint">后台重启前后的录制归在同一条记录中。中断期间可能有内容未录到，各段仍使用独立时间轴。</p>':''}${group.sessions.map(lvRecordingPart).join('<hr>')}</details>`;
+  return `<details class="lv-panel lv-session" data-lv-detail="broadcast:${esc(group.sessions[0].key)}"><summary>${esc(name)} · ${esc(new Date(group.started*1000).toLocaleString('zh-CN',{hour12:false}))} · ${lvRecordingStatus(latest)}${group.sessions.length>1?` · ${group.sessions.length} 段录制连接`:''}</summary>${group.sessions.length>1?'<p class="hint">同一 UP 相邻的录制连接合并展示，不代表多次开播。有开播时间记录时会核对是否同一场；旧记录按连接间隔不超过 5 分钟归组。中断期间可能有内容未录到，各段仍使用独立时间轴。</p>':''}${group.sessions.map(lvRecordingPart).join('<hr>')}</details>`;
 }).join('')||'<p class="hint">UP 主开播后会在这里生成直播记录，不需要等到下播。</p>';}
 function lvCalibrations() {return liveData.sources.filter(s=>!s.archived).map(s=>{const r=s.rubric,t=s.calibration_task,a=s.last_calibration,c=s.settings,search=s.search_audit;
   const refs=liveData.references.filter(v=>v.source_id===s.id),e=a?.evidence||{},draft=a?.rubric;
@@ -117,8 +181,7 @@ function lvCalibrations() {return liveData.sources.filter(s=>!s.archived).map(s=
   ${e.candidate_trials?.length?`<details><summary>候选方案比较与规则依据</summary>${e.default_tuning_accuracy!=null?`<p class="lv-meta">默认标准在调优集的配对命中率 ${Math.round(e.default_tuning_accuracy*100)}%</p>`:''}${e.candidate_trials.map(trial=>`<p class="lv-meta">方案 ${trial.candidate+1}${trial.candidate===e.selected_candidate?'（选中）':''} · ${trial.tuning_accuracy!=null?'调优配对命中率':'历史训练区分率'} ${Math.round((trial.tuning_accuracy??trial.training_accuracy??0)*100)}%</p><ul>${(trial.rule_evidence||[]).map(rule=>`<li>${esc(rule.rule)}<br><span class="lv-meta">正例 ${rule.support_ids.map(id=>esc(liveData.references.find(v=>v.id===id)?.title||`样本 #${id}`)).join('、')}；对照 ${rule.counter_ids.map(id=>esc(liveData.references.find(v=>v.id===id)?.title||`样本 #${id}`)).join('、')}</span></li>`).join('')}</ul>`).join('')}<p class="lv-meta">新流程只允许 1–2 条局部修正，每条至少有两组正反例。调优不胜过基线就保留默认标准，最终验证不参与选方案。</p></details>`:''}
   <details><summary>查看全部 ${refs.length} 个参考样本及核验原因</summary><div class="lv-rule">${refs.map(v=>`<p class="lv-meta"><a class="link" href="https://www.bilibili.com/video/${esc(v.bvid)}" target="_blank" rel="noopener">${esc(v.title)}</a><br>${esc(v.author)} · 播放 ${v.views} · ${v.role==="evaluation"?"近期效果验证候选":"风格学习素材"} · ${v.excluded?"已排除":({pending:"等待下载",queued:"下载已排队",downloading:"正在下载",transcribing:"正在转写",ready:"转写完成",failed:"处理失败"})[v.state]||v.state}<br>${({pending:"等待转写核验来源",matched:"来源已核验",uncertain:"来源仍不明确",rejected:"来源核验未通过"})[v.source_match]||"等待核验"}${v.match_reason?`：${esc(v.match_reason)}`:""} <button class="link" onclick="lvReferenceAction(${v.id},'${v.excluded?"include":"exclude"}')">${v.excluded?"恢复样本":"排除此样本"}</button>${v.state==="ready"&&["uncertain","rejected"].includes(v.source_match)&&!v.excluded?`<button class="link" onclick="lvReferenceAction(${v.id},'verify')">重新核验来源</button>`:""}${v.state==="failed"&&!v.excluded?`<button class="link" onclick="lvReferenceAction(${v.id},'retry')">重试下载</button>`:""}${v.error?` · ${esc(v.error)}`:""}</p>`).join("")}</div></details></div>`;}).join("")||'<p class="hint">先添加直播 UP，才能按对应受众校准。</p>';}
 function lvSheet(title,body) {
-  clearTimeout(liveQrPoll);liveQrEpoch++;
-  $("#liveModal")?.remove(); const node=document.createElement("div"); node.className="sheet-bg";node.id="liveModal";
+  lvClose(); const node=document.createElement("div"); node.className="sheet-bg";node.id="liveModal";
   node.innerHTML=`<div class="sheet lv-wide"><div class="lv-bar"><h2>${esc(title)}</h2><button class="link" onclick="lvClose()">关闭</button></div>${body}</div>`;
   node.querySelectorAll('video,audio').forEach(lvRememberVolume);
   node.addEventListener("click",e=>{if(e.target===node)lvClose();});document.body.append(node);
@@ -128,13 +191,13 @@ function lvRememberVolume(video){
   try{const saved=JSON.parse(localStorage.getItem('playerVolume')||'null');if(saved){if(typeof saved.volume==='number'&&Number.isFinite(saved.volume))video.volume=Math.max(0,Math.min(1,saved.volume));video.muted=!!saved.muted;}}catch{}
   video.addEventListener('volumechange',()=>lvSaveVolume(video));
 }
-function lvClose(){ clearTimeout(liveQrPoll);liveQrEpoch++;const modal=$("#liveModal");modal?.querySelectorAll('video,audio').forEach(lvSaveVolume);modal?.remove(); }
+function lvClose(){ clearTimeout(liveQrPoll);liveQrEpoch++;const modal=$("#liveModal");modal?.querySelectorAll('video,audio').forEach(media=>{lvSaveVolume(media);media.pause();media.removeAttribute("src");media.load();});modal?.remove(); }
 function lvSelect(id,checked){checked?liveSelected.add(id):liveSelected.delete(id);renderLive();}
 function lvSelectAll(){const ids=lvVisibleClips().filter(lvSelectable).map(c=>c.id);const all=ids.length&&ids.every(id=>liveSelected.has(id));liveSelected.clear();if(!all)ids.forEach(id=>liveSelected.add(id));renderLive();}
 function lvManageSource(id){liveSourceFilter=String(id);liveStatus='all';lvTab('highlight');}
-async function lvUnfollow(id){try{await lvApi(`/api/live/sources/${id}/delete`,{});await loadLive();toast('已取消追踪，已有切片保留');}catch(e){toast(e.message);}}
-async function lvBulk(action){const ids=[...liveSelected];if(!ids.length)return;if(action==='delete'&&!confirm(`删除所选 ${ids.length} 条片段及成片、封面？此操作无法撤销，投稿记录会保留。`))return;
-  try{const result=await lvApi('/api/live/clips/batch',{ids,action});liveSelected.clear();await loadLive();toast(`已${action==='delete'?'删除':'忽略'} ${result.changed.length} 条${result.skipped.length?`，保留 ${result.skipped.length} 条`:''}`);if(result.skipped.length)lvSheet('以下片段已保留',result.skipped.map(s=>`<p>${esc(lvClip(s.id)?.title||`片段 #${s.id}`)}：${esc(s.reason)}</p>`).join(''));}catch(e){toast(e.message);}}
+async function lvUnfollow(id){try{await lvApi(`/api/live/sources/${id}/delete`,{});await loadLive({force:true});toast('已取消追踪，已有切片保留');}catch(e){toast(e.message);}}
+async function lvBulk(action, ids=[...liveSelected]){if(!ids.length)return;const target=ids.length===1?`「${lvClip(ids[0])?.title||`片段 #${ids[0]}`}」`:`所选 ${ids.length} 条片段`;if(action==='delete'&&!confirm(`删除${target}及成片、封面？此操作无法撤销，投稿记录会保留。`))return;
+  try{const result=await lvApi('/api/live/clips/batch',{ids,action});liveSelected.clear();await loadLive({force:true});toast(`已${action==='delete'?'删除':'忽略'} ${result.changed.length} 条${result.skipped.length?`，保留 ${result.skipped.length} 条`:''}`);if(result.skipped.length)lvSheet('以下片段已保留',result.skipped.map(s=>`<p>${esc(lvClip(s.id)?.title||`片段 #${s.id}`)}：${esc(s.reason)}</p>`).join(''));}catch(e){toast(e.message);}}
 function lvEditSource(id, samples=false) {
   const s=lvSource(id),c=s?.settings||{score_min:80,min_seconds:15,max_seconds:180,topic_minutes:20,daily_limit:10,tid:138,auto_highlights:true,auto_topics:false,calibration_enabled:true,calibration_days:7};
   lvSheet(s?"编辑追踪 UP":"新增直播追踪",`<form class="lv-form" onsubmit="lvSaveSource(event,${id||0})">
@@ -143,43 +206,119 @@ function lvEditSource(id, samples=false) {
     <details class="lv-advanced" ${samples?"open":""}><summary>高级设置（可选）</summary><div class="lv-advanced-body">
     <label>显示名字<input name="name" maxlength="80" value="${esc(s?.name||"")}" placeholder="自动识别，可自行修改"></label>
     <label>标题称呼<input name="title_name" maxlength="20" value="${esc(c.title_name||'')}" placeholder="例如：老谢、冯律师；留空使用主播全名"></label>
-    <div class="lv-two"><label>亮点评分门槛<input name="score_min" type="number" min="50" max="100" value="${c.score_min}" required></label><label>每日最多投稿数<input name="daily_limit" type="number" min="1" max="50" value="${c.daily_limit}" required></label><label>亮点最短秒数<input name="min_seconds" type="number" min="5" max="120" value="${c.min_seconds}" required></label><label>亮点最长秒数<input name="max_seconds" type="number" min="15" max="300" value="${c.max_seconds}" required></label><label>长话题最多几分钟<input name="topic_minutes" type="number" min="2" max="60" value="${c.topic_minutes}" required></label><label>B站投稿分区 ID<input name="tid" type="number" min="1" max="9999" value="${c.tid}" required></label></div>
+    <div class="lv-two"><label>亮点评分门槛<input name="score_min" type="number" min="50" max="100" value="${c.score_min}" required></label><label>每日最多投稿数<input name="daily_limit" type="number" min="1" max="50" value="${c.daily_limit}" required></label><label>亮点最短秒数<input name="min_seconds" type="number" min="5" max="120" value="${c.min_seconds}" required></label><label>亮点最长秒数<input name="max_seconds" type="number" min="15" max="300" value="${c.max_seconds}" required></label><label>完整切片单位<select name="topic_unit">${[["auto","自动判断：故事 / 话题"],["story","连麦：一个故事一条"],["topic","聊天：一个话题一条"]].map(([key,label])=>`<option value="${key}"${(c.topic_unit||"auto")===key?" selected":""}>${label}</option>`).join("")}</select></label><label>B站投稿分区 ID<input name="tid" type="number" min="1" max="9999" value="${c.tid}" required></label></div>
     <label>参考视频（BV 号或完整链接，多个用逗号分隔）<textarea name="reference_bvids" rows="2" placeholder="可补充本人发布、第三方切片或历史代表作">${esc(c.reference_bvids||'')}</textarea></label>
     <label>切片 UP 主（空间链接或 UID，多个用逗号分隔）<input name="reference_mids" value="${esc(c.reference_mids||'')}" placeholder="例如：https://space.bilibili.com/123456"></label>
     <p class="hint">补充样本会结合转写核验来源、去除重复。本人投稿和历史素材用于学习风格，近期第三方样本用于验证效果；保存后点击「收集样本并校准」。</p>
     <label>主播别名（多个用逗号分隔）<input name="source_aliases" value="${esc(c.source_aliases||'')}" placeholder="填写该主播实际使用的简称"></label><p class="hint">搜索会自动补上主播全名，别名与自定义关键词共同使用。</p><label>选题偏好<textarea name="preferences" rows="3" placeholder="例如：关注真实创业反差、实用建议，少选纯吐槽">${esc(c.preferences||"")}</textarea></label><label>切片搜索关键词（多个用英文逗号分隔）<input name="search_keywords" value="${esc(c.search_keywords||"")}" placeholder="例如：勇哥餐饮,勇哥"></label>
     <label class="lv-check"><input name="enabled" type="checkbox" ${!s||s.enabled?"checked":""}>启用直播追踪</label><label class="lv-check"><input name="auto_highlights" type="checkbox" ${c.auto_highlights?"checked":""}>亮点成片后自动投稿</label><label class="lv-check"><input name="auto_topics" type="checkbox" ${c.auto_topics?"checked":""}>完整话题也自动投稿（包含已投稿亮点的话题留待确认）</label><label class="lv-check"><input name="calibration_enabled" type="checkbox" ${c.calibration_enabled?"checked":""}>每周重新校准评分</label></div></details>
-    <p class="hint">默认开播后自动录制、分析并生成候选切片；自动投稿先等待评分预校准通过，并使用单独绑定的 B站账号。</p>
+    <p class="hint">完整切片按故事或话题保留，不按固定时长拆开。默认开播后自动录制、分析并生成候选切片；自动投稿先等待评分预校准通过，并使用单独绑定的 B站账号。</p>
     <div class="lv-form-footer"><p class="lv-error" id="lvFormError" role="alert"></p><button class="btn" type="submit">${s?"保存追踪":"开始追踪"}</button></div></form>`);
   if(samples)setTimeout(()=>{const el=$('#liveModal [name=reference_bvids]');el?.focus();el?.scrollIntoView({block:'center'});},50);
 }
-async function lvSaveSource(event,id) {event.preventDefault();const form=event.target,button=form.querySelector('[type="submit"]'),label=button.textContent;
+async function lvSubmit(form,url,body,pending,success) {
+  const button=form.querySelector('[type="submit"]'),error=form.querySelector("#lvFormError");
+  if(button.disabled)return;
+  const label=button.textContent,owner=storageOwner;
+  const controls=[...form.querySelectorAll("input,select,textarea")].map(el=>[el,el.disabled]);
+  form.saving=true;controls.forEach(([el])=>{el.disabled=true;});
+  button.disabled=true;button.textContent=pending;error.textContent="";
+  try {
+    const result=await lvApi(url,body);
+    if(owner!==storageOwner)return;
+    // A completed save must not close a different editor opened while it was in flight.
+    if(form.isConnected)lvClose();
+    await loadLive({force:true});
+    if(owner===storageOwner)toast(typeof success==="function"?success(result):success);
+  } catch(e) {
+    if(owner===storageOwner&&form.isConnected)error.textContent=e.message;
+  } finally {
+    form.saving=false;
+    if(form.isConnected){controls.forEach(([el,disabled])=>{el.disabled=disabled;});button.disabled=false;button.textContent=label;}
+  }
+}
+async function lvSaveSource(event,id) {event.preventDefault();const form=event.target;
   try{const values=new FormData(form),body={name:String(values.get("name")||"").trim(),url:String(values.get("url")||"").trim(),enabled:values.has("enabled"),settings:{}};
-    for(const key of ["score_min","min_seconds","max_seconds","topic_minutes","daily_limit","tid"])body.settings[key]=Number(values.get(key));
+    for(const key of ["score_min","min_seconds","max_seconds","daily_limit","tid"])body.settings[key]=Number(values.get(key));
     for(const key of ["auto_highlights","auto_topics","calibration_enabled"])body.settings[key]=values.has(key);
-    body.settings.preferences=String(values.get("preferences")||"");body.settings.search_keywords=String(values.get("search_keywords")||"");
+    body.settings.topic_unit=String(values.get("topic_unit")||"auto");body.settings.preferences=String(values.get("preferences")||"");body.settings.search_keywords=String(values.get("search_keywords")||"");
     for(const key of ["reference_bvids","reference_mids","source_aliases","title_name"])body.settings[key]=String(values.get(key)||"");
-    button.disabled=true;button.textContent=id?"正在保存…":"正在识别并添加…";form.querySelector("#lvFormError").textContent="";
-    const result=await lvApi("/api/live/sources"+(id?`/${id}`:""),body);lvClose();await loadLive();toast(result.already_tracked?"该 UP 已在追踪列表中":"追踪设置已保存");
-  }catch(e){if(form.isConnected){form.querySelector("#lvFormError").textContent=e.message;button.disabled=false;button.textContent=label;}}}
-async function lvPause(id){const s=lvSource(id);try{await lvApi(`/api/live/sources/${id}`,{enabled:!s.enabled});await loadLive();}catch(e){toast(e.message);}}
-async function lvSourceAction(id,action){try{await lvApi(`/api/live/sources/${id}/${action}`,{});toast(action==="calibrate"?"校准任务已排队":"已安排检查");await loadLive();}catch(e){toast(e.message);}}
+    await lvSubmit(form,"/api/live/sources"+(id?`/${id}`:""),body,id?"正在保存…":"正在识别并添加…",result=>result.already_tracked?"该 UP 已在追踪列表中":"追踪设置已保存");
+  }catch(e){if(form.isConnected)form.querySelector("#lvFormError").textContent=e.message;}}
+async function lvPause(id){const s=lvSource(id);try{await lvApi(`/api/live/sources/${id}`,{enabled:!s.enabled});await loadLive({force:true});}catch(e){toast(e.message);}}
+async function lvSourceAction(id,action){try{await lvApi(`/api/live/sources/${id}/${action}`,{});toast(action==="calibrate"?"校准任务已排队":"已安排检查");await loadLive({force:true});}catch(e){toast(e.message);}}
 function lvEditClip(id,sessionKey) {
-  const c=lvClip(id),session=liveData.sessions.find(s=>s.key===(c?.session_key||sessionKey))||liveData.sessions[0];
+  const c=lvClip(id),sessions=[...liveData.sessions];
+  let session=sessions.find(s=>s.key===(c?.session_key||sessionKey));
+  if(!session&&c){session={key:c.session_key,source_id:c.source_id,title:c.title,historical:true};sessions.push(session);}
+  if(!session&&!sessionKey)session=sessions[0];
   if(!session){toast("还没有直播素材");return;}
   const records=liveData.recordings.filter(r=>r.session_key===session.key),end=records.reduce((max,r)=>Math.max(max,r.offset+r.duration),0);
   lvSheet(c?"编辑切片":"手动新增切片",`<form class="lv-form" onsubmit="lvSaveClip(event,${id||0})">${c?.preview?`<video class="lv-video" src="${esc(c.preview)}" controls playsinline></video>`:""}
-    <label>录制分段<select name="session" ${id?"disabled":""}>${liveData.sessions.map(s=>`<option value="${s.key}"${s.key===session.key?" selected":""}>${esc(lvSource(s.source_id)?.name||"直播")} · ${esc(new Date(s.started*1000).toLocaleString())}</option>`).join("")}</select></label>
+    <label>录制分段<select name="session" ${id?"disabled":""}>${sessions.map(s=>`<option value="${esc(s.key)}"${s.key===session.key?" selected":""}>${esc(lvSource(s.source_id)?.name||"直播")} · ${s.historical?"原始场次（历史记录）":esc(new Date(s.started*1000).toLocaleString())}</option>`).join("")}</select></label>
     <div class="lv-two"><label>开始时间（本段录制时分秒）<input name="start" required value="${lvTime(c?.start||0)}"></label><label>结束时间<input name="end" required value="${lvTime(c?.end||Math.min(60,end))}"></label></div>
+    <details class="lv-copy"><summary>AI 文案助手 · 根据这段字幕起草</summary><p class="hint">生成三种以内的表达角度，查看字幕依据后选择填入。保存前仍可修改。</p><label>文案侧重（可选）<input name="copy_focus" maxlength="500" placeholder="例如：突出给新手的实用建议，语气平实"></label><button class="btn plain" type="button" onclick="lvSuggestCopy(this)">生成文案建议</button><div class="lv-copy-output" aria-live="polite"></div></details>
     <label>投稿标题<input name="title" maxlength="80" required value="${esc(c?.title||session.topic_title||session.title)}"></label>
     <label>封面文案<textarea name="cover_title" maxlength="48" rows="2" placeholder="用一句短问题或反差提炼看点，可换行；留空从标题排版">${esc(c?.cover_title||'')}</textarea></label>
     <label>简介<textarea name="description" rows="4">${esc(c?.description||"")}</textarea></label><label>标签（英文逗号分隔）<input name="tags" required value="${esc((c?.tags||["直播切片"]).join(","))}"></label><p class="hint">标题会保留主播称呼。确认投稿后才生成封面；现在可先留空封面文案。投稿简介会附上原主播名字和直播间链接。</p><div class="lv-form-footer"><p class="lv-error" id="lvFormError" role="alert"></p><button class="btn" type="submit">保存</button></div></form>`);
 }
 async function lvSaveClip(event,id){event.preventDefault();const f=event.target,body={session:f.elements.session.value,start:lvSeconds(f.elements.start.value),end:lvSeconds(f.elements.end.value),title:f.elements.title.value,cover_title:f.elements.cover_title.value,description:f.elements.description.value,tags:f.elements.tags.value.split(",").map(t=>t.trim()).filter(Boolean)};
-  try{await lvApi("/api/live/clips"+(id?`/${id}`:""),body);lvClose();await loadLive();toast("切片已保存");}catch(e){$("#lvFormError").textContent=e.message;}}
-function lvPreview(id){const c=lvClip(id);if(c?.preview)lvSheet(c.title,`<video class="lv-video" src="${esc(c.preview)}" controls autoplay playsinline></video><p style="white-space:pre-wrap">${esc(c.publication_description||c.description)}</p>`);}
+  if(!Number.isFinite(body.start)||!Number.isFinite(body.end)||body.start<0||body.end<=body.start){f.querySelector("#lvFormError").textContent="请填写有效时间，结束时间需晚于开始时间。";return;}
+  await lvSubmit(f,"/api/live/clips"+(id?`/${id}`:""),body,"正在保存…","切片已保存");}
+function lvCopyRequest(form){return {session:form.elements.session.value,start:lvSeconds(form.elements.start.value),end:lvSeconds(form.elements.end.value),focus:form.elements.copy_focus.value.trim()};}
+async function lvSuggestCopy(button){
+  const form=button.closest("form"),output=form.querySelector(".lv-copy-output");
+  if(button.disabled||form.saving)return;
+  const body=lvCopyRequest(form),owner=storageOwner,signature=JSON.stringify(body);
+  if(!Number.isFinite(body.start)||!Number.isFinite(body.end)||body.start<0||body.end-body.start<5||body.end-body.start>3600){output.textContent="请先选择5秒至1小时的有效切片范围。";return;}
+  button.disabled=true;button.textContent="正在阅读字幕…";output.textContent="正在根据实际字幕拟写，请稍候。";form.copySuggestions=null;
+  try {
+    const data=await lvApi("/api/live/assist",body);
+    if(!form.isConnected||owner!==storageOwner)return;
+    if(signature!==JSON.stringify(lvCopyRequest(form))){output.textContent="范围或侧重已改变，请重新生成对应的建议。";return;}
+    form.copySuggestions={owner,signature,options:data.options};
+    const evidence=new Map((data.excerpts||[]).map(line=>[line.id,line]));
+    output.innerHTML=(data.cached?'<p class="hint">已复用这段内容最近生成的建议。</p>':"")+
+      (data.limitation?`<p class="hint">${esc(data.limitation)}</p>`:"")+
+      (data.options||[]).map((option,i)=>`<article class="lv-copy-card"><h4>${esc(option.title)}</h4><p>${esc(option.description)}</p><p class="lv-meta">封面：${esc(option.cover_title)}<br>标签：${option.tags.map(esc).join(" · ")}<br>${esc(option.reason)}</p><details><summary>查看字幕依据</summary>${option.evidence.map(id=>evidence.get(id)).filter(Boolean).map(line=>`<p class="lv-meta">${lvTime(line.start)}–${lvTime(line.end)}：${esc(line.text)}</p>`).join("")}</details><button class="btn plain" type="button" onclick="lvApplyCopy(this,${i})">填入这套文案</button></article>`).join("");
+  }catch(e){if(form.isConnected&&owner===storageOwner)output.textContent=e.message;}
+  finally{if(form.isConnected){button.disabled=false;button.textContent="生成文案建议";}}
+}
+function lvApplyCopy(button,index){
+  const form=button.closest("form"),suggestions=form.copySuggestions,output=form.querySelector(".lv-copy-output");
+  if(form.saving||!suggestions||suggestions.owner!==storageOwner)return;
+  if(suggestions.signature!==JSON.stringify(lvCopyRequest(form))){output.textContent="范围或侧重已改变，请重新生成后再填入。";form.copySuggestions=null;return;}
+  const choice=suggestions.options[index];if(!choice)return;
+  const keys=["title","cover_title","description","tags"];
+  form.copyPrevious=Object.fromEntries(keys.map(key=>[key,form.elements[key].value]));
+  for(const key of keys)form.elements[key].value=key==="tags"?choice.tags.join(","):choice[key];
+  output.innerHTML='<p class="hint">文案已填入下方，检查后点击「保存」。</p><button class="link" type="button" onclick="lvUndoCopy(this)">撤回填入</button>';
+  form.elements.title.focus();
+}
+function lvUndoCopy(button){const form=button.closest("form");if(form.saving||!form.copyPrevious)return;for(const [key,value] of Object.entries(form.copyPrevious))form.elements[key].value=value;form.copyPrevious=null;form.querySelector(".lv-copy-output").textContent="已恢复填入前的文案。";}
+function lvPreview(id){
+  const c=lvClip(id);if(!c){toast("片段已更新，请返回列表查看。");return;}
+  const ids=lvVisibleClips().map(clip=>clip.id);if(!ids.includes(id))ids.unshift(id);
+  const index=ids.indexOf(id),previous=ids[index-1],next=ids[index+1];
+  lvSheet(c.title,`${c.preview?`<video class="lv-video" src="${esc(c.preview)}" controls autoplay playsinline></video>`:'<p class="hint">当前没有可播放的成片，可先查看原因并处理。</p>'}
+    <div class="lv-next"><strong>${esc(c.next_action||LV_STATES[c.state]||c.state)}</strong><p>${esc(c.review_reason||c.error||"")}</p></div>
+    <p class="lv-meta">${esc(c.source_name||lvSource(c.source_id)?.name||"直播")} · ${lvTime(c.start)}–${lvTime(c.end)}</p>
+    <p style="white-space:pre-wrap">${esc(c.publication_description||c.description||"")}</p>
+    <div class="lv-preview-actions">${lvCanEdit(c)?`<button class="btn plain" onclick="lvEditClip(${id})">编辑文案与范围</button>`:""}
+      ${c.can_upload===true?`<button class="btn" onclick="lvConfirmUpload(this,${id})">确认投稿 B站</button>`:""}
+      ${c.state==="uncertain"?`<a class="btn plain" href="https://member.bilibili.com/platform/upload-manager/article" target="_blank" rel="noopener">去创作中心核实 ↗</a><button class="link" onclick="lvReconcile(${id})">填写已投稿 BV 号</button><button class="link" onclick="lvRetryUpload(${id})">确认未成功后重试</button>`:""}
+      ${["retry","calibrate","bind_account","configure","score"].includes(c.action)?lvNextButton(c):""}</div>
+    <div class="lv-preview-footer"><button class="btn plain" onclick="lvPreview(${previous||0})" ${previous?"":"disabled"}>上一条</button><span class="lv-meta">当前列表 ${index+1} / ${ids.length}</span><button class="btn plain" onclick="lvPreview(${next||0})" ${next?"":"disabled"}>下一条</button></div>`);
+  $("#liveModal").dataset.previewId=String(id);
+}
+async function lvConfirmUpload(button,id){
+  if(button.disabled)return;
+  const modal=button.closest("#liveModal");button.disabled=true;button.textContent="正在加入投稿队列…";
+  const success=await lvClipAction(id,"upload");
+  if(modal?.isConnected){if(success)lvClose();else{button.disabled=false;button.textContent="确认投稿 B站";}}
+}
 function lvRecording(id){const r=liveData.recordings.find(x=>x.id===id);if(r)lvSheet(`直播原始分段 · ${lvTime(r.offset)}`,`<video class="lv-video" src="/api/live/recordings/${id}/media" controls autoplay playsinline></video>`);}
-async function lvClipAction(id,action,body={}){try{await lvApi(`/api/live/clips/${id}/${action}`,body);await loadLive();toast(action==="upload"?"已加入投稿队列":"已更新");}catch(e){toast(e.message);}}
+async function lvClipAction(id,action,body={}){const owner=storageOwner;try{await lvApi(`/api/live/clips/${id}/${action}`,body);if(owner!==storageOwner)return false;await loadLive({force:true});if(owner!==storageOwner)return false;toast(action==="upload"?"已加入投稿队列":"已更新");return true;}catch(e){if(owner===storageOwner)toast(e.message);return false;}}
 function lvRetryUpload(id){if(confirm("已在 B站创作中心确认这条切片没有投稿成功？确认后会重新上传。"))lvClipAction(id,"retry-upload",{confirmed_absent:true});}
 function lvReconcile(id){const bvid=prompt("填入已经投稿成功的视频 BV 号");if(bvid)lvClipAction(id,"confirm-upload",{bvid:bvid.trim()});}
 async function lvLogin(){const requested=++liveQrEpoch;clearTimeout(liveQrPoll);try{
@@ -188,12 +327,12 @@ async function lvLogin(){const requested=++liveQrEpoch;clearTimeout(liveQrPoll);
     const active=liveQrEpoch;
     async function poll(){if(active!==liveQrEpoch||!$("#lvQrStatus"))return;try{
       const d=await lvApi(`/api/live/login/qr/${data.login}`);if(active!==liveQrEpoch||!$("#lvQrStatus"))return;
-      if(d.status==="done"){lvClose();await loadLive();toast("投稿账号已绑定");return;}
+      if(d.status==="done"){lvClose();await loadLive({force:true});toast("投稿账号已绑定");return;}
       if(d.status==="expired"){$("#lvQrStatus").textContent="二维码已过期，请点击刷新二维码";return;}
       $("#lvQrStatus").textContent=d.status==="scanned"?"已扫码，请在 B站 App 上确认登录…":"等待扫码…";
     }catch(e){if(active!==liveQrEpoch||!$("#lvQrStatus"))return;$("#lvQrStatus").textContent=e.message;}
     liveQrPoll=setTimeout(poll,2500);}liveQrPoll=setTimeout(poll,2000);
   }catch(e){if(requested===liveQrEpoch)toast(e.message);}}
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&chip==="live")loadLive();});
+document.addEventListener("visibilitychange",()=>{if(document.hidden)clearTimeout(livePoll);else if(chip==="live")loadLive();});
 
-async function lvReferenceAction(id,action){try{await lvApi(`/api/live/references/${id}/${action}`,{});await loadLive();toast(action==='exclude'?'已排除此样本':action==='include'?'已恢复样本':'已加入重试队列');}catch(e){toast(e.message);}}
+async function lvReferenceAction(id,action){try{await lvApi(`/api/live/references/${id}/${action}`,{});await loadLive({force:true});toast(action==='exclude'?'已排除此样本':action==='include'?'已恢复样本':'已加入重试队列');}catch(e){toast(e.message);}}

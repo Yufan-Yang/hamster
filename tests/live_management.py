@@ -57,6 +57,20 @@ def run(check):
                 assert len(response.json['skipped']) == 5
                 assert not video.exists() and not cover.exists() and kept.exists()
                 assert core.q('SELECT state FROM live_clips WHERE id=?', (protected[0],), one=True)['state'] == 'submitted'
+                parent = add();child = add(state='submitted')
+                core.q('UPDATE live_clips SET merged_into=? WHERE id=?', (parent,child))
+                parent_file=assets/f'{parent}-v1.mp4';parent_file.write_bytes(b'draft')
+                child_file=assets/f'{child}-v1.mp4';child_file.write_bytes(b'publication')
+                core.q('UPDATE live_clips SET file=? WHERE id=?', (str(parent_file),parent))
+                response=client.post('/api/live/clips/batch',json={'action':'delete','ids':[parent]})
+                assert response.status_code==200 and response.json['changed']==[parent] and not response.json['skipped']
+                removed=core.q('SELECT * FROM live_clips WHERE id=?',(parent,),one=True)
+                assert removed['removed_at'] and removed['state']=='rejected' and removed['file']==''
+                assert not parent_file.exists() and child_file.exists()
+                assert core.q('SELECT merged_into FROM live_clips WHERE id=?',(child,),one=True)['merged_into']==parent
+                assert parent not in [c['id'] for c in client.get('/api/live?tab=topic').json['clips']]
+                assert client.get(f'/api/live/clips/{parent}/media').status_code==404
+                assert client.post(f'/api/live/clips/{parent}/render',json={}).status_code==404
             assert client.post('/api/live/clips/batch', json={'action':'delete','ids':[True]}).status_code == 400
         finally:
             core._write("DELETE FROM tasks WHERE target='manage-test'")

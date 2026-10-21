@@ -8,6 +8,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -67,7 +68,7 @@ class RoutingTests(unittest.TestCase):
             db.row_factory = sqlite3.Row
             db.executescript('''CREATE TABLE tasks (id INTEGER PRIMARY KEY, kind TEXT, state TEXT,
                 priority INTEGER, created REAL, not_before REAL, worker TEXT, lease_until REAL,
-                attempts INTEGER DEFAULT 0, updated REAL);
+                attempts INTEGER DEFAULT 0, updated REAL, payload TEXT DEFAULT '{}');
                 CREATE TABLE workers (name TEXT, caps TEXT, seen REAL);
                 INSERT INTO tasks (id, kind, state, priority, created) VALUES
                     (1, 'llm', 'queued', 90, 0), (2, 'shortcut', 'queued', 50, 0);''')
@@ -81,7 +82,7 @@ class RoutingTests(unittest.TestCase):
 
             scope = load_functions('shiguang/board.py', {'claim_task'}, q=query, _write=write,
                                    seen_worker=Mock(), task_dict=dict, TASK_KINDS={'llm': {}, 'shortcut': {}},
-                                   WORKER_FRESH=300, LEASE=300)
+                                   WORKER_FRESH=300, LEASE=300, secrets=secrets)
             claim = scope['claim_task']
             self.assertEqual(claim('old-mac', ['llm', 'claude', 'shortcut'])['id'], 2)
             self.assertIsNone(claim('old-mac', ['llm', 'claude', 'shortcut']))
