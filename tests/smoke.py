@@ -302,8 +302,8 @@ def board_roundtrip():
     assert got and got["id"] == tid, got
     assert post(f"/api/tasks/{tid}/heartbeat", {"worker": "test-worker", "progress": {"pct": 50}}, headers=tok)["ok"]
     assert post(f"/api/tasks/{tid}/done", {"worker": "test-worker", "result": {"vector": None, "lines": ["测试"]}}, headers=tok)["ok"]
-    nxt = G.q("SELECT kind, state FROM tasks WHERE parent=?", (tid,), one=True)
-    assert nxt and nxt["kind"] == "save_cover", nxt
+    nxt = G.q("SELECT kind, state FROM tasks WHERE parent=? AND kind='save_cover'", (tid,), one=True)
+    assert nxt and nxt["state"] == "queued", dict(nxt) if nxt else None
 
 
 check("board round trip (publish, claim, heartbeat, done -> save task)", board_roundtrip)
