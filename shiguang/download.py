@@ -792,7 +792,9 @@ def page_video_download(job_id, url, workdir, info=None, primary_error=None):
         reason = terminal_download_reason(error)
         details = "；".join(f"{step}：{failure_detail(e)}" for step, e in errors[-5:])
         retryable = (not reason and not (isinstance(error, DownloadFailure) and not error.retryable)
-                     and any(re.search(r"timed? out|timeout|connection|429|50[0234]", str(e), re.I) for _, e in errors))
+                     and any((isinstance(e, DownloadFailure) and e.retryable)
+                             or re.search(r"timed? out|timeout|connection|429|50[0234]", str(e), re.I)
+                             for _, e in errors))
         raise DownloadFailure((reason or "常规下载与备用流均未成功，请检查网络、链接有效期或提供官方下载链接。") +
                               "\n" + details, retryable=retryable) from None
     finally:

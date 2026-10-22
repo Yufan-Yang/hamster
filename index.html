@@ -2047,7 +2047,7 @@ let watchOpenEpoch = 0;
 async function openWatch(id, part = 0, t = 0) {
   const openEpoch = ++watchOpenEpoch, owner = storageOwner;
   let item = state.jobs.find(x => x.id === id);
-  if (item?.compact) {
+  if (!item || item.compact) {
     try {
       const response = await fetch(`/api/jobs?only=1&ids=${id}`);
       if (!response.ok) throw Error();
@@ -2055,7 +2055,8 @@ async function openWatch(id, part = 0, t = 0) {
       if (openEpoch !== watchOpenEpoch || owner !== storageOwner) return;
       item = result.jobs.find(x => x.id === id);
       if (!item) {toast('这个视频不见了');return;}
-      state.jobs = state.jobs.map(j => j.id === id ? item : j);
+      const index = state.jobs.findIndex(j => j.id === id);
+      if (index < 0) state.jobs.push(item); else state.jobs[index] = item;
     } catch(e) {toast('视频详情加载失败，请重试');return;}
   }
   const explicitTime = arguments.length >= 3;

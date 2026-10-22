@@ -270,7 +270,7 @@ async function lvSuggestCopy(button){
   const form=button.closest("form"),output=form.querySelector(".lv-copy-output");
   if(button.disabled||form.saving)return;
   const body=lvCopyRequest(form),owner=storageOwner,signature=JSON.stringify(body);
-  if(!Number.isFinite(body.start)||!Number.isFinite(body.end)||body.start<0||body.end-body.start<5||body.end-body.start>3600){output.textContent="请先选择5秒至1小时的有效切片范围。";return;}
+  if(!Number.isFinite(body.start)||!Number.isFinite(body.end)||body.start<0||body.end-body.start<5){output.textContent="请先选择至少5秒的有效切片范围。";return;}
   button.disabled=true;button.textContent="正在阅读字幕…";output.textContent="正在根据实际字幕拟写，请稍候。";form.copySuggestions=null;
   try {
     const data=await lvApi("/api/live/assist",body);

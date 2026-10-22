@@ -124,6 +124,25 @@ class LiveAssistant(unittest.TestCase):
         self.assertEqual(len(evidence), 60)
         self.assertEqual((evidence[0]["text"], evidence[-1]["text"]), ("第0句", "第299句"))
 
+    def test_complete_topic_over_two_hours_samples_its_conclusion(self):
+        for seq in range(1, 150):
+            core.q("INSERT INTO live_recordings(source_id,session_key,owner,seq,path,offset,duration,state,segments) "
+                   "VALUES (1,'one','user:writer',?,'/unused',?,60,'ready',?)",
+                   (seq, seq * 60, json.dumps([[0, 60, f'第{seq}分钟的讨论']])) )
+        body = {**self.body, 'end': 9000}
+        with patch.object(live_assistant.llm, 'llm_json', return_value=self.answer) as model:
+            response = self.post(body)
+            self.assertEqual(response.status_code, 200, response.json)
+            evidence = json.loads(model.call_args.args[1])['excerpts']
+            self.assertEqual(len(evidence), 60)
+            self.assertEqual(evidence[0]['text'], '开店前先计算租金。')
+            self.assertEqual(evidence[-1]['text'], '第149分钟的讨论')
+            self.assertTrue(any('第75分钟' in line['text'] for line in evidence))
+            self.assertIn('抽样', response.json['limitation'])
+            model.reset_mock()
+            self.assertEqual(self.post({**body, 'end': 10000}).status_code, 400)
+            model.assert_not_called()
+
     def test_transcript_changes_during_generation_reject_stale_suggestions(self):
         def generate(*args, **kwargs):
             core.q("UPDATE live_recordings SET segments=?", (json.dumps([[0, 10, "已更正的字幕"]]),))

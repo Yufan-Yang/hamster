@@ -316,7 +316,9 @@ def analyze(task, beat):
         latest = end
         if latest - cursor >= 120:
             break
-    if latest <= cursor + .5:
+    final_pass = (session['status'] != 'recording' and cursor - session['topic_start'] >= 30
+                  and not any(r['offset'] + r['duration'] > cursor + 1 for r in rows))
+    if latest <= cursor + .5 and not final_pass:
         return {"waiting": True}
     # A skipped segment also separates context windows: later highlights must not span that gap.
     gap_end = max((r["offset"] + r["duration"] for r in rows
@@ -351,12 +353,16 @@ def analyze(task, beat):
         if not session["topic_title"]:
             q("UPDATE live_sessions SET cursor=?, topic_start=? WHERE key=? AND cursor=?", (latest, latest, key, cursor))
             return {"silence": True, "until": latest}
-    finished = session['status'] != 'recording' and latest >= max((r['offset'] + r['duration'] for r in rows), default=0) - 1
+    # Recording can stop or append its final segment while the model is working.
+    finished = bool(q("SELECT 1 FROM live_sessions s WHERE s.key=? AND s.status!='recording' "
+                      "AND NOT EXISTS (SELECT 1 FROM live_recordings r WHERE r.session_key=s.key "
+                      "AND r.offset+r.duration>?)", (key, latest + 1), one=True))
     # Wait for some dialogue after a possible switch; reconsider recent unclosed boundaries next time.
     boundary_end = latest if finished else latest - 30
-    changes = sorted([x for x in (out.get('topic_changes') or [])[:10] if isinstance(x, dict)
-                      and max(session['topic_start'] + 30, cursor - 60, earliest) <= finite(x.get('at'), -1) <= boundary_end],
-                     key=lambda x: finite(x.get('at')))
+    candidates = sorted([x for x in (out.get('topic_changes') or [])[:10] if isinstance(x, dict)
+                         and max(session['topic_start'] + 30, cursor - 60, earliest) <= finite(x.get('at'), -1) <= latest],
+                        key=lambda x: finite(x.get('at')))
+    changes = [change for change in candidates if finite(change.get('at')) <= boundary_end]
     if changes:
         beat({'phase': 'checking-boundaries', 'until': latest})
         review = llm.llm_json(BOUNDARY_PROMPT, json.dumps({
@@ -375,6 +381,9 @@ def analyze(task, beat):
             count += 1
     topic_start, topic_title = session["topic_start"], session["topic_title"] or str(out.get("current_topic") or source["name"])[:80]
     topic_kind = session['topic_kind'] or 'content'
+    if not session['topic_title']:
+        initial_kind = candidates[0].get('previous_kind') if candidates else out.get('current_kind')
+        topic_kind = initial_kind or topic_kind
     for change in changes:
         at = finite(change.get("at"), -1)
         if not max(topic_start + 30, cursor - 60, earliest) <= at <= boundary_end:
@@ -386,7 +395,8 @@ def analyze(task, beat):
                     "reason": "按直播话题切换分段"})
         topic_start, topic_title = at, str(change.get("next_title") or out.get("current_topic") or "下一话题")[:80]
         topic_kind = change.get('next_kind') or 'content'
-    topic_kind = out.get('current_kind') or topic_kind
+    # Window-end classification belongs to the new topic only after its boundary is accepted.
+    # Otherwise a deferred advertising break would erase the content before it on finalization.
     # A long case stays together until an actual switch or the recording ends.
     if finished:
         if latest - topic_start >= 30:
@@ -798,8 +808,8 @@ def save_clip(cid=None):
         if not session:
             raise ValueError("请选择一场自己的直播记录")
         start, end = finite(body.get("start"), -1), finite(body.get("end"), -1)
-        if not 0 <= start < end or not 5 <= end - start <= 3600:
-            raise ValueError("切片时长应在 5 秒至 60 分钟之间")
+        if not 0 <= start < end or end - start < 5:
+            raise ValueError("切片时长应至少为 5 秒")
         title = str(body.get("title") or "").strip()
         if not title or len(title) > 80:
             raise ValueError("标题需为 1–80 字")

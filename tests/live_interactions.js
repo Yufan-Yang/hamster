@@ -220,6 +220,21 @@ function form() {
     console.log('PASS grounded copy preview, explicit apply/undo, no save and stale-input/account guards');
   }
   {
+    const h = harness(), editor = form(), output = {textContent: '', innerHTML: ''};
+    const button = {disabled: false, textContent: '生成文案建议', closest: () => editor};
+    editor.querySelector = () => output;
+    editor.elements = Object.fromEntries(Object.entries({
+      session: 'complete-story', start: '00:00:00', end: '02:30:00', copy_focus: '',
+    }).map(([key, value]) => [key, {value}]));
+    const generating = h.context.lvSuggestCopy(button);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].body.end, 9000);
+    h.calls[0].resolve({options: [], excerpts: [], limitation: '字幕信息不足'});
+    await generating;
+    assert.ok(output.innerHTML.includes('字幕信息不足'));
+    console.log('PASS complete topics over an hour can request copy suggestions');
+  }
+  {
     const h = harness();
     let html = '';
     h.context.lvSheet = (_title, body) => { html = body; };

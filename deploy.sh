@@ -60,7 +60,7 @@ rm -f /tmp/shiguang-release-page.js
 node --check static/live.js
 node --check static/devices.js
 for test in workspace live_interactions live_recordings series; do node "tests/$test.js"; done
-for test in backend_reliability intelligence live_assistant live_review live_result task_lifecycle television device_routes cast_protocol; do
+for test in backend_reliability intelligence live_assistant live_finalization live_review live_result task_lifecycle television device_routes cast_protocol; do
   sudo -u grabber "$APP/venv/bin/python" "tests/$test.py"
 done
 sudo -u grabber "$APP/venv/bin/python" tests/devices_browser.py

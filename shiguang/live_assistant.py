@@ -32,12 +32,17 @@ FIELDS = {
 def excerpts(owner, session, start, end):
     """Return bounded, evenly sampled real lines, with timestamps in the recording timeline."""
     lines = []
-    rows = core.q(
-        "SELECT offset,segments FROM live_recordings WHERE owner=? AND session_key=? "
-        "AND state='ready' AND offset < ? AND offset+duration > ? ORDER BY offset LIMIT 121",
+    recordings = core.q(
+        "SELECT id FROM live_recordings WHERE owner=? AND session_key=? "
+        "AND state='ready' AND offset < ? AND offset+duration > ? ORDER BY offset",
         (owner, session, end, start))
-    sampled = len(rows) > 120
-    for row in rows[:120]:
+    sampled = len(recordings) > 120
+    if sampled:
+        recordings = [recordings[round(i * (len(recordings) - 1) / 119)] for i in range(120)]
+    ids = [row['id'] for row in recordings]
+    rows = core.q("SELECT offset,segments FROM live_recordings WHERE id IN "
+                  f"({','.join('?' for _ in ids)}) ORDER BY offset", ids) if ids else []
+    for row in rows:
         try:
             segments = json.loads(row["segments"] or "[]")
         except (TypeError, ValueError):
@@ -117,8 +122,8 @@ def assist():
         if "start" not in body or "end" not in body:
             raise ValueError("请填写开始和结束时间")
         start, end = core.number(body["start"]), core.number(body["end"])
-        if not 5 <= end - start <= 3600:
-            raise ValueError("请选择5秒至1小时的切片范围")
+        if end - start < 5:
+            raise ValueError("请选择至少5秒的切片范围")
     except (ValueError, TypeError) as exc:
         return _reply(error=str(exc)), 400
     session = core.q("SELECT * FROM live_sessions WHERE key=? AND owner=?", (session_key, g.owner), one=True)
@@ -127,6 +132,10 @@ def assist():
     source = live.owned("live_sources", session["source_id"])
     if not source:
         return _reply(error="直播来源不存在"), 404
+    available = core.q("SELECT MIN(offset) start,MAX(offset+duration) end FROM live_recordings "
+                       "WHERE owner=? AND session_key=?", (g.owner, session_key), one=True)
+    if available['start'] is not None and (start < available['start'] or end > available['end'] + 1):
+        return _reply(error="切片范围超出这场直播的录制范围"), 400
     evidence, sampled = excerpts(g.owner, session_key, start, end)
     if not evidence:
         return _reply(options=[], excerpts=[], cached=False,

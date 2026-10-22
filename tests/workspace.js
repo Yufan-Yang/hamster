@@ -167,3 +167,61 @@ async function learningPlans() {
   console.log("PASS learning plan explicit generation, deduplication, source escaping, failures and account/modal/privacy isolation");
 }
 learningPlans().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function learningSourceNavigation() {
+  const requests = [], messages = [];
+  const ctx = pageContext({
+    state: {jobs: []}, watchOpenEpoch: 0, storageOwner: "user:one", watching: null, casting: null,
+    document: {body: {style: {}}}, ACTIVE: [],
+    esc: String, hl: String, category: () => null, phone: () => "", ago: () => "刚刚",
+    episodeOf: () => "", titleOf: j => j.title, hitList: () => "",
+    stopMedia() {}, updateWatchStatus() {}, loadSimilar() {}, loadPointTimes() {}, renderCastNotice() {},
+    hide(el) { el.hidden = true; }, toast(message) { messages.push(message); },
+    fetch(url) { return new Promise(resolve => requests.push({url, resolve})); },
+  });
+  const select = ctx.$;
+  ctx.$ = key => key === "#watchBody video, #watchBody audio" ? null : select(key);
+  vm.runInContext(html.slice(html.indexOf("async function openWatch("), html.indexOf("async function loadPointTimes(")), ctx);
+  vm.runInContext(html.match(/^function openLearningSource\(.*$/m)[0], ctx);
+  const job = id => ({id, title: `课程 ${id}`, url: "https://example.invalid/video", created: 1, status: "done", analysis: {}, media: []});
+  const response = jobs => ({ok: true, json: async () => ({jobs})});
+
+  ctx.$("#watch").hidden = true;
+  ctx.openLearningSource(7);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/jobs?only=1&ids=7");
+  // A background refresh may load the same source before its detail request returns.
+  ctx.state.jobs = [job(2), {...job(7), compact: true}];
+  requests[0].resolve(response([job(7)]));
+  await new Promise(setImmediate);
+  assert.equal(ctx.$("#learningSheet").hidden, true);
+  assert.equal(ctx.$("#watch").hidden, false);
+  assert.equal(ctx.watching.id, 7);
+  assert.equal(ctx.state.jobs.filter(j => j.id === 7).length, 1);
+  assert.equal(ctx.state.jobs.find(j => j.id === 7).compact, undefined);
+  assert.ok(ctx.$("#watchBody").innerHTML.includes("课程 7"));
+
+  const missing = ctx.openWatch(8);
+  requests[1].resolve(response([])); await missing;
+  assert.equal(ctx.watching.id, 7);
+  assert.equal(messages.pop(), "这个视频不见了");
+
+  const failed = ctx.openWatch(9);
+  requests[2].resolve({ok: false}); await failed;
+  assert.equal(messages.pop(), "视频详情加载失败，请重试");
+
+  const stale = ctx.openWatch(10);
+  ctx.storageOwner = "user:two"; ctx.state.jobs = []; ctx.watching = null;
+  requests[3].resolve(response([job(10)])); await stale;
+  assert.equal(ctx.state.jobs.length, 0);
+  assert.equal(ctx.watching, null);
+
+  const first = ctx.openWatch(11), second = ctx.openWatch(12);
+  requests[5].resolve(response([job(12)])); await second;
+  requests[4].resolve(response([job(11)])); await first;
+  assert.equal(ctx.watching.id, 12);
+  assert.deepEqual(Array.from(ctx.state.jobs, j => j.id), [12]);
+  assert.equal(messages.length, 0);
+  console.log("PASS unloaded learning sources open by ID, deduplicate refreshes and reject missing/failed/stale responses");
+}
+learningSourceNavigation().catch(error => { console.error(error); process.exitCode = 1; });

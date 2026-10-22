@@ -170,14 +170,10 @@ def schedule_analysis():
                           payload={"session": session["key"], "title": session["title"]})
     for session in q("SELECT * FROM live_sessions s WHERE status != 'recording' AND cursor-topic_start >= 30 "
                      "AND NOT EXISTS (SELECT 1 FROM live_recordings r WHERE r.session_key=s.key AND r.offset+r.duration > s.cursor+1)"):
-        source = q("SELECT * FROM live_sources WHERE id=?", (session["source_id"],), one=True)
-        if source:
-            live.create_clip(session["owner"], source, session["key"], "topic",
-                             {"start": session["topic_start"], "end": session["cursor"],
-                              "title": session["topic_title"] or session["title"],
-                              "content_kind": session['topic_kind'], "description": session['topic_summary'],
-                              "reason": "录制停止，保留最后一个话题"})
-            q("UPDATE live_sessions SET topic_start=cursor WHERE key=?", (session["key"],))
+        # Revisit the final transcript even when its cursor was already consumed while recording.
+        # The last 30 seconds may still contain an unreviewed topic or advertising boundary.
+        board.publish("live_analyze", f"live-session:{session['key']}", 95, force=True,
+                      payload={"session": session["key"], "title": session["title"]})
 
 
 def buffer_bytes():

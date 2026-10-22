@@ -137,6 +137,43 @@ class DownloadFallback(unittest.TestCase):
         self.assertFalse(caught.exception.retryable)
         self.assertFalse((self.work / ".fallback").exists())
 
+    def test_stream_deadlines_keep_the_job_eligible_for_auto_retry(self):
+        for extension, downloader, message in (
+            ("mp4", "ffmpeg_download", "独立流下载超过 45 分钟，已停止；请检查网络或改用网站的官方下载链接。"),
+            ("m3u8", "ytdlp_download", "备用视频流下载超过 45 分钟，已停止，请检查网络后重试。"),
+        ):
+            with self.subTest(downloader=downloader):
+                self.found["media_urls"] = ["https://media.test/main." + extension]
+                with patch.object(download, "sniff_page", return_value=self.found), \
+                     patch.object(download, "check_manifest"), \
+                     patch.object(download, downloader, side_effect=download.DownloadFailure(message, retryable=True)):
+                    with self.assertRaises(download.DownloadFailure) as caught:
+                        download.page_video_download(1, "https://page.test/v", self.work)
+                self.assertTrue(caught.exception.retryable)
+                self.assertFalse((self.work / ".fallback").exists())
+                with patch.object(pipeline, "process", side_effect=caught.exception), \
+                     patch.object(pipeline, "q", return_value={"attempts": 0}), \
+                     patch.object(pipeline, "finish_links"), patch.object(pipeline, "ring"), \
+                     patch.object(pipeline, "LLM_API_KEY", ""), patch.object(pipeline.traceback, "print_exc"), \
+                     patch.object(pipeline.time, "time", return_value=1000):
+                    pipeline.run_job(1)
+                self.assertEqual(pipeline.update.call_args.kwargs["retry_at"], 1060)
+
+    def test_terminal_failure_overrides_an_earlier_retryable_stream_error(self):
+        self.found["media_urls"] = ["https://media.test/one.mp4", "https://media.test/two.mp4"]
+        for terminal in (OSError(errno.ENOSPC, "full"), PermissionError(errno.EACCES, "denied"),
+                         RuntimeError("DRM protected"), RuntimeError("Login required"),
+                         download.DownloadFailure("需要人工处理")):
+            with self.subTest(error=str(terminal)), \
+                 patch.object(download, "sniff_page", return_value=self.found), \
+                 patch.object(download, "ffmpeg_download", side_effect=[
+                     download.DownloadFailure("备用视频流下载超过 45 分钟", retryable=True), terminal,
+                 ]) as ffmpeg:
+                with self.assertRaises(download.DownloadFailure) as caught:
+                    download.page_video_download(1, "https://page.test/v", self.work)
+                self.assertEqual(ffmpeg.call_count, 2)
+                self.assertFalse(caught.exception.retryable)
+
     def test_cookie_domain_path_expiry_and_secure_matching(self):
         cookies = [
             {"domain": ".media.test", "name": "domain", "path": "/", "value": "ok"},

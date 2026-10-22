@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import urllib.parse
+import weakref
 import xml.etree.ElementTree as ET
 
 import requests
@@ -23,6 +24,9 @@ _devices = {}  # opaque id -> descriptor; a short cache also prevents forged con
 _refresh_lock = threading.Lock()
 _last_refresh = -float("inf")
 _pending = {}  # renderer id -> requested media, seek and pause until the TV has opened it
+_start_errors = {}
+_control_locks = weakref.WeakValueDictionary()
+_control_locks_guard = threading.Lock()
 _known_locations = set()
 _http = requests.Session()
 _http.trust_env = False  # private TV traffic must never take the internet proxy
@@ -30,6 +34,23 @@ _http.trust_env = False  # private TV traffic must never take the internet proxy
 
 def _tag(node, name):
     return next((x.text or "" for x in node.iter() if x.tag.rsplit("}", 1)[-1] == name), "")
+
+
+def _control_lock(did):
+    # A strong reference in each caller keeps one lock alive while requests or
+    # the startup worker use it; idle renderers do not accumulate locks.
+    with _control_locks_guard:
+        lock = _control_locks.get(did)
+        if lock is None:
+            lock = threading.RLock()
+            _control_locks[did] = lock
+        return lock
+
+
+def _cancel_pending(did):
+    pending = _pending.pop(did, None)
+    if pending:
+        pending["cancel"].set()
 
 
 def _description(location):
@@ -175,16 +196,26 @@ def start(did, url, title, thumb="", mime="video/mp4", position=0):
                else "<upnp:class>object.item.videoItem</upnp:class>")
             + (f"<upnp:albumArtURI>{html.escape(thumb)}</upnp:albumArtURI>" if thumb else "")
             + f"<res protocolInfo=\"http-get:*:{mime}:*\">{html.escape(url)}</res></item></DIDL-Lite>")
-    _soap(did, "SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
-    _soap(did, "Play", Speed="1")
-    # This LeTV takes 15–20 seconds to open its first stream. Immediate Seek is
-    # acknowledged but discarded, so status polling completes it only on the
-    # matching, actually opened track. Replacing this entry cancels an old seek.
-    _pending[did] = {"url": url, "position": position, "paused": False, "until": time.monotonic() + 60}
-    return _device(did)["name"]
+    with _control_lock(did):
+        _cancel_pending(did)
+        _start_errors.pop(did, None)
+        _soap(did, "SetAVTransportURI", CurrentURI=url, CurrentURIMetaData=meta)
+        _soap(did, "Play", Speed="1")
+        # This LeTV takes 15–20 seconds to open its first stream. Complete the
+        # delayed controls on the server even after the phone closes or locks.
+        pending = {"url": url, "position": position, "paused": False,
+                   "until": time.monotonic() + 60, "cancel": threading.Event()}
+        _pending[did] = pending
+        threading.Thread(target=_wait_for_start, args=(did, pending), daemon=True).start()
+        return _device(did)["name"]
 
 
 def control(did, action, position=None, volume=None):
+    with _control_lock(did):
+        _control(did, action, position, volume)
+
+
+def _control(did, action, position=None, volume=None):
     pending = _pending.get(did)
     if pending and action in ("seek", "pause", "play"):
         if action == "seek":
@@ -200,7 +231,8 @@ def control(did, action, position=None, volume=None):
     elif action == "pause":
         _soap(did, "Pause")
     elif action == "stop":
-        _pending.pop(did, None)
+        _cancel_pending(did)
+        _start_errors.pop(did, None)
         _soap(did, "Stop")
     elif action == "seek":
         seconds = max(0, int(float(position or 0)))
@@ -222,35 +254,62 @@ def _clock(value):
         return 0
 
 
-def status(did):
-    """The renderer's own clock, used for the seek bar rather than the phone's stopped player."""
+def _transport_status(did):
     pos = ET.fromstring(_soap(did, "GetPositionInfo"))
     info = ET.fromstring(_soap(did, "GetTransportInfo"))
     out = {"position": _clock(_tag(pos, "RelTime")), "duration": _clock(_tag(pos, "TrackDuration")),
            "state": _tag(info, "CurrentTransportState"), "volume": None}
-    pending = _pending.get(did)
-    if pending:
-        track = _tag(pos, "TrackURI")
+    return out, _tag(pos, "TrackURI")
+
+
+def _advance_start(did, pending):
+    """One bounded startup check. Only this worker applies the deferred controls."""
+    with _control_lock(did):
+        if _pending.get(did) is not pending:
+            return False
+        if time.monotonic() >= pending["until"]:
+            _cancel_pending(did)
+            _start_errors[did] = "电视已收到视频，但尚未开始播放，请检查电视画面后重试"
+            return False
+        try:
+            out, track = _transport_status(did)
+        except (RuntimeError, ValueError, ET.ParseError):
+            return True  # Some TVs refuse status queries while opening a stream.
         if (out["duration"] > 0 and out["position"] >= 1 and out["state"] == "PLAYING"
                 and (not track or track == pending["url"])):
-            # Clear only this request; a newly selected episode owns its own seek.
-            if _pending.get(did) is pending:
-                _pending.pop(did, None)
+            # Hold the renderer lock through the controls: a replacement or Stop
+            # cannot slip between the matching-track check and an old Seek.
+            _cancel_pending(did)
+            try:
                 if pending["position"] >= 1:
-                    control(did, "seek", min(pending["position"], max(0, out["duration"] - 1)))
-                    pos = ET.fromstring(_soap(did, "GetPositionInfo"))
-                    out["position"] = _clock(_tag(pos, "RelTime"))
+                    _control(did, "seek", min(pending["position"], max(0, out["duration"] - 1)))
                 if pending["paused"]:
-                    control(did, "pause")
-                    out["state"] = "PAUSED_PLAYBACK"
-        elif time.monotonic() > pending["until"]:
-            _pending.pop(did, None)
-            raise RuntimeError("电视已收到视频，但尚未开始播放，请检查电视画面后重试")
-        else:
+                    _control(did, "pause")
+            except (RuntimeError, ValueError) as exc:
+                _start_errors[did] = str(exc)
+            return False
+        return True
+
+
+def _wait_for_start(did, pending):
+    while _advance_start(did, pending):
+        if pending["cancel"].wait(.5):
+            break
+
+
+def status(did):
+    """Read the renderer's clock; deferred controls do not depend on this request."""
+    with _control_lock(did):
+        error = _start_errors.pop(did, None)
+        if error:
+            raise RuntimeError(error)
+        out, _ = _transport_status(did)
+        pending = _pending.get(did)
+        if pending:
             out.update(state="TRANSITIONING", position=int(pending["position"]), duration=0)
-    try:
-        volume = ET.fromstring(_soap(did, "GetVolume", service=RENDERING_CONTROL, Channel="Master"))
-        out["volume"] = max(0, min(100, int(_tag(volume, "CurrentVolume"))))
-    except (RuntimeError, ValueError, ET.ParseError):
-        pass  # Volume is optional in DLNA; playback controls still work.
-    return out
+        try:
+            volume = ET.fromstring(_soap(did, "GetVolume", service=RENDERING_CONTROL, Channel="Master"))
+            out["volume"] = max(0, min(100, int(_tag(volume, "CurrentVolume"))))
+        except (RuntimeError, ValueError, ET.ParseError):
+            pass  # Volume is optional in DLNA; playback controls still work.
+        return out

@@ -251,6 +251,9 @@ try:
         def learning_plan():
             page.set_viewport_size({"width": 390, "height": 900})
             page.locator("#workspaceNav").get_by_role("button", name="片库", exact=True).click()
+            page.locator("#chips").get_by_role("button", name="Vlog", exact=True).click()
+            page.wait_for_function("state.jobs.length === 1 && state.jobs[0].analysis.folder === 'Vlogs'")
+            assert not page.evaluate("state.jobs.some(j => j.title.includes('Python'))")
             page.get_by_role("button", name="智能学习清单", exact=True).click()
             before = len(model_calls)
             page.get_by_role("button", name="从零学习 Python", exact=True).click()
@@ -276,8 +279,8 @@ try:
             page.screenshot(path=str(OUT / "learning-error-mobile.png"), full_page=True)
             page.keyboard.press("Escape")
             page.wait_for_selector("#learningSheet", state="hidden")
-            return {"model_calls": len(model_calls) - before, "source_opened": True, "input_preserved": True}
-        record("learning plan examples, generation, real source opening and recoverable failure", learning_plan)
+            return {"model_calls": len(model_calls) - before, "unloaded_source_opened": True, "input_preserved": True}
+        record("learning plan examples, generation, source outside current category and recoverable failure", learning_plan)
 
         def live_copy():
             page.locator("#workspaceNav").get_by_role("button", name="直播切片", exact=True).click()
