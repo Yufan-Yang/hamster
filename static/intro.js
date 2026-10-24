@@ -22,7 +22,7 @@ function renderIntro() {
   if (!box || !s || !currentIntro(s)) return;
   const hit = validIntro(s.marker, s.duration), label = s.skipped ? '已跳过片头' : hit ?
     (s.marker.automatic ? '已识别片头' : '发现疑似片头，可手动跳过') : ({pending:'正在识别片头…',busy:'等待识别片头…',
-      not_found:'暂未识别到片头',unavailable:'暂时无法识别片头',unknown:'尚未识别片头'})[s.status] || '尚未识别片头';
+      not_found:'暂未识别到片头',unavailable:'暂时无法识别片头',deferred:'识别仍在后台进行，稍后重新打开查看',unknown:'尚未识别片头'})[s.status] || '尚未识别片头';
   box.innerHTML = `<label><input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleIntroAuto(this.checked)"> 自动跳过片头</label>
     <span class="hint" role="status">${esc(label)}${hit ? ' · ' + dur(s.marker.start) + '–' + dur(s.marker.end) : ''}</span>
     ${hit ? `<button id="introSkip" class="link" onclick="skipIntro(false)">跳过片头</button><button class="link" onclick="replayIntro()">回看片头</button>`
@@ -66,8 +66,10 @@ async function requestIntro(start = false) {
     }
     else {
       renderIntro();
-      if ((s.enabled || s.requested) && ['pending','busy','unknown'].includes(data.status) && ++s.attempts < 40)
-        s.timer = setTimeout(() => requestIntro(data.status !== 'pending'), 3000);
+      if ((s.enabled || s.requested) && ['pending','busy','unknown'].includes(data.status)) {
+        if (++s.attempts < 40) s.timer = setTimeout(() => requestIntro(data.status !== 'pending'), 3000);
+        else { s.status = 'deferred'; renderIntro(); }
+      }
     }
   } catch (e) { if (currentIntro(s) && e.name !== 'AbortError') { s.status = 'unavailable'; renderIntro(); } }
   finally { if (introState === s) s.loading = false; }

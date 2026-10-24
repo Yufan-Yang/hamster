@@ -5,7 +5,7 @@ from pathlib import Path
 import random
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('intro_fixtures', Path(__file__).with_name('crawl_home_search.py'))
 fixtures = importlib.util.module_from_spec(spec)
@@ -14,6 +14,58 @@ from shiguang import core, download, intro, web  # noqa: E402
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_bilibili_native_pgc_nested_opening_and_ending_are_not_lost(self):
+        class Response:
+            content = b'{}'
+            def __init__(self, data): self.data = data
+            def raise_for_status(self): pass
+            def json(self): return self.data
+        class Session:
+            def __init__(self): self.headers = {}; self.calls = []; self.closed = False
+            def get(self, url, params, timeout):
+                self.calls.append((url, params))
+                payload = [
+                    {'code': 0, 'result': {'episodes': [{'id': 3854821, 'aid': 12, 'cid': 34}]}},
+                    {'code': 0, 'data': {'view_points': [{'from': 0, 'to': 20, 'content': 'Intro'}]}},
+                    {'code': 0, 'result': {'video_info': {'timelength': 1274858, 'clip_info_list': [
+                        {'start': 30, 'end': 156, 'clipType': 'CLIP_TYPE_OP'},
+                        {'start': 1186, 'end': 1274, 'clipType': 'CLIP_TYPE_ED'}]}}},
+                ][len(self.calls) - 1]
+                return Response(payload)
+            def close(self): self.closed = True
+        session = Session()
+        with patch.object(intro.requests, 'Session', return_value=session), patch.object(intro.core, 'COOKIES', Path('/nonexistent-fixture-cookies')):
+            marks = intro.bilibili_markers('https://www.bilibili.com/bangumi/play/ep3854821')
+        self.assertEqual([(mark['t'], mark['end'], mark['kind']) for mark in marks if mark.get('kind')], [(30, 156, 'intro'), (1186, 1274, 'outro')])
+        self.assertEqual(intro.chapter_intro({'markers': {'0': marks}}, 0, 1274.858)['end'], 156)
+        self.assertEqual(intro.chapter_intro({'markers': {'0': marks}}, 0, 1274.858)['start'], 30)
+        self.assertTrue(session.closed)
+        self.assertTrue(all(url.startswith('https://api.bilibili.com/') for url, _ in session.calls))
+        with patch.object(intro.requests, 'Session', return_value=Session()), patch.object(intro.core, 'COOKIES', Path('/nonexistent-fixture-cookies')):
+            self.assertEqual(intro.bilibili_markers('https://www.bilibili.com/bangumi/play/ep3854821', expected_duration=2000), [])
+
+    def test_successful_native_empty_result_avoids_redundant_extractor_requests(self):
+        with patch.object(intro, 'bilibili_markers', return_value=[]), patch.object(intro.subprocess, 'run') as run:
+            self.assertEqual(intro.source_markers('https://www.bilibili.com/video/BV1Qtp66REKC/?spm_id_from=tracking'), [])
+            run.assert_not_called()
+
+    def test_normal_bv_uses_the_selected_part_cid_and_original_chapter_ranges(self):
+        def response(data):
+            result = Mock(content=b'{}')
+            result.json.return_value = data
+            return result
+        session = Mock()
+        session.get.side_effect = [
+            response({'code': 0, 'data': {'aid': 12, 'cid': 11, 'pages': [{'page': 1, 'cid': 11}, {'page': 2, 'cid': 22}]}}),
+            response({'code': 0, 'data': {'view_points': [{'from': 5, 'to': 65, 'content': 'Intro'}]}}),
+            response({'code': 0, 'data': {'timelength': 1500000}}),
+        ]
+        with patch.object(intro.requests, 'Session', return_value=session), patch.object(intro.core, 'COOKIES', Path('/nonexistent-fixture-cookies')):
+            marks = intro.bilibili_markers('https://www.bilibili.com/video/BV1Qtp66REKC/?p=2&spm_id_from=tracking', expected_duration=1500)
+        self.assertEqual(marks, [{'t': 5, 'end': 65, 'title': 'Intro'}])
+        self.assertEqual(session.get.call_args_list[1].kwargs['params'], {'aid': 12, 'cid': 22})
+        session.close.assert_called_once()
+
     def test_original_site_markers_keep_intro_and_outro_end_times(self):
         marks = download.timeline({'chapters': [{'start_time': 0, 'end_time': 85, 'title': 'Intro'},
                                                {'start_time': 1300, 'end_time': 1390, 'title': 'Outro'},

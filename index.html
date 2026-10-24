@@ -725,11 +725,12 @@ a.link {display: inline-block; max-width: 100%;}
   }
 </style>
 <link rel="stylesheet" href="/static/live.css?v=20261020-assistant-v1">
-<link rel="stylesheet" href="/static/crawl.css?v=20261024-v1">
-<link rel="stylesheet" href="/static/trash.css?v=20261024-v1">
-<link rel="stylesheet" href="/static/saved_search.css?v=20261024-v1">
-<link rel="stylesheet" href="/static/sources.css?v=20261024-v1">
-<link rel="stylesheet" href="/static/ai_activity.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/crawl.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/trash.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/saved_search.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/sources.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/ai_activity.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/player_series.css?v=20261024-v2">
 </head>
 <body>
 <div class="topbar">
@@ -1153,6 +1154,7 @@ function setStorageOwner(owner) {
   lsSet(privateKey('noteDraft'), $('#noteText').value);
   storageOwner = owner; lsSet('shiguangOwner', owner);
   if (typeof stopIntro === 'function') stopIntro();
+  if (typeof stopPlayerSeries === 'function') stopPlayerSeries();
   if (typeof resetCrawl === 'function') resetCrawl();
   if (typeof resetTrash === 'function') resetTrash();
   if (typeof resetMainSearch === 'function') resetMainSearch();
@@ -2334,7 +2336,7 @@ async function openWatch(id, part = 0, t = 0) {
       </div>
       <div class="toggle expand">…展开</div>
     </div>` : "";
-  $("#watchBody").innerHTML = `${stage}
+  $("#watchBody").innerHTML = `<div id="watchLayout" class="watch-layout"><div class="watch-main">${stage}
     <div class="wtitle">${hl(episodeOf(j) || titleOf(j))}</div>
     ${episodeOf(j) ? `<div class="wsub">${hl(titleOf(j))}</div>` : ""}
     ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify("#" + t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
@@ -2360,7 +2362,7 @@ async function openWatch(id, part = 0, t = 0) {
     ${j.advice && j.status === "failed" ? `<div class="answer" style="margin-bottom:8px">${esc(j.advice)}</div>` : ""}
     ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
     ${hitList(j)}
-    ${desc}`;
+    ${desc}</div><aside id="playerSeries" class="player-series" aria-label="合集视频" hidden></aside></div>`;
   $("#watch").hidden = false;
   document.body.style.overflow = "hidden";
   updateWatchStatus();
@@ -2399,6 +2401,7 @@ async function openWatch(id, part = 0, t = 0) {
   }
   renderCastNotice();
   if (typeof setupIntro === 'function') setupIntro(j, part, m, {explicit: explicitTime});
+  if (typeof setupPlayerSeries === 'function') setupPlayerSeries(j);
 }
 // the summary's key points, each with the moment it's talked about: click to jump there
 async function loadPointTimes(id) {
@@ -2773,6 +2776,7 @@ function updateWatchStatus() {
 }
 function closeWatch() {
   ++watchOpenEpoch;
+  if (typeof stopPlayerSeries === 'function') stopPlayerSeries();
   stopMedia();
   watching = null; document.body.style.overflow = "";
   hide($("#watch"), () => { $("#watchBody").innerHTML = ""; });
@@ -2834,6 +2838,7 @@ function updatePrivacySelectionVisibility() {
 function resetPrivateViews() {
   ++privateViewEpoch; ++refreshEpoch; refreshController?.abort(); workspaceLoading = false;
   if (typeof stopIntro === 'function') stopIntro();
+  if (typeof stopPlayerSeries === 'function') stopPlayerSeries();
   // Clear synchronously: an offline refresh must never leave revealed cards,
   // categories or cached reports visible after the user locks privacy.
   state = {...state, jobs: [], cats: {}, subs: [], more: false, understood: '', search_interpretation: '', notice: '',
@@ -4758,12 +4763,13 @@ refreshCacheIndex();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 <script src="/static/live.js?v=20261020-assistant-v1"></script>
-<script src="/static/crawl.js?v=20261024-v1"></script>
-<script src="/static/trash.js?v=20261024-v1"></script>
-<script src="/static/main_search.js?v=20261024-v1"></script>
-<script src="/static/saved_search.js?v=20261024-v1"></script>
-<script src="/static/sources.js?v=20261024-v1"></script>
-<script src="/static/ai_activity.js?v=20261024-v1"></script>
-<script src="/static/intro.js?v=20261024-v1"></script>
+<script src="/static/crawl.js?v=20261024-v2"></script>
+<script src="/static/trash.js?v=20261024-v2"></script>
+<script src="/static/main_search.js?v=20261024-v2"></script>
+<script src="/static/saved_search.js?v=20261024-v2"></script>
+<script src="/static/sources.js?v=20261024-v2"></script>
+<script src="/static/ai_activity.js?v=20261024-v2"></script>
+<script src="/static/intro.js?v=20261024-v2"></script>
+<script src="/static/player_series.js?v=20261024-v2"></script>
 </body>
 </html>

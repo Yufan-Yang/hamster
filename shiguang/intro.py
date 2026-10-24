@@ -6,6 +6,7 @@ import array
 import ctypes
 import ctypes.util
 import hashlib
+import http.cookiejar
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,9 @@ import tempfile
 import threading
 import time
 import unicodedata
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+import requests
 
 from flask import g, jsonify, request
 
@@ -70,12 +73,13 @@ def chapter_intro(analysis, part, duration):
     marks = (analysis.get('markers') or {}).get(str(part), [])
     if not isinstance(marks, list):
         return None
-    for i, mark in enumerate(marks):
+    ordered = sorted((mark for mark in marks if isinstance(mark, dict)), key=lambda mark: mark.get('kind') != 'intro')
+    for i, mark in enumerate(ordered):
         if not isinstance(mark, dict) or not _LABEL.fullmatch(str(mark.get('title', '')).strip()):
             continue
         end = mark.get('end')
-        if end is None and i + 1 < len(marks) and isinstance(marks[i + 1], dict):
-            end = marks[i + 1].get('t')
+        if end is None and i + 1 < len(ordered):
+            end = ordered[i + 1].get('t')
         found = interval(mark.get('t'), end, duration)
         if found:
             return {**found, 'method': 'chapter', 'automatic': True}
@@ -186,10 +190,99 @@ def _duration(path):
     return float(json.loads(result.stdout).get('format', {}).get('duration') or 0)
 
 
-def source_markers(url):
+def bilibili_markers(url, expected_duration=None):
+    """Domestic PGC OP/ED lives under result.video_info, outside yt-dlp chapters.
+
+    None allows extractor fallback; [] means the original APIs returned no marks.
+    Only numeric video identifiers are sent to fixed Bilibili metadata endpoints.
+    """
+    parsed = urlsplit(url)
+    if parsed.hostname not in ('bilibili.com', 'www.bilibili.com', 'm.bilibili.com'):
+        return None
+    ep = re.match(r'/bangumi/play/ep(\d+)(?:/|$)', parsed.path)
+    bv = re.match(r'/video/(BV[0-9A-Za-z]+)(?:/|$)', parsed.path)
+    if not ep and not bv:
+        return None
+    session = requests.Session()
+    session.headers.update({'User-Agent': core.UA, 'Referer': 'https://www.bilibili.com/'})
+    try:
+        if core.COOKIES.is_file():
+            jar = http.cookiejar.MozillaCookieJar(str(core.COOKIES))
+            try:
+                jar.load(ignore_discard=True, ignore_expires=False)
+                session.cookies.update(jar)
+            except (OSError, http.cookiejar.LoadError):
+                pass
+        def get(path, params):
+            response = session.get('https://api.bilibili.com/' + path, params=params, timeout=(3, 6))
+            response.raise_for_status()
+            if len(response.content) > 8 << 20:
+                raise ValueError('metadata budget')
+            body = response.json()
+            if body.get('code') != 0:
+                raise ValueError('metadata unavailable')
+            return body.get('data') or body.get('result') or {}
+        params = {}
+        if ep:
+            data = get('pgc/view/web/season', {'ep_id': ep[1]})
+            episodes = list(data.get('episodes') or [])
+            for section in (data.get('section') or data.get('sections') or []):
+                if isinstance(section, dict):
+                    episodes.extend(section.get('episodes') or [])
+            episode = next((item for item in episodes if isinstance(item, dict) and str(item.get('id')) == ep[1]), None)
+            if episode is None:
+                return None
+            params.update(aid=episode['aid'], cid=episode['cid'], ep_id=ep[1])
+        else:
+            data = get('x/web-interface/view', {'bvid': bv[1]})
+            raw_part = parse_qs(parsed.query).get('p', ['1'])[0]
+            if not raw_part.isascii() or not raw_part.isdecimal() or not 1 <= int(raw_part) <= 10000:
+                return None
+            page = next((item for item in data.get('pages', []) if item.get('page') == int(raw_part)), None)
+            if page is None and int(raw_part) != 1:
+                return None
+            params.update(aid=data['aid'], cid=page['cid'] if page else data['cid'])
+        player = get('x/player/wbi/v2', {k: v for k, v in params.items() if k in ('aid', 'cid')})
+        marks = []
+        for point in player.get('view_points') or []:
+            try:
+                start, end = float(point['from']), float(point['to'])
+                if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+                    marks.append({'t': start, 'end': end, 'title': str(point.get('content') or '')[:40]})
+            except (ValueError, TypeError, KeyError):
+                continue
+        endpoint = 'pgc/player/web/v2/playurl' if ep else 'x/player/wbi/playurl'
+        play = get(endpoint, {**params, 'qn': 16, 'fnval': 4048, 'fnver': 0, 'fourk': 1})
+        info = play.get('video_info') or play
+        if expected_duration is not None:
+            remote_duration = float(info.get('timelength') or 0) / 1000
+            if not math.isfinite(remote_duration) or remote_duration <= 0 or abs(remote_duration - expected_duration) > 3:
+                return []
+        clips = info.get('clip_info_list') or []
+        for clip in clips:
+            title = {'CLIP_TYPE_OP': '片头', 'CLIP_TYPE_ED': '片尾'}.get(clip.get('clipType'))
+            if title is None:
+                continue
+            try:
+                start, end = float(clip['start']), float(clip['end'])
+                if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+                    marks.append({'t': start, 'end': end, 'title': title, 'kind': 'intro' if title == '片头' else 'outro'})
+            except (ValueError, TypeError, KeyError):
+                continue
+        return sorted(marks, key=lambda mark: mark['t'])
+    except (OSError, ValueError, TypeError, KeyError, requests.RequestException):
+        return None
+    finally:
+        session.close()
+
+
+def source_markers(url, expected_duration=None):
     """Bounded metadata-only refresh for existing Bilibili downloads."""
     if urlsplit(url).hostname not in ('bilibili.com', 'www.bilibili.com', 'm.bilibili.com', 'bilibili.tv', 'www.bilibili.tv'):
         return []
+    native = bilibili_markers(url, expected_duration=expected_duration)
+    if native is not None:
+        return native
     from .download import timeline
     args = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-cache-dir', '--dump-single-json',
             '--skip-download', '--no-playlist', '--no-warnings', '--quiet', '--socket-timeout', '8',
@@ -205,6 +298,10 @@ def source_markers(url):
         if result.returncode or len(result.stdout) > 8 << 20:
             return []
         info = json.loads(result.stdout)
+        if expected_duration is not None:
+            remote_duration = float(info.get('duration') or 0)
+            if not math.isfinite(remote_duration) or remote_duration <= 0 or abs(remote_duration - expected_duration) > 3:
+                return []
         return timeline(info, url).get('markers', [])
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
@@ -214,7 +311,7 @@ def _cache_key(owner, jid, part, signature, analysis):
     owner_key = hashlib.sha256(owner.encode()).hexdigest()[:20]
     metadata = hashlib.sha256(json.dumps([group_of({'analysis': analysis}), analysis.get('markers')],
                                         sort_keys=True).encode()).hexdigest()[:16]
-    return f'intro:v1:{owner_key}:{jid}:{part}:{signature}:{metadata}'
+    return f'intro:v2:{owner_key}:{jid}:{part}:{signature}:{metadata}'
 
 
 def _job(jid, owner):
@@ -228,8 +325,10 @@ def _analyze(key, owner, job, part, path, signature, peers):
         job = {**job, 'analysis': dict(job['analysis'])}
         duration = _duration(path)
         found = chapter_intro(job['analysis'], part, duration)
-        if not found:
-            marks = source_markers(job['url'])
+        original_marks = (job['analysis'].get('markers') or {}).get(str(part), [])
+        native_bangumi = urlsplit(job['url']).hostname in ('bilibili.com', 'www.bilibili.com', 'm.bilibili.com') and '/bangumi/play/ep' in job['url']
+        if not found or native_bangumi and not any(isinstance(mark, dict) and mark.get('kind') == 'intro' for mark in original_marks):
+            marks = source_markers(job['url'], expected_duration=duration)
             if marks:
                 analysis = {**job['analysis'], 'markers': {**(job['analysis'].get('markers') or {}), str(part): marks}}
                 q("UPDATE jobs SET analysis=?,updated=? WHERE id=? AND owner=? AND status='done' AND analysis=? AND files=?",
