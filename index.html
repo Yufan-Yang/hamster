@@ -725,11 +725,11 @@ a.link {display: inline-block; max-width: 100%;}
   }
 </style>
 <link rel="stylesheet" href="/static/live.css?v=20261020-assistant-v1">
-<link rel="stylesheet" href="/static/crawl.css?v=20261023-v9">
-<link rel="stylesheet" href="/static/trash.css?v=20261023-v9">
-<link rel="stylesheet" href="/static/saved_search.css?v=20261023-v9">
-<link rel="stylesheet" href="/static/sources.css?v=20261023-v9">
-<link rel="stylesheet" href="/static/ai_activity.css?v=20261023-v9">
+<link rel="stylesheet" href="/static/crawl.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/trash.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/saved_search.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/sources.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/ai_activity.css?v=20261024-v1">
 </head>
 <body>
 <div class="topbar">
@@ -1152,6 +1152,7 @@ function setStorageOwner(owner) {
   if (!owner || owner === storageOwner) return;
   lsSet(privateKey('noteDraft'), $('#noteText').value);
   storageOwner = owner; lsSet('shiguangOwner', owner);
+  if (typeof stopIntro === 'function') stopIntro();
   if (typeof resetCrawl === 'function') resetCrawl();
   if (typeof resetTrash === 'function') resetTrash();
   if (typeof resetMainSearch === 'function') resetMainSearch();
@@ -2339,6 +2340,7 @@ async function openWatch(id, part = 0, t = 0) {
     ${(a.tags || []).length ? `<div class="tags">${a.tags.map(t => `<span onclick="searchFor(${esc(JSON.stringify("#" + t))})">#${hl(t)}</span>`).join("")}</div>` : ""}
     <div class="wmeta">${meta.map(x => `<span>${x}</span>`).join("")}</div>
     ${parts}
+    <div id="introPanel" class="actions" hidden></div>
     <div class="actions">
       ${m && airplayAvailable() ? `<button onclick="showAirPlay()">AirPlay</button>` : ""}
       ${m ? `<button onclick="findCast(${id},${part})">${casting ? '更换投屏设备' : '投屏到电视'}</button>` : ""}
@@ -2396,12 +2398,16 @@ async function openWatch(id, part = 0, t = 0) {
     } else startCast(id, part, casting.device, t);
   }
   renderCastNotice();
+  if (typeof setupIntro === 'function') setupIntro(j, part, m, {explicit: explicitTime});
 }
 // the summary's key points, each with the moment it's talked about: click to jump there
 async function loadPointTimes(id) {
+  if (!watching || watching.id !== id) return;
+  const owner = storageOwner, part = watching.part, privacyEpoch = typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch;
   let r;
   try { r = await (await fetch(`/api/points/${id}`)).json(); } catch (e) { return; }
-  if (!watching || watching.id !== id) return;
+  if (!watching || watching.id !== id || watching.part !== part || owner !== storageOwner
+      || privacyEpoch !== (typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch)) return;
   const ch = (r.chapters || {})[String(watching.part)] || [];
   // what the video's site shows along its progress bar: its own marks (Pornhub's action tags, YouTube's chapters)
   // and how much each moment is watched there
@@ -2522,6 +2528,7 @@ function seekTo(id, part, t) {
 /* ---------- player ----------
    Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
 function stopMedia() {
+  if (typeof stopIntro === 'function') stopIntro();
   saveWatch();
   document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
 }
@@ -2686,6 +2693,7 @@ async function castStatus(device) {
     if (!c.seeking) c.position = r.position || 0;
     c.duration = r.duration || 0; c.state = r.state;
     renderCastNotice();
+    if (typeof tickIntro === 'function') tickIntro();
     if (!c.savedAt || Date.now() - c.savedAt > 10000) saveCastWatch(c);
     const volume = $("#castVolume");
     if (volume && r.volume !== null && r.volume !== undefined && !(casting && casting.adjustingVolume))
@@ -2825,6 +2833,7 @@ function updatePrivacySelectionVisibility() {
 }
 function resetPrivateViews() {
   ++privateViewEpoch; ++refreshEpoch; refreshController?.abort(); workspaceLoading = false;
+  if (typeof stopIntro === 'function') stopIntro();
   // Clear synchronously: an offline refresh must never leave revealed cards,
   // categories or cached reports visible after the user locks privacy.
   state = {...state, jobs: [], cats: {}, subs: [], more: false, understood: '', search_interpretation: '', notice: '',
@@ -4749,11 +4758,12 @@ refreshCacheIndex();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 <script src="/static/live.js?v=20261020-assistant-v1"></script>
-<script src="/static/crawl.js?v=20261023-v9"></script>
-<script src="/static/trash.js?v=20261023-v9"></script>
-<script src="/static/main_search.js?v=20261023-v9"></script>
-<script src="/static/saved_search.js?v=20261023-v9"></script>
-<script src="/static/sources.js?v=20261023-v9"></script>
-<script src="/static/ai_activity.js?v=20261023-v9"></script>
+<script src="/static/crawl.js?v=20261024-v1"></script>
+<script src="/static/trash.js?v=20261024-v1"></script>
+<script src="/static/main_search.js?v=20261024-v1"></script>
+<script src="/static/saved_search.js?v=20261024-v1"></script>
+<script src="/static/sources.js?v=20261024-v1"></script>
+<script src="/static/ai_activity.js?v=20261024-v1"></script>
+<script src="/static/intro.js?v=20261024-v1"></script>
 </body>
 </html>

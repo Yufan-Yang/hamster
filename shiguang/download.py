@@ -227,8 +227,22 @@ def timeline(info, url):
     watched there. {"markers": [{"t", "title"}], "heat": {"step": seconds, "values": [0-100...]}}; parts missing
     when the site has none."""
     out = {}
-    chapters = [{"t": round(float(c.get("start_time") or 0), 1), "title": str(c.get("title") or "")[:40]}
-                for c in info.get("chapters") or [] if c.get("title")]
+    chapters = []
+    for chapter in info.get('chapters') or []:
+        if not isinstance(chapter, dict) or not chapter.get('title'):
+            continue
+        try:
+            start = float(chapter.get('start_time') or 0)
+            end = float(chapter['end_time']) if chapter.get('end_time') is not None else None
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if not math.isfinite(start) or start < 0:
+            continue
+        mark = {'t': round(start, 1), 'title': str(chapter['title'])[:40]}
+        if end is not None and math.isfinite(end) and end > start:
+            mark['end'] = round(end, 1)
+        chapters.append(mark)
+    chapters.sort(key=lambda mark: mark['t'])
     if chapters:
         out["markers"] = chapters
     heat = info.get("heatmap") or []
