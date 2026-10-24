@@ -643,6 +643,9 @@ def _wait_retry(cid, due):
 
 
 def run_crawl(cid):
+    from .directory_retired import enabled
+    if not enabled():
+        return
     # Claim once under the same DB lock as stop/edit/delete. A second scheduler
     # cannot start the same task while the first request is still in flight.
     with transaction() as db:
@@ -782,6 +785,9 @@ def refresh_crawl(cid, owner=None):
 
 
 def worker_loop(stop_event=None):
+    from .directory_retired import enabled
+    if not enabled():
+        return
     locks = core.STATE / 'locks'
     locks.mkdir(parents=True, exist_ok=True)
     with open(locks / 'crawl-worker.lock', 'a') as handle:
@@ -956,7 +962,7 @@ def api_crawl_home_search():
     response = jsonify(**result, total=total, offset=offset, limit=limit, storage_owner=g.owner)
     if (web.revealed() != reveal or request.headers.get('X-Privacy-Token') and not web.privacy_token()):
         return jsonify(error='隐私权限已变化，请重新搜索'), 403
-    for key in ('hidden_ids', 'source_hidden_ids', 'tag_aliases'):
+    for key in ('hidden_ids', 'privacy_job_ids', 'source_hidden_ids', 'tag_aliases'):
         g.pop(key, None)
     if (visible_source_ids(g.owner, reveal=reveal) != visible or (visible and _hidden_collected_job_ids(g.owner) != hidden) or
             library_search.access_stamp(g.owner) != access or web.revealed() != reveal or
@@ -1050,7 +1056,7 @@ def api_crawl(cid):
     except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
     response = jsonify(crawl=crawl_view(row), **result)
-    for key in ('hidden_ids', 'source_hidden_ids', 'tag_aliases'):
+    for key in ('hidden_ids', 'privacy_job_ids', 'source_hidden_ids', 'tag_aliases'):
         g.pop(key, None)
     fresh = _visible(cid)
     if (not fresh or fresh['url_key'] != row['url_key'] or source_visible(fresh, web.revealed()) != bool(visible)

@@ -50,19 +50,26 @@ class TrashPrivacyTests(unittest.TestCase):
             self.assertEqual(response.get_json(), {'error': '回收站记录不存在'})
         self.assertIsNotNone(core.q('SELECT 1 FROM job_trash WHERE id=?', (tid,), one=True))
 
+    def assert_denied(self, tid, headers):
+        for method, url in [('get', '/api/trash'), ('post', f'/api/trash/{tid}/restore'), ('post', f'/api/trash/{tid}/delete')]:
+            response = getattr(self.client, method)(url, headers=headers)
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertIsNotNone(core.q('SELECT 1 FROM job_trash WHERE id=?', (tid,), one=True))
+
     def test_manual_hidden_stays_private_with_missing_unrevealed_and_expired_tokens(self):
         _, tid = self.archive('Private selection', manual=True)
         self.assert_hidden(tid)
-        self.assert_hidden(tid, {'X-Privacy-Token': 'invalid'})
+        self.assert_denied(tid, {'X-Privacy-Token': 'invalid'})
         self.assert_hidden(tid, self.headers)
         self.tokens[self.token]['reveal'] = True
         self.tokens[self.token]['expires'] = 0
-        self.assert_hidden(tid, self.headers)
+        self.assert_denied(tid, self.headers)
 
     def test_revealed_token_from_another_account_does_not_expose_archives(self):
         _, tid = self.archive('Owner private selection', manual=True)
         self.tokens[self.token].update(owner='another-owner', reveal=True)
-        self.assert_hidden(tid, self.headers)
+        self.assert_denied(tid, self.headers)
 
     def test_tag_hidden_snapshot_honors_current_tags_aliases_and_case(self):
         _, tid = self.archive('Private tag', tags=['Alias'])
@@ -98,8 +105,10 @@ class TrashPrivacyTests(unittest.TestCase):
         _, foreign_tid = self.archive('Foreign archive', owner='another-owner')
         self.tokens[self.token]['reveal'] = True
         data = self.listing(self.headers)
-        self.assertEqual([row['job_id'] for row in data['items']], [own])
-        self.assertEqual(data['total'], 1)
+        self.assertEqual(data['items'], [])
+        self.assertEqual(data['total'], 0)
+        self.assertEqual([row['job_id'] for row in self.listing()['items']], [own])
+        self.assertEqual(self.client.post(f'/api/trash/{own_tid}/restore', headers=self.headers).status_code, 404)
         for action in ('restore', 'delete'):
             self.assertEqual(self.client.post(f'/api/trash/{foreign_tid}/{action}', headers=self.headers).status_code, 404)
         self.assertEqual(self.client.post(f'/api/trash/{own_tid}/restore').status_code, 200)
@@ -122,7 +131,7 @@ class TrashPrivacyTests(unittest.TestCase):
         self.tokens[self.token]['reveal'] = True
         revealed = self.listing(self.headers)
         self.assertEqual(len(revealed['items']), 1000)
-        self.assertEqual(revealed['total'], 1006)
+        self.assertEqual(revealed['total'], 1005)
         self.assertTrue(revealed['has_more'])
 
     def test_background_expiry_still_cleans_hidden_entries_without_a_token(self):

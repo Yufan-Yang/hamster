@@ -63,7 +63,7 @@ class ReportPrivacyTests(unittest.TestCase):
         self.cache(private, public)
         web.privacy_set(self.owner, ['hidden'], [])
         self.tokens[self.token]['reveal'] = True
-        self.assertEqual(len(self.digest(self.headers)['uploaders']), 2)
+        self.assertEqual([u['sub'] for u in self.digest(self.headers)['uploaders']], [1])
         self.tokens[self.token]['expires'] = 0
         self.assertNotIn('PRIVATE', json.dumps(self.digest(self.headers)))
         self.archive(private)

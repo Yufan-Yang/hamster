@@ -22,7 +22,7 @@ class HomeSearchTests(unittest.TestCase):
             mock = patch.object(target, name, value)
             mock.start()
             self.addCleanup(mock.stop)
-        mock = patch.dict(core.app.config, TESTING=True, SECRET_KEY='home-search-test')
+        mock = patch.dict(core.app.config, TESTING=True, SECRET_KEY='home-search-test', DIRECTORY_COLLECTION_ENABLED=True)
         mock.start()
         self.addCleanup(mock.stop)
         mock = patch.dict(crawl_search._cache, clear=True)
@@ -305,8 +305,8 @@ class HomeSearchTests(unittest.TestCase):
         self.assertEqual(seen, [('user:alice', {plain, visible}), ('user:bob', set())])
         web.privacy_tokens['library-root-reveal'] = {'owner': 'user:alice', 'expires': time.time() + 60, 'reveal': True}
         unlocked = self.alice.get('/api/jobs?mode=exact&q=lesson', headers={'X-Privacy-Token': 'library-root-reveal'})
-        self.assertEqual({row['id'] for row in unlocked.get_json()['jobs']}, {plain, visible, restricted, unknown})
-        self.assertEqual(unlocked.get_json()['cats'], {'Talks': 4})
+        self.assertEqual({row['id'] for row in unlocked.get_json()['jobs']}, {restricted, unknown})
+        self.assertEqual(unlocked.get_json()['cats'], {'Talks': 2})
 
 
 if __name__ == '__main__':

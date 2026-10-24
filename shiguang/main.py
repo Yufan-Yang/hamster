@@ -3,7 +3,7 @@ import threading
 import time
 import os
 
-from . import migrations, board, channels, crawl, heal, library, live_calibration, live_editorial, live_recorder, pipeline, search, telegram, trash, usage, web
+from . import migrations, board, channels, heal, library, live_calibration, live_editorial, live_recorder, pipeline, search, telegram, trash, usage, web
 from .core import (DOWNLOAD_WORKERS, EXTERNAL_PORT, INCOMPLETE, NOTE_MAX_UPLOAD, PORT, TG_TOKEN, app, finishing_threads, init_db, listen_bell)
 
 
@@ -37,7 +37,8 @@ def main_worker():
         threading.Thread(target=pipeline.worker_loop, daemon=True).start()
     threading.Thread(target=pipeline.sweep_loop, daemon=True).start()
     threading.Thread(target=channels.sub_loop, daemon=True).start()
-    threading.Thread(target=crawl.worker_loop, daemon=True).start()
+    from . import native_series
+    threading.Thread(target=native_series.loop, daemon=True).start()
     threading.Thread(target=trash.cleanup_loop, daemon=True).start()
     threading.Thread(target=board.now_loop, daemon=True).start()
     migrations.run_once_jobs()  # data jobs after an upgrade (each once)

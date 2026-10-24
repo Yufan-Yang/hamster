@@ -279,6 +279,8 @@ def sign_in(name):
     from . import crawl
     from . import sources
     sources.move_owner(g.device, f"user:{name}")
+    from . import native_series
+    native_series.move_owner(g.device, f"user:{name}")
     crawl.move_owner(g.device, f"user:{name}")
     from . import trash
     trash.move_owner(g.device, f"user:{name}")
@@ -287,6 +289,10 @@ def sign_in(name):
     from . import ai_activity
     ai_activity.move_owner(g.device, f"user:{name}")
     # followed uploaders too; one the account already follows stays once
+    for row in q('SELECT old.id old_id,new.id new_id FROM subs old JOIN subs new ON old.key=new.key '
+                 'WHERE old.owner=? AND new.owner=?', (g.device, f'user:{name}')):
+        q('UPDATE jobs SET source=? WHERE owner=? AND source=?',
+          (f"sub:{row['new_id']}", f'user:{name}', f"sub:{row['old_id']}"))
     q("DELETE FROM subs WHERE owner=? AND key IN (SELECT key FROM subs WHERE owner=?)", (g.device, f"user:{name}"))
     q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
     q("UPDATE notes SET owner=? WHERE owner=?", (f"user:{name}", g.device))
@@ -359,40 +365,62 @@ def is_hidden(d, prefs):
             or (d.get('id') is not None and d['id'] in source_hidden_ids()))
 
 
-def hidden_ids():
-    """Videos this page must not mention right now (privacy mode, not revealed): none of them, nor their counts.
-    Worked out once per request (the video list, the category counts and the 追更 list all ask)."""
-    if "hidden_ids" in g:
-        return g.hidden_ids
+def privacy_job_ids():
+    """Actual private videos in this request's scope, independent of the selected mode.
+
+    Manual selections, tag aliases and inherited source classifications all count.
+    Callers rechecking live permissions must evict this cache as well as hidden_ids.
+    """
+    if 'privacy_job_ids' in g:
+        return g.privacy_job_ids
     prefs = privacy_get(g.owner)
-    if revealed():
-        g.hidden_ids = set()
-        return g.hidden_ids
     inherited = source_hidden_ids()
     if not (prefs["tags"] or prefs["ids"]):
-        g.hidden_ids = inherited
-        return g.hidden_ids
+        g.privacy_job_ids = inherited
+        return g.privacy_job_ids
     scope, scope_args = scope_sql()
     manual = set(prefs["ids"])
-    g.hidden_ids = inherited | {r["id"] for r in q(f"SELECT id, owner, json_extract(analysis, '$.tags') tags FROM jobs WHERE {scope}", scope_args)
+    g.privacy_job_ids = inherited | {r["id"] for r in q(f"SELECT id, owner, json_extract(analysis, '$.tags') tags FROM jobs WHERE {scope}", scope_args)
                     if (r["owner"] == g.owner and r["id"] in manual)
                     or (r["tags"] and hides_tags(json.loads(r["tags"]), prefs))}
+    return g.privacy_job_ids
+
+
+def hidden_ids():
+    """IDs excluded by the current mode: public view hides private videos;
+    unlocked privacy view contains only this account's private videos.
+    """
+    if 'hidden_ids' in g:
+        return g.hidden_ids
+    private = privacy_job_ids()
+    if revealed():
+        scope, args = scope_sql()
+        g.hidden_ids = {row['id'] for row in q(f'SELECT id,owner FROM jobs WHERE {scope}', args)
+                        if row['owner'] != g.owner or row['id'] not in private}
+    else:
+        g.hidden_ids = private
     return g.hidden_ids
 
 
 def hidden_subs(skip=None):
-    """Followed uploaders this page must not name right now (privacy mode, not revealed): adult sites', and any with
-    a hidden video."""
-    prefs = privacy_get(g.owner)
-    if not (prefs["tags"] or prefs["ids"]) or revealed():
-        return set()
-    skip = hidden_ids() if skip is None else skip
-    out = {r["id"] for r in q("SELECT id, platform FROM subs")
-           if prefs["tags"] and r["platform"] in channels.ADULT_PLATFORMS}
+    """Followed sources excluded by the same public/private split as videos."""
+    from .crawl_source import known_adult
+    subscriptions = q('SELECT id,owner,platform,url FROM subs WHERE owner=? OR ?', (g.owner, int(g.admin)))
+    private = privacy_job_ids()
+    private_subs = {row['id'] for row in subscriptions
+                    if row['platform'] in channels.ADULT_PLATFORMS or known_adult(row['url'])}
+    if private:
+        private_subs |= {int(row['source'][4:]) for row in q(
+            "SELECT DISTINCT source FROM jobs WHERE source LIKE 'sub:%' AND id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(private)),)) if row['source'][4:].isdigit()}
+    if revealed():
+        return {row['id'] for row in subscriptions if row['owner'] != g.owner or row['id'] not in private_subs}
+    # Reports can additionally suppress sources whose archived private content was removed.
     if skip:
-        out |= {int(r["source"][4:]) for r in q(f"SELECT DISTINCT source FROM jobs WHERE source LIKE 'sub:%' AND id IN "
-                                                 f"({','.join('?' * len(skip))})", tuple(skip))}
-    return out
+        private_subs |= {int(row['source'][4:]) for row in q(
+            "SELECT DISTINCT source FROM jobs WHERE source LIKE 'sub:%' AND id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(skip)),)) if row['source'][4:].isdigit()}
+    return private_subs
 
 
 def sub_names():
@@ -885,10 +913,10 @@ def jobs():
         return jsonify(error='搜索词最多 256 字符'), 400
     if search_mode == 'wildcard' and len(term) > 256:
         return jsonify(error='搜索词最多 256 字符'), 400
-    if search_mode and request.headers.get('X-Privacy-Token') and not privacy_token():
+    if request.headers.get('X-Privacy-Token') and not privacy_token():
         return jsonify(error='隐私权限已失效，请重新解锁'), 403
     search_reveal = revealed()
-    search_access = library_search.access_stamp(g.owner) if search_mode else None
+    search_access = library_search.access_stamp(g.owner)
     search_page = {}
     if not search_mode:
         term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
@@ -908,6 +936,7 @@ def jobs():
     # Apply privacy before pagination and all search/model branches, so neither
     # candidate text nor counts can expose inherited restricted-source videos.
     hidden = hidden_ids()
+    mode_hidden = hidden.copy()
     if hidden:
         scope += ' AND id NOT IN (SELECT value FROM json_each(?))'
         scope_args = (*scope_args, json.dumps(sorted(hidden)))
@@ -1082,6 +1111,8 @@ def jobs():
                            f"FROM jobs WHERE {scope} AND NOT {unfinished} ORDER BY {order}", scope_args)
             hidden = hidden_ids()
             candidates = [{**dict(r), "analysis": json.loads(r["analysis"])} for r in candidates if r["id"] not in hidden]
+            from . import native_series
+            native_series.attach(candidates)
             ids, more = page_ids(candidates, max(1, limit), subscriptions)
             finished = q(f"SELECT {cols} FROM jobs WHERE {scope} AND id IN ({','.join('?' * len(ids))})",
                          (*scope_args, *ids)) if ids else []
@@ -1106,15 +1137,17 @@ def jobs():
                 # Continue-watching videos outside this page belong in that strip, not as partial series.
                 if d["id"] not in shown:
                     d["resume_only"] = True
-    # privacy mode: hidden items aren't even sent unless they've been revealed with the password
+    from . import native_series
+    native_series.attach(out)
+    # Unlocking switches to the private library rather than mixing private and public cards.
     prefs, show_hidden = privacy_get(g.owner), revealed()
-    hidden_count = 0
+    actual_private = privacy_job_ids()
     kept = []
     for d in out:
-        if is_hidden(d, prefs):
-            hidden_count += 1
-            if not show_hidden:
-                continue
+        private = d['id'] in actual_private
+        if private != show_hidden or show_hidden and d.get('owner') != g.owner:
+            continue
+        if private:
             d["hidden"] = True
         kept.append(d)
     out = kept
@@ -1164,13 +1197,13 @@ def jobs():
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
                    subs=listed_subs, sub_interval=channels.SUB_INTERVAL,
                    bili_cookie=channels.bili_cookie_state() if g.admin else None, more=more,
-                   notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
-                   books=q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
+                   notes=0 if show_hidden else q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
+                   books=0 if show_hidden else q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
                    # ... and books: by title / author and by what's written in them
-                   book_hits=book_hits(term) if term and not search_mode and not parsed and not wanted_tags else [],
-                   reading=reading_now() if not term else [],
+                   book_hits=book_hits(term) if not show_hidden and term and not search_mode and not parsed and not wanted_tags else [],
+                   reading=reading_now() if not show_hidden and not term else [],
                    # a search also shows matching 随记 among the videos
-                   note_hits=[] if search_mode else [notes.note_dict(r, [], []) for r in q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC",
+                   note_hits=[] if search_mode or show_hidden else [notes.note_dict(r, [], []) for r in q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC",
                                                                     (g.owner,)) if has_tags(json.loads(r["tags"] or "[]"), wanted_tags)][:50]
                    if wanted_tags else
                    [notes.note_dict(r, m, seen) for r, m, seen in
@@ -1179,16 +1212,14 @@ def jobs():
                    understood=search.understood(parsed) if parsed else None,
                    parsed=parsed, search_interpretation=search_interpretation, notice=search_notice,
                    partial=bool(parsed and out and out[0].get("partial")), cats=listed_cats, **search_page)
-    if search_mode:
-        if (revealed() != search_reveal or
-                request.headers.get('X-Privacy-Token') and not privacy_token()):
-            return jsonify(error='隐私权限已变化，请重新搜索'), 403
-        for key in ('hidden_ids', 'source_hidden_ids', 'tag_aliases'):
-            g.pop(key, None)
-        if (hidden_ids() != hidden or library_search.access_stamp(g.owner) != search_access or
-                revealed() != search_reveal or request.headers.get('X-Privacy-Token') and not privacy_token()):
-            return jsonify(error='隐藏内容设置已变化，请重新搜索'), 403
-        response.headers['Cache-Control'] = 'no-store'
+    if (revealed() != search_reveal or request.headers.get('X-Privacy-Token') and not privacy_token()):
+        return jsonify(error='隐私权限已变化，请刷新'), 403
+    for key in ('hidden_ids', 'privacy_job_ids', 'source_hidden_ids', 'tag_aliases'):
+        g.pop(key, None)
+    if (hidden_ids() != mode_hidden or library_search.access_stamp(g.owner) != search_access or
+            revealed() != search_reveal or request.headers.get('X-Privacy-Token') and not privacy_token()):
+        return jsonify(error='隐藏内容设置已变化，请刷新'), 403
+    response.headers['Cache-Control'] = 'no-store'
     return response
 
 
@@ -1230,8 +1261,13 @@ def book_hits(term):
 def subs_list():
     """Followed uploaders visible here, with how many of their videos are downloaded / waiting."""
     where, args = ("1", ()) if g.admin else ("owner = ?", (g.owner,))
+    job_scope, job_args = scope_sql()
+    excluded = hidden_ids()
+    if excluded:
+        job_scope += ' AND id NOT IN (SELECT value FROM json_each(?))'
+        job_args = (*job_args, json.dumps(sorted(excluded)))
     counts = {}
-    for r in q("SELECT source, status, COUNT(*) n FROM jobs WHERE source LIKE 'sub:%' GROUP BY source, status"):
+    for r in q(f"SELECT source, status, COUNT(*) n FROM jobs WHERE {job_scope} AND source LIKE 'sub:%' GROUP BY source, status", job_args):
         c = counts.setdefault(r["source"], {})
         c[r["status"]] = c.get(r["status"], 0) + r["n"]
     out, hide = [], hidden_subs()
@@ -2043,7 +2079,9 @@ def _report_visibility():
             data = json.loads(row['snapshot'])
             data['id'] = row['job_id']
             data['analysis'] = json.loads(data.get('analysis') or '{}')
-            if is_hidden(data, prefs):
+            # Removing an active row also clears its obsolete manual ID. The
+            # archive's own privacy flag survives that cleanup and ID reuse.
+            if data.get('_trash_private') is True or is_hidden(data, prefs):
                 source = data.get('source') or ''
                 if source.startswith('sub:') and source[4:].isdigit():
                     hide.add(int(source[4:]))
@@ -2203,6 +2241,11 @@ def save_watch(jid):
       "done=excluded.done, updated=excluded.updated",
       # once seen to the end it stays 已看完, even when it's watched again
       (g.owner, jid, part, pos, dur, int(done or bool(prev and prev["done"])), time.time()))
+    if done or prev and prev['done']:
+        q("UPDATE source_inbox SET state='read',updated=? WHERE owner=? AND state='unread' AND id IN "
+          "(SELECT item_id FROM source_inbox_links WHERE (content_kind='job' AND content_id=?) OR "
+          "(content_kind='crawl' AND content_id IN (SELECT id FROM crawl_items WHERE owner=? AND job_id=?)))",
+          (time.time(), g.owner, jid, g.owner, jid))
     return jsonify(ok=True, done=done)
 
 
@@ -2419,6 +2462,7 @@ def setup_app():
 from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
 __import__(__package__ + '.share')  # register sharing routes
 __import__(__package__ + '.devices')  # home television status and administration
+__import__(__package__ + '.directory_retired')  # collector retirement and upgrade cleanup
 __import__(__package__ + '.crawl')  # directory collection and result search
 __import__(__package__ + '.trash')  # per-account recycle bin and legacy file recovery
 

@@ -1,5 +1,6 @@
 """Player siblings obey owner/privacy scope and the selected library order."""
 import importlib.util
+import base64
 import json
 from pathlib import Path
 import time
@@ -17,6 +18,27 @@ class PlayerSeriesTests(unittest.TestCase):
     client = fixtures.HomeSearchTests.client
     collection = fixtures.HomeSearchTests.collection
     job = fixtures.HomeSearchTests.job
+
+    def test_cover_has_live_owner_and_private_scope_and_no_cache(self):
+        public, private = self.episode(1), self.episode(2)
+        path = self.path / 'cover.png'
+        path.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1kAAAAASUVORK5CYII='))
+        for jid in (public, private):
+            core.q('UPDATE jobs SET thumb=? WHERE id=?', (str(path), jid))
+        core.q('INSERT INTO privacy(owner,tags,ids) VALUES(?,?,?)', ('user:alice', '[]', json.dumps([private])))
+        self.assertEqual(self.alice.get(f'/api/series/{private}/cover').status_code, 404)
+        for client in (self.bob, self.admin):
+            self.assertEqual(client.get(f'/api/series/{public}/cover').status_code, 404)
+        self.assertTrue(self.alice.get(f'/api/series/{public}').json['items'][0]['thumb'])
+        token = {'owner':'user:alice', 'reveal':True, 'expires':time.time() + 60}
+        with patch.dict(web.privacy_tokens, {'cover':token}):
+            response = self.alice.get(f'/api/series/{private}/cover', headers={'X-Privacy-Token':'cover'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+            self.assertEqual(response.mimetype, 'image/png')
+            response.close()
+            token['expires'] = time.time() - 1
+            self.assertEqual(self.alice.get(f'/api/series/{private}/cover', headers={'X-Privacy-Token':'cover'}).status_code, 403)
 
     def episode(self, number, owner='user:alice', created=None, published='2026-10-01', tags=()):
         title = f'Drama episode {number}'

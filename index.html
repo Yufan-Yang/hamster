@@ -730,7 +730,8 @@ a.link {display: inline-block; max-width: 100%;}
 <link rel="stylesheet" href="/static/saved_search.css?v=20261024-v2">
 <link rel="stylesheet" href="/static/sources.css?v=20261024-v2">
 <link rel="stylesheet" href="/static/ai_activity.css?v=20261024-v2">
-<link rel="stylesheet" href="/static/player_series.css?v=20261024-v2">
+<link rel="stylesheet" href="/static/player_series.css?v=20261024-v3">
+<link rel="stylesheet" href="/static/library_updates.css?v=20261024-v1">
 </head>
 <body>
 <div class="topbar">
@@ -738,7 +739,7 @@ a.link {display: inline-block; max-width: 100%;}
   <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
   <form class="search" onsubmit="submitMainSearch(event)">
     <select id="mainSearchMode" aria-label="搜索模式" onchange="changeMainSearchMode()"><option value="exact">精准</option><option value="wildcard">通配（模糊）</option><option value="regex">正则</option><option value="ai">AI 语义</option></select>
-    <input type="search" id="search" aria-label="搜索片库和采集结果" placeholder="搜索片库和采集结果" autocomplete="off">
+    <input type="search" id="search" aria-label="搜索标题、简介、标签、字幕…" placeholder="搜索标题、简介、标签、字幕…" autocomplete="off">
     <button class="btn plain" id="mainSearchGo" type="submit">搜索</button>
   </form>
   <div class="right">
@@ -759,17 +760,12 @@ a.link {display: inline-block; max-width: 100%;}
   <div class="understood" id="understood" hidden></div>
   <div class="saved-search-tools" id="savedSearchTools"><button type="button" class="link" onclick="openSavedSearches()">常用搜索</button><button type="button" class="link" id="savedSearchSaveCurrent" onclick="openSavedSearches(true)" hidden>保存搜索</button></div>
   <p id="mainSearchHelp" class="hint" hidden></p>
-  <section id="mainCrawlSearch" class="main-crawl-search" aria-labelledby="mainCrawlTitle" hidden>
-    <div class="main-search-heading"><h2 id="mainCrawlTitle">目录采集结果</h2><span id="mainCrawlCount"></span></div>
-    <p class="hint" id="mainCrawlNote" hidden></p><p class="form-err" id="mainCrawlError" role="alert" hidden></p>
-    <div id="mainCrawlResults" class="main-crawl-results"></div>
-    <div id="mainCrawlPages" class="crawl-pagination" hidden><button class="btn plain" id="mainCrawlPrev" onclick="pageMainCrawl(-1)">上一页</button><span id="mainCrawlPage"></span><button class="btn plain" id="mainCrawlNext" onclick="pageMainCrawl(1)">下一页</button></div>
-  </section>
   <div id="mainLibraryHeading" class="main-search-heading" hidden><h2>片库结果</h2><span id="mainLibraryCount"></span></div>
   <p class="hint" id="mainLibraryNote" hidden></p>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
   <div id="contRead" hidden><div class="contitle">继续阅读</div><div class="controw" id="controwRead"></div></div>
+  <section id="libraryUpdates" class="library-updates" aria-label="片库更新" hidden></section>
   <div class="grid" id="grid"></div>
   <div id="mainLibraryPages" class="crawl-pagination" hidden><button type="button" class="btn plain" id="mainLibraryPrev" onclick="pageMainLibrary(-1)">上一页</button><span id="mainLibraryPage"></span><button type="button" class="btn plain" id="mainLibraryNext" onclick="pageMainLibrary(1)">下一页</button></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
@@ -857,10 +853,10 @@ a.link {display: inline-block; max-width: 100%;}
     <div class="sources-heading"><h2 id="sourcesTitle">来源与新内容</h2><button type="button" class="link" id="sourcesRefresh" onclick="refreshSources()">刷新列表</button><button type="button" class="link" onclick="closeSources()">关闭</button></div>
     <div class="sources-tabs"><button type="button" class="btn plain" id="sourcesTabInbox" aria-pressed="true" onclick="switchSourcesTab('inbox')">新内容</button><button type="button" class="btn plain" id="sourcesTabAll" aria-pressed="false" onclick="switchSourcesTab('sources')">全部来源</button></div>
     <div class="sources-scroll">
-      <p class="hint">频道追更和目录采集的新发现汇总到这里。账号之间隔离；隐藏内容仍遵守隐私模式。</p>
+      <p class="hint">频道追更的新发现汇总到这里。账号之间隔离；隐藏内容仍遵守隐私模式。</p>
       <p class="form-err" id="sourcesError" role="alert" hidden></p>
       <section id="sourcesOverview" aria-label="全部来源" hidden>
-        <div class="sources-add"><span id="sourcesTotal"></span><button type="button" class="btn plain" onclick="sourceAdd('sub')">添加频道追更</button><button type="button" class="btn plain" onclick="sourceAdd('crawl')">添加目录采集</button></div>
+        <div class="sources-add"><span id="sourcesTotal"></span><button type="button" class="btn plain" onclick="sourceAdd('sub')">添加频道追更</button></div>
         <div id="sourceCards" class="source-cards"></div>
       </section>
       <section id="sourcesInbox" aria-label="新内容收件箱">
@@ -907,97 +903,10 @@ a.link {display: inline-block; max-width: 100%;}
       </div>
       <input type="file" id="file" accept=".torrent" hidden multiple>
     </form>
-    <button type="button" class="btn plain crawl-entry" onclick="openCrawl()">目录采集 · 自动翻页找视频</button>
     <div id="addTips"></div>
   </div>
 </div>
 <div id="dropAll" hidden>松开就开始下载</div>
-
-<!-- directory crawl -->
-<div class="sheet-bg" id="crawlSheet" hidden onclick="if (event.target === this) hide(this)">
-  <div class="sheet crawl-sheet" role="dialog" aria-modal="true" aria-labelledby="crawlTitle">
-    <div class="crawl-heading"><h2 id="crawlTitle">目录采集</h2><button type="button" class="link" onclick="hide($('#crawlSheet'))">关闭</button></div>
-    <div class="crawl-scroll">
-      <p class="hint">可一次粘贴多个目录，每行一个，最多 20 个。后台同时采集 2 个目录，其余排队；自动翻页并合并重复地址。关闭窗口后仍会继续采集。</p>
-      <p class="hint">来源在根目录判别一次，结果沿用该分级。成人来源需先解锁隐私，并勾选「显示隐藏的内容」。</p>
-      <form id="crawlCreateForm" class="crawl-create" onsubmit="startCrawl(event)">
-        <label class="crawl-url-field" for="crawlURL">目录网址<textarea id="crawlURL" rows="3" placeholder="https://example.com/videos/&#10;https://example.org/list/" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="50000"></textarea></label>
-        <label for="crawlMaxPages">每个目录最多页数<input type="number" id="crawlMaxPages" min="1" max="500" step="1" value="50" required></label>
-        <label for="crawlRefreshHours">自动增量刷新<select id="crawlRefreshHours"><option value="6">每 6 小时</option><option value="1">每小时</option><option value="24">每天</option><option value="0">关闭</option></select></label>
-        <button type="submit" class="btn" id="crawlStart">开始采集</button>
-      </form>
-      <p class="form-err" id="crawlError" role="alert" hidden></p>
-      <p class="hint" id="crawlPrivacyNotice" role="status" hidden>隐私来源已隐藏。解锁隐私并开启“显示隐藏的内容”后可查看。</p>
-      <div class="crawl-history-row" id="crawlHistoryRow">
-        <label for="crawlHistory">最近采集</label>
-        <select id="crawlHistory" onchange="selectCrawl(this.value)"><option value="">暂无采集记录</option></select>
-        <button type="button" class="link" onclick="refreshCrawl()">刷新</button>
-      </div>
-      <div id="crawlDetail" hidden>
-        <section class="crawl-progress-panel" aria-label="采集进度">
-          <div class="crawl-progress-heading"><strong id="crawlStatus" role="status" aria-live="polite"></strong><button type="button" class="btn plain" id="crawlControl" onclick="controlCrawl()" hidden></button><button type="button" class="link" id="crawlEdit" onclick="editCrawl()">编辑任务</button><button type="button" class="link" id="crawlDelete" onclick="askDeleteCrawl()">删除任务</button></div>
-          <div class="crawl-stats" id="crawlStats"></div>
-          <progress id="crawlProgress" value="0" max="50" aria-label="目录页采集进度"></progress>
-          <p class="crawl-current" id="crawlCurrent"></p>
-          <p class="crawl-status-hint" id="crawlStatusHint"></p>
-          <p class="crawl-status-hint" id="crawlSourceRating"></p>
-          <p class="crawl-status-hint" id="crawlLastError" hidden></p>
-          <div class="crawl-issues-toggle"><button type="button" class="link" id="crawlIssuesToggle" onclick="toggleCrawlIssues()" aria-expanded="false" aria-controls="crawlIssuesPanel">查看问题页面</button></div>
-          <section id="crawlIssuesPanel" class="crawl-issues-panel" aria-label="问题页面" hidden>
-            <div class="crawl-issues-heading"><h3>问题页面</h3><button type="button" class="link" id="crawlIssuesRefresh" onclick="loadCrawlIssues()">刷新状态</button><button type="button" class="btn plain" id="crawlIssuesRetry" onclick="retryFailedCrawlPages()">仅重试失败页</button></div>
-            <p class="crawl-status-hint" id="crawlIssuesSummary" role="status"></p>
-            <p class="crawl-status-hint" id="crawlIssuesHint"></p>
-            <p class="form-err" id="crawlIssuesError" role="alert" hidden></p>
-            <div id="crawlIssuesList"></div>
-            <div class="crawl-pagination" id="crawlIssuesPages" hidden><button type="button" class="link" id="crawlIssuesPrev" onclick="pageCrawlIssues(-1)">上一页</button><span id="crawlIssuesPageLabel"></span><button type="button" class="link" id="crawlIssuesNext" onclick="pageCrawlIssues(1)">下一页</button></div>
-          </section>
-          <div class="crawl-auto-row"><label for="crawlCurrentRefresh">自动刷新</label><select id="crawlCurrentRefresh" onchange="saveCrawlRefresh(this.value)"><option value="0">关闭</option><option value="1">每小时</option><option value="6">每 6 小时</option><option value="24">每天</option></select><button type="button" class="btn plain" id="crawlRefreshNow" onclick="refreshCrawlNow()">立即增量刷新</button><span id="crawlNextRefresh"></span></div>
-          <p class="crawl-status-hint" id="crawlManageHint"></p>
-          <form id="crawlEditForm" class="crawl-manage-panel" onsubmit="saveCrawlEdit(event)" hidden>
-            <h3>编辑当前任务</h3>
-            <div class="crawl-edit-fields"><label class="crawl-url-field" for="crawlEditURL">目录网址<input type="url" id="crawlEditURL" required autocomplete="url"></label><label for="crawlEditMaxPages">最多目录页<input type="number" id="crawlEditMaxPages" min="1" max="500" step="1" required></label><label for="crawlEditRefreshHours">自动增量刷新<select id="crawlEditRefreshHours"><option value="0">关闭</option><option value="1">每小时</option><option value="6">每 6 小时</option><option value="24">每天</option></select></label></div>
-            <p class="crawl-status-hint">更换目录网址会清除这个任务的进度和采集结果，并重新采集。已加入下载的视频会保留。</p>
-            <p class="form-err" id="crawlEditError" role="alert" hidden></p>
-            <div class="crawl-manage-actions"><button type="submit" class="btn" id="crawlEditSave">保存修改</button><button type="button" class="btn plain" id="crawlEditCancel" onclick="cancelCrawlEdit()">取消</button></div>
-          </form>
-          <div id="crawlDeleteConfirm" class="crawl-manage-panel" hidden>
-            <h3>删除这个采集任务？</h3><p class="crawl-delete-url" id="crawlDeleteURL"></p>
-            <p>任务会停止，采集记录和结果会删除。已加入下载的视频会保留，其他采集任务不受影响。</p>
-            <p class="form-err" id="crawlDeleteError" role="alert" hidden></p>
-            <div class="crawl-manage-actions"><button type="button" class="btn plain" id="crawlDeleteCancel" onclick="cancelDeleteCrawl()">取消</button><button type="button" class="btn" id="crawlDeleteGo" onclick="deleteCrawl()">确认删除任务</button></div>
-          </div>
-        </section>
-        <form id="crawlSearchForm" class="crawl-search" onsubmit="searchCrawl(event)">
-          <label class="crawl-sr-only" for="crawlSearchMode">搜索模式</label>
-          <select id="crawlSearchMode" onchange="crawlSearchModeChanged()">
-            <option value="exact">精准</option><option value="wildcard">通配（模糊）</option><option value="regex">正则</option><option value="ai">AI 语义</option>
-          </select>
-          <label class="crawl-sr-only" for="crawlQuery">搜索采集结果</label>
-          <input type="search" id="crawlQuery" placeholder="搜索标题、描述或地址" maxlength="256" autocomplete="off" aria-describedby="crawlSearchHelp">
-          <button type="submit" class="btn plain" id="crawlSearchGo">搜索</button>
-          <button type="button" class="link" id="crawlClearSearch" onclick="clearCrawlSearch()" hidden>清除</button>
-        </form>
-        <p class="crawl-search-help" id="crawlSearchHelp"></p>
-        <p class="crawl-search-note" id="crawlSearchNote" role="status" hidden></p>
-        <p class="crawl-search-note" id="crawlSearchPending" hidden>正在搜索，下面仍是上一次结果。</p>
-        <div class="crawl-results-bar">
-          <label class="crawl-pick-page"><input type="checkbox" id="crawlPickPage" onchange="pickCrawlPage(this.checked)">选择本页</label>
-          <span id="crawlResultCount"></span><span id="crawlSelectedCount"></span>
-          <button type="button" class="link" onclick="clearCrawlSelection()" id="crawlClearSelection" hidden>取消选择</button>
-        </div>
-        <div class="crawl-actions">
-          <button type="button" class="btn plain" id="crawlCopy" onclick="copyCrawlAddresses()" disabled>复制地址</button>
-          <button type="button" class="btn plain" id="crawlExport" onclick="exportCrawlAddresses()" disabled>导出全部地址</button>
-          <button type="button" class="btn" id="crawlImportSelected" onclick="importCrawl(false)" disabled>下载选中</button>
-          <button type="button" class="btn plain" id="crawlImportAll" onclick="importCrawl(true)" disabled>下载全部结果</button>
-        </div>
-        <p class="crawl-action-hint">优先复制和导出视频直链，未解析到直链时使用详情页地址；添加下载后会继续解析。</p>
-        <div id="crawlResults" class="crawl-results"></div>
-        <div class="crawl-pagination"><button type="button" class="btn plain" id="crawlPrev" onclick="pageCrawl(-1)" disabled>上一页</button><span id="crawlPageLabel"></span><button type="button" class="btn plain" id="crawlNext" onclick="pageCrawl(1)" disabled>下一页</button></div>
-      </div>
-    </div>
-  </div>
-</div>
 
 <!-- Android share setup -->
 <div class="sheet-bg" id="androidSheet" hidden onclick="if (event.target === this) hide(this)">
@@ -1160,6 +1069,7 @@ function setStorageOwner(owner) {
   if (typeof resetMainSearch === 'function') resetMainSearch();
   if (typeof resetSavedSearches === 'function') resetSavedSearches();
   if (typeof resetSources === 'function') resetSources();
+  if (typeof resetLibraryUpdates === 'function') resetLibraryUpdates();
   if (typeof resetAIActivity === 'function') resetAIActivity();
   ++removeEpoch; $('#removeGo').disabled = false;
   cancelPrivacySelection(); ++privacyMenuEpoch; ++privateViewEpoch;
@@ -1278,7 +1188,7 @@ function seriesOf(j) {
 function seriesItems(jobs) {
   const groups = new Map(), items = [];
   for (const j of jobs) {
-    const name = seriesOf(j), key = name.toLocaleLowerCase("zh-CN").replace(/[\s·:：\-_]/g, "");
+    const name = seriesOf(j), key = j.series_key || name.toLocaleLowerCase("zh-CN").replace(/[\s·:：\-_]/g, "");
     if (!key) { items.push({j}); continue; }
     if (!groups.has(key)) {
       const group = {key, name, jobs: []};
@@ -1317,7 +1227,7 @@ function renderChips() {
   const failed = state.jobs.filter(j => j.status === "failed" && !waitingDownloadRetry(j)).length;
   const primary = [["all", "片库"], ["live", "直播切片"], ["notes", "随记"], ["books", "书架"], ["subs", "追更"]];
   const workspace = chip.startsWith("sub:") ? "subs" : primary.some(([key]) => key === chip) ? chip : "all";
-  const navHtml = primary.map(([key, label]) => `<button class="chip${workspace === key ? " on" : ""}" aria-pressed="${workspace === key}" onclick="setChip('${key}')">${label}</button>`).join("") + '<button class="chip" aria-haspopup="dialog" onclick="openSources()">来源与新内容</button>';
+  const navHtml = primary.map(([key, label]) => `<button class="chip${workspace === key ? " on" : ""}" aria-pressed="${workspace === key}" onclick="setChip('${key}')">${label}</button>`).join("");
   if ($("#workspaceNav").innerHTML !== navHtml) $("#workspaceNav").innerHTML = navHtml;
   const library = !["notes", "books", "subs", "live"].includes(chip);
   $("#chips").hidden = !library;
@@ -1424,6 +1334,7 @@ function card(j, clearableWatch = false) {
   // how far you got (on any device): a bar along the bottom, or 已看完
   const w = j.watch;
   if (w && w.done) over += `<span class="badge tr">已看完</span>`;
+  else if (typeof libraryUpdateFor === 'function' && libraryUpdateFor(j.id)) over += `<span class="badge tr">新内容</span>`;
   else if (w && w.dur && w.pos >= 5) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
   const clear = clearableWatch ? `<button class="clear-watch" title="清除观看记录" aria-label="清除观看记录" onclick="event.stopPropagation(); clearWatch(${j.id})">×</button>` : "";
   return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${timedHit ? `, ${h0.part}, ${h0.t}` : ""})`}">
@@ -1457,6 +1368,7 @@ let focusNote = null;
 function openNote(id) { focusNote = id; setChip("notes"); window.scrollTo(0, 0); }
 
 function render() {
+  if (typeof renderLibraryUpdates === 'function') renderLibraryUpdates();
   renderChips();
   renderWorkspaceStatus();
   const notes = chip === "notes", shelf = chip === "books", list = chip === "subs" || chip === "live" || notes || shelf;
@@ -1605,6 +1517,7 @@ async function refreshNow(options = {}) {
     } else if (state.jobs.some(waitingDownloadRetry)) {
       render(); // Refresh retry countdowns even when the stored job row is unchanged.
     }
+    if (typeof refreshLibraryUpdates === 'function') refreshLibraryUpdates();
   } catch (e) {
     if (epoch !== refreshEpoch || e.name === 'AbortError') return;
     workspaceError = e.message || "连接中断";
@@ -2836,6 +2749,7 @@ function updatePrivacySelectionVisibility() {
   document.querySelectorAll('[data-privacy-action]').forEach(button => { button.hidden = !state.user || !privacyToken; });
 }
 function resetPrivateViews() {
+  if (typeof resetLibraryUpdates === 'function') resetLibraryUpdates();
   ++privateViewEpoch; ++refreshEpoch; refreshController?.abort(); workspaceLoading = false;
   if (typeof stopIntro === 'function') stopIntro();
   if (typeof stopPlayerSeries === 'function') stopPlayerSeries();
@@ -2996,9 +2910,9 @@ async function openPrivacy() {
     `<span class="ptag">#${esc(t)} <button onclick='savePrivacyTags(${esc(JSON.stringify(p.tags.filter((_, k) => k !== i)))})'>✕</button></span>`).join("");
   $("#privacyBody").innerHTML = `
     <h2>隐私</h2>
-    <div class="psec">显示隐藏的内容</div>
-    <label class="check" style="margin-bottom:16px"><input type="checkbox" id="revealBox" ${p.revealed ? "checked" : ""}> 显示
-      <span style="color:var(--muted)">只在这个页面有效；刷新页面、离开超过 1 分钟或 30 分钟后会自动恢复隐藏</span></label>
+    <div class="psec">隐私片库</div>
+    <label class="check" style="margin-bottom:16px"><input type="checkbox" id="revealBox" ${p.revealed ? "checked" : ""}> 只显示隐藏内容
+      <span style="color:var(--muted)">开启后只浏览和搜索隐藏的视频。刷新页面、离开超过 1 分钟或 30 分钟后自动回到普通片库。</span></label>
     <div class="psec">手动隐藏清单 · ${manual.length} 个视频</div>
     <p class="hint">在视频详情或批量管理中点击「加入隐藏清单」。移出后，符合隐藏标签的视频仍会继续隐藏。</p>
     <div style="max-height:220px;overflow-y:auto;margin-bottom:16px">${manual.map(item => `<div class="dev"><div class="dev-main">${esc(item.title || '未命名视频')}</div><button type="button" class="btn plain" data-privacy-action onclick="changePrivacySelection([${Number(item.id)}], false, true)">移出清单</button></div>`).join('') || '<p class="hint">还没有手动添加的视频。</p>'}</div>
@@ -4763,13 +4677,13 @@ refreshCacheIndex();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 <script src="/static/live.js?v=20261020-assistant-v1"></script>
-<script src="/static/crawl.js?v=20261024-v2"></script>
 <script src="/static/trash.js?v=20261024-v2"></script>
-<script src="/static/main_search.js?v=20261024-v2"></script>
+<script src="/static/main_search.js?v=20261024-v3"></script>
 <script src="/static/saved_search.js?v=20261024-v2"></script>
 <script src="/static/sources.js?v=20261024-v2"></script>
+<script src="/static/library_updates.js?v=20261024-v1"></script>
 <script src="/static/ai_activity.js?v=20261024-v2"></script>
 <script src="/static/intro.js?v=20261024-v2"></script>
-<script src="/static/player_series.js?v=20261024-v2"></script>
+<script src="/static/player_series.js?v=20261024-v3"></script>
 </body>
 </html>

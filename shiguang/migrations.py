@@ -296,6 +296,7 @@ STEPS = [
     (32, _ai_activity),
     (33, _substring_search),
     (34, lambda db: (add(db, 'crawl_items', 'duration', 'REAL'), add(db, 'crawl_pages', 'duration', 'REAL'))),
+    (35, lambda db: __import__('shiguang.directory_retired', fromlist=['clear_cache']).clear_cache(db)),
 ]
 
 

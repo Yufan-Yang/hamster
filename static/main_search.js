@@ -1,8 +1,7 @@
-// One search input, two owner-scoped sources. AI runs only on an explicit submit.
-function newMainSearch() { return {q: '', mode: 'exact', items: [], total: 0, offset: 0, limit: 20, loading: false, error: '', note: '', busy: false}; }
-let mainSearchView = newMainSearch(), mainSearchEpoch = 0, mainSearchController = null, mainLibrarySnapshot = null;
+// Search the owned library. AI runs only on an explicit submit.
+let mainSearchEpoch = 0, mainLibrarySnapshot = null;
 let mainLibraryPage = {key: '', offset: 0, limit: 100, total: null};
-const mainSearchLanes = {library: {active: null, pending: null}, crawl: {active: null, pending: null}};
+const mainSearchLanes = {library: {active: null, pending: null}};
 function clearSearchLane(lane, release = false) {
   lane.pending?.resolve(); lane.pending = null;
   if (release) { lane.active?.resolve(); lane.active = null; }
@@ -45,8 +44,8 @@ function currentMainSearch(token) { return token.epoch === mainSearchEpoch && to
 function resetMainSearch({preserveFlight = false} = {}) {
   ++mainSearchEpoch;
   for (const lane of Object.values(mainSearchLanes)) clearSearchLane(lane, !preserveFlight);
-  if (!preserveFlight) { mainSearchController?.abort(); mainSearchController = null; refreshController?.abort(); workspaceLoading = false; }
-  mainSearchView = newMainSearch(); mainLibrarySnapshot = null;
+  if (!preserveFlight) { refreshController?.abort(); workspaceLoading = false; }
+  mainLibrarySnapshot = null;
   mainLibraryPage = {key: '', offset: 0, limit: 100, total: null};
   if (query && mainSearchMode() === 'ai') { state.jobs = []; cardHtml = []; lastBody = ''; $('#grid').innerHTML = ''; $('#grid').dataset.ids = ''; }
   renderMainSearch();
@@ -60,8 +59,8 @@ function syncMainSearchControls() {
   $('#mainSearchMode').hidden = !available; $('#mainSearchGo').disabled = chip === 'live';
   if (available) {
     $('#search').maxLength = mode === 'regex' ? 128 : 256;
-    $('#search').placeholder = mode === 'wildcard' ? '例如 Python*入门、课程??' : mode === 'regex' ? '例如 (教程|入门).*Python' : mode === 'ai' ? '描述想找的内容，按搜索提交' : '搜索片库和采集结果';
-    $('#search').setAttribute('aria-label', '搜索自己的片库和全部采集结果');
+    $('#search').placeholder = mode === 'wildcard' ? '例如 Python*入门、课程??' : mode === 'regex' ? '例如 (教程|入门).*Python' : mode === 'ai' ? '描述想找的内容，按搜索提交' : '搜索标题、简介、标签、字幕…';
+    $('#search').setAttribute('aria-label', '搜索自己的片库');
   } else $('#search').removeAttribute('maxlength');
   $('#mainSearchHelp').hidden = !available || !query;
   $('#mainSearchHelp').textContent = '搜索当前账号视频的标题、简介、标签和地址。' + ({
@@ -87,7 +86,7 @@ async function submitMainSearch(event) {
   if (!mainSearchAvailable()) { query = text; visualSearch = smartSearch = false; saveNavigation(); await refresh(); return; }
   invalidateMainSearch(); query = text; visualSearch = smartSearch = false; exactSearch = true; pageLimit = 100; workspaceError = '';
   state.jobs = []; lastBody = ''; cardHtml = []; saveNavigation(); render(); updateSearchOptions();
-  await Promise.allSettled([refresh({explicitSearch: true}), query ? loadMainCrawlResults(0) : Promise.resolve()]);
+  await refresh({explicitSearch: true});
 }
 function mainLibraryRequest(explicit) {
   if (!mainSearchAvailable() || !query) return null;
@@ -133,7 +132,7 @@ async function pageMainLibrary(direction) {
   const previous = mainLibraryPage.offset, offset = Math.max(0, previous + direction * mainLibraryPage.limit);
   if (offset === previous || offset >= mainLibraryPage.total) return;
   const token = mainSearchToken(); mainLibraryPage.offset = offset;
-  await refresh(); // Only the visible library page changes; collection/AI searches are not rerun.
+  await refresh(); // Only the visible library page changes; AI searches are not rerun.
   if (currentMainSearch(token) && workspaceError) mainLibraryPage.offset = previous;
   if (currentMainSearch(token) && !workspaceError && mainLibraryPage.total != null && mainLibraryPage.offset >= mainLibraryPage.total && mainLibraryPage.offset > 0) {
     mainLibraryPage.offset = Math.max(0, Math.floor((Math.max(1, mainLibraryPage.total) - 1) / mainLibraryPage.limit) * mainLibraryPage.limit);
@@ -145,100 +144,29 @@ function clearMainSearchPermission(message) {
   if (typeof privacyToken !== 'undefined') privacyToken = null;
   if (typeof resetPrivateViews === 'function') resetPrivateViews(); else invalidateMainSearch();
   state.jobs = []; state.cats = {}; state.more = false; cardHtml = []; lastBody = '';
-  for (const id of ['grid', 'controw', 'mainCrawlResults']) { $('#' + id).innerHTML = ''; $('#' + id).dataset.ids = ''; }
+  for (const id of ['grid', 'controw']) { $('#' + id).innerHTML = ''; $('#' + id).dataset.ids = ''; }
   if (typeof closeWatch === 'function' && typeof watching !== 'undefined' && watching) { closeWatch(); $('#watchBody').innerHTML = ''; }
   workspaceError = message || '搜索权限已变化，请重新解锁或登录'; workspaceLoading = false;
   renderMainSearch(); renderWorkspaceStatus();
 }
-function loadMainCrawlResults(offset = 0) {
-  if (!mainSearchAvailable() || !query) return Promise.resolve();
-  const token = mainSearchToken(), text = query, mode = mainSearchMode(), key = JSON.stringify([token, text, mode, offset]);
-  mainSearchView.loading = true; mainSearchView.q = text; mainSearchView.mode = mode; renderMainSearch();
-  return coalesceSearch(mainSearchLanes.crawl, key, () => currentMainSearch(token) && text === query && mode === mainSearchMode() ? loadMainCrawlResultsNow(offset) : undefined);
-}
-async function loadMainCrawlResultsNow(offset = 0) {
-  if (!mainSearchAvailable() || !query) return;
-  const token = mainSearchToken(), requestQuery = query, mode = mainSearchMode();
-  mainSearchController?.abort(); const controller = new AbortController(); mainSearchController = controller;
-  mainSearchView.loading = true; mainSearchView.error = ''; mainSearchView.q = requestQuery; mainSearchView.mode = mode; renderMainSearch();
-  try {
-    const params = new URLSearchParams({q: requestQuery, mode, offset: String(offset), limit: String(mainSearchView.limit)});
-    const response = await fetch('/api/crawls/search?' + params, {signal: controller.signal});
-    const data = await response.json();
-    if (!currentMainSearch(token) || mainSearchController !== controller || query !== requestQuery || mainSearchMode() !== mode) return;
-    if (data.storage_owner && data.storage_owner !== storageOwner) return;
-    if (!response.ok) {
-      if (response.status === 403) { clearMainSearchPermission(data.error); return; }
-      throw Error(data.error || '采集结果搜索失败');
-    }
-    mainSearchView.items = data.items || []; mainSearchView.total = Number(data.total) || 0; mainSearchView.offset = offset;
-    mainSearchView.note = [crawlInterpretation(data.interpretation), crawlInterpretation(data.notice)].filter(Boolean).join('；');
-  } catch (e) {
-    if (currentMainSearch(token) && mainSearchController === controller && e.name !== 'AbortError') mainSearchView.error = e.message;
-  } finally {
-    if (currentMainSearch(token) && mainSearchController === controller) { mainSearchView.loading = false; renderMainSearch(); }
-  }
-}
-function pageMainCrawl(direction) {
-  if (mainSearchView.loading) return;
-  const offset = Math.max(0, mainSearchView.offset + direction * mainSearchView.limit);
-  if (offset >= mainSearchView.total && direction > 0) return;
-  return loadMainCrawlResults(offset);
-}
-async function mainCrawlAction(id, action) {
-  const item = mainSearchView.items.find(item => String(item.id) === String(id));
-  if (!item || mainSearchView.busy) return;
-  const token = mainSearchToken();
-  if (action === 'open') { await openCrawl(); if (currentMainSearch(token)) await selectCrawl(item.crawl_id); return; }
-  if (action === 'watch') { openWatch(Number(item.job_id)); return; }
-  mainSearchView.busy = true; mainSearchView.error = ''; renderMainSearch();
-  try {
-    if (action === 'copy') {
-      if (!await writeCrawlClipboard(crawlAddresses(item).join('\n'))) throw Error('复制失败，请在详情中复制地址');
-      if (currentMainSearch(token)) toast('已复制视频地址');
-    } else if (action === 'import') {
-      const response = await fetch('/api/crawls/' + encodeURIComponent(item.crawl_id) + '/import', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ids:[Number(item.id)]})});
-      const data = await response.json(); if (!currentMainSearch(token)) return;
-      if (response.status === 403) { clearMainSearchPermission(data.error); return; }
-      if (!response.ok) throw Error(data.error || '添加下载失败');
-      item.imported = true; if (data.ids?.[0]) item.job_id = data.ids[0]; toast('已加入下载');
-    }
-  } catch (e) { if (currentMainSearch(token)) mainSearchView.error = e.message; }
-  finally { if (currentMainSearch(token)) { mainSearchView.busy = false; renderMainSearch(); } }
+function searchInterpretation(value) {
+  return typeof value === 'string' ? value : value ? JSON.stringify(value) : '';
 }
 function renderMainSearch() {
-  const v = mainSearchView, visible = mainSearchAvailable() && !!query;
-  $('#mainCrawlSearch').hidden = $('#mainLibraryHeading').hidden = !visible;
+  const visible = mainSearchAvailable() && !!query;
+  $('#mainLibraryHeading').hidden = !visible;
   $('#mainLibraryNote').hidden = !visible;
   const paged = visible && ['exact', 'wildcard', 'regex'].includes(mainSearchMode()) && mainLibraryPage.total != null;
   $('#mainLibraryPages').hidden = !paged || mainLibraryPage.total <= mainLibraryPage.limit;
   $('#mainLibraryPrev').disabled = workspaceLoading || !paged || mainLibraryPage.offset <= 0;
   $('#mainLibraryNext').disabled = workspaceLoading || !paged || mainLibraryPage.offset + mainLibraryPage.limit >= mainLibraryPage.total;
   $('#mainLibraryPage').textContent = paged ? `${Math.floor(mainLibraryPage.offset / mainLibraryPage.limit) + 1} / ${Math.max(1, Math.ceil(mainLibraryPage.total / mainLibraryPage.limit))} 页` : '';
-  if (!visible) { $('#mainCrawlResults').innerHTML = ''; $('#mainCrawlNote').textContent = ''; $('#mainCrawlError').textContent = ''; $('#mainLibraryNote').textContent = ''; return; }
-  $('#scope').textContent = '当前账号的片库和采集结果';
-  $('#mainLibraryNote').textContent = [crawlInterpretation(state.search_interpretation), crawlInterpretation(state.notice)].filter(Boolean).join('；');
+  if (!visible) { $('#mainLibraryNote').textContent = ''; return; }
+  $('#scope').textContent = '当前账号的片库';
+  $('#mainLibraryNote').textContent = [searchInterpretation(state.search_interpretation), searchInterpretation(state.notice)].filter(Boolean).join('；');
   $('#mainLibraryNote').hidden = !$('#mainLibraryNote').textContent;
   const count = (state.jobs || []).filter(job => !job.resume_only).length;
   $('#mainLibraryCount').textContent = workspaceLoading ? '正在搜索…' : paged ? `共 ${mainLibraryPage.total} 条 · 本页 ${count} 条` : count + ' 条';
-  $('#mainCrawlCount').textContent = v.loading ? '正在搜索…' : v.q === query ? '共 ' + v.total + ' 条' : '等待搜索';
-  $('#mainCrawlNote').textContent = v.note; $('#mainCrawlNote').hidden = !v.note;
-  $('#mainCrawlError').textContent = v.error; $('#mainCrawlError').hidden = !v.error;
-  $('#mainCrawlResults').innerHTML = v.items.map(item => {
-    const score = Number(item.score), relevance = item.score == null || !Number.isFinite(score) ? '' : '关联度 ' + (score <= 1 ? Math.round(score * 100) : Math.round(score)) + '%';
-    return `<article class="main-crawl-card"><h3>${crawlLink(item.url || item.page_url, item.title || item.url || '未命名视频')}</h3>${item.description ? `<p class="crawl-result-desc">${esc(item.description)}</p>` : ''}
-      <p class="hint">${esc(crawlDuration(item.duration))}</p>
-      ${relevance || item.match_reason ? `<p class="hint">${esc([relevance,crawlInterpretation(item.match_reason)].filter(Boolean).join(' · '))}</p>` : ''}
-      <div class="main-crawl-tools"><button type="button" class="link" data-main-action="open" data-main-id="${Number(item.id)}">查看采集任务</button><button type="button" class="link" data-main-action="copy" data-main-id="${Number(item.id)}"${v.busy ? ' disabled' : ''}>复制地址</button>
-      <button type="button" class="btn plain" data-main-action="${item.job_id ? 'watch' : 'import'}" data-main-id="${Number(item.id)}"${v.busy || item.imported && !item.job_id ? ' disabled' : ''}>${item.job_id ? '查看下载' : item.imported ? '已加入下载' : '加入下载'}</button></div></article>`;
-  }).join('') || `<p class="hint">${v.loading ? '正在查找采集结果…' : v.q !== query ? '点击搜索或按回车，同时查找片库和所有目录的采集结果。' : v.error ? '修改输入后可以重新搜索。' : '采集结果中没有匹配内容。'}</p>`;
-  $('#mainCrawlPages').hidden = v.total <= v.limit;
-  $('#mainCrawlPage').textContent = Math.floor(v.offset / v.limit) + 1 + ' / ' + Math.max(1, Math.ceil(v.total / v.limit));
-  $('#mainCrawlPrev').disabled = v.loading || v.offset === 0; $('#mainCrawlNext').disabled = v.loading || v.offset + v.limit >= v.total;
 }
-$('#mainCrawlResults').addEventListener('click', event => {
-  const button = event.target.closest('[data-main-action]');
-  if (button) mainCrawlAction(button.dataset.mainId, button.dataset.mainAction);
-});
-window.addEventListener('DOMContentLoaded', () => { syncMainSearchControls(); if (mainSearchAvailable() && query && mainSearchMode() !== 'ai') loadMainCrawlResults(); });
-window.addEventListener('popstate', () => { resetMainSearch(); if (mainSearchAvailable() && query && mainSearchMode() !== 'ai') loadMainCrawlResults(); });
+window.addEventListener('DOMContentLoaded', syncMainSearchControls);
+window.addEventListener('popstate', () => resetMainSearch());

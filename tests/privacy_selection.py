@@ -64,7 +64,8 @@ class PrivacySelectionTests(unittest.TestCase):
         self.assertEqual(self.jobs(headers=self.headers)['jobs'], [])
         self.tokens[self.token]['reveal'] = True
         self.tokens[self.token]['expires'] = 0
-        self.assertEqual(self.jobs(headers=self.headers)['jobs'], [])
+        self.assertEqual(self.client.get('/api/jobs', headers=self.headers).status_code, 403)
+        self.assertEqual(self.jobs()['jobs'], [])
         self.assertEqual(self.select([hidden], False).status_code, 403)
         self.assertEqual(self.prefs()['ids'], [hidden])
 

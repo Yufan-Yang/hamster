@@ -5,20 +5,26 @@ function playerSeriesCurrent(s) {
 }
 function stopPlayerSeries() {
   ++playerSeriesEpoch;
-  if (playerSeries) { playerSeries.controller?.abort(); playerSeries.scopeController?.abort(); clearTimeout(playerSeries.timer); clearInterval(playerSeries.poll); }
+  if (playerSeries) {
+    playerSeries.controller?.abort(); playerSeries.scopeController?.abort(); clearTimeout(playerSeries.timer); clearInterval(playerSeries.poll);
+    playerSeries.coverObserver?.disconnect();
+    playerSeries.coverRequests?.forEach(controller => controller.abort());
+    playerSeries.covers?.forEach(url => { if (url) URL.revokeObjectURL(url); });
+  }
   playerSeries = null;
   const box = $('#playerSeries'); if (box) { box.innerHTML = ''; box.hidden = true; }
   $('#watchBody')?.classList.remove('with-player-series');
   $('#watchLayout')?.classList.remove('with-series');
 }
 function setupPlayerSeries(job) {
-  const name = seriesOf(job), key = name.toLocaleLowerCase('zh-CN').replace(/[\s·:：\-_]/g, '');
+  const name = seriesOf(job), key = job.series_key || name.toLocaleLowerCase('zh-CN').replace(/[\s·:：\-_]/g, '');
   if (!key) { stopPlayerSeries(); return; }
   const previous = playerSeries;
   if (!previous || !playerSeriesCurrent(previous) || previous.key !== key || previous.sort !== videoSort) {
     stopPlayerSeries();
     playerSeries = {epoch:playerSeriesEpoch, owner:storageOwner, privacy:typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch,
-      id:job.id, key, name, sort:videoSort, q:'', items:[], total:0, next:0, more:false, loading:true, error:'', queryEpoch:0, focusActive:true};
+      id:job.id, key, name, sort:videoSort, q:'', items:[], total:0, next:0, more:false, loading:true, error:'', queryEpoch:0, focusActive:true,
+      covers:new Map(), coverRequests:new Map(), coverQueue:new Set()};
     const fresh = playerSeries; fresh.poll = setInterval(() => validatePlayerSeries(fresh), 30000);
   } else playerSeries.id = job.id;
   const s = playerSeries, box = $('#playerSeries'); if (!box) return;
@@ -44,7 +50,7 @@ function renderPlayerSeries() {
       ? `${season === 0 ? '特别篇 ' : season > 1 ? '第 ' + season + ' 季 · ' : ''}第 ${episode} 集 · ` : '';
     const status = pending ? '加载中…' : active ? '正在播放' : !item.playable ? '尚不可播放' : item.watched ? '已看完' : '播放';
     return `<div role="listitem"><button class="player-series-item${active ? ' active' : ''}" data-series-job="${item.id}" aria-current="${active ? 'true' : 'false'}"
-      ${!item.playable || pending ? 'disabled' : ''} onclick="playSeriesVideo(${item.id})"><span>${esc(item.title)}</span><small>${esc(label + status)}</small></button></div>`;
+      ${!item.playable || pending ? 'disabled' : ''} onclick="playSeriesVideo(${item.id})"><span class="player-series-cover" data-series-cover="${item.id}"${item.thumb ? ' data-has-cover="1"' : ''}>${s.covers.get(item.id) ? `<img src="${esc(s.covers.get(item.id))}" alt="">` : '<span>暂无封面</span>'}</span><span class="player-series-text"><span>${esc(item.title)}</span><small>${esc(label + status)}</small></span></button></div>`;
   }).join('') || (!s.loading ? '<p class="hint">没有匹配的分集</p>' : '');
   list.scrollTop = scroll;
   if (s.focusActive && s.items.length) {
@@ -54,6 +60,42 @@ function renderPlayerSeries() {
   }
   s.scroll = list.scrollTop;
   $('#playerSeriesMore').hidden = !s.more; $('#playerSeriesMore').disabled = s.loading;
+  observePlayerSeriesCovers(s, list);
+}
+function observePlayerSeriesCovers(s, list) {
+  s.coverObserver?.disconnect();
+  if (typeof IntersectionObserver === 'undefined' || !list.querySelectorAll) return;
+  s.coverObserver = new IntersectionObserver(entries => {
+    if (!playerSeriesCurrent(s)) return;
+    for (const entry of entries) if (entry.isIntersecting) {
+      s.coverObserver.unobserve(entry.target);
+      const id = Number(entry.target.dataset.seriesCover);
+      if (!s.covers.has(id) && !s.coverRequests.has(id)) s.coverQueue.add(id);
+    }
+    pumpPlayerSeriesCovers(s);
+  }, {root:list, rootMargin:'80px'});
+  list.querySelectorAll('[data-has-cover]').forEach(node => s.coverObserver.observe(node));
+}
+function pumpPlayerSeriesCovers(s) {
+  if (!playerSeriesCurrent(s)) return;
+  while (s.coverRequests.size < 2 && s.coverQueue.size) {
+    const id = s.coverQueue.values().next().value; s.coverQueue.delete(id);
+    if (s.covers.has(id) || !s.items.some(item => item.id === id)) continue;
+    const controller = new AbortController(); s.coverRequests.set(id, controller);
+    fetch(`/api/series/${id}/cover`, {signal:controller.signal}).then(async response => {
+      if (!playerSeriesCurrent(s)) return;
+      if (response.status === 403) { stopPlayerSeries(); return; }
+      if (!response.ok || !(response.headers.get('Content-Type') || '').startsWith('image/')) { s.covers.set(id, ''); return; }
+      const blob = await response.blob(); if (!playerSeriesCurrent(s)) return;
+      const url = URL.createObjectURL(blob); s.covers.set(id, url);
+      const node = $('#playerSeriesList')?.querySelector(`[data-series-cover="${id}"]`);
+      if (node) node.innerHTML = `<img src="${esc(url)}" alt="">`;
+      if (s.covers.size > 200) {
+        const oldest = s.covers.keys().next().value, oldURL = s.covers.get(oldest);
+        if (oldURL) URL.revokeObjectURL(oldURL); s.covers.delete(oldest);
+      }
+    }).catch(() => {}).finally(() => { s.coverRequests.delete(id); pumpPlayerSeriesCovers(s); });
+  }
 }
 async function loadPlayerSeries(offset = 0) {
   const s = playerSeries; if (!s || !playerSeriesCurrent(s)) return;

@@ -19,6 +19,20 @@ class SourceTests(unittest.TestCase):
     item = fixtures.HomeSearchTests.item
     job = fixtures.HomeSearchTests.job
 
+    def test_already_watched_discoveries_do_not_remind_and_new_completion_marks_read(self):
+        sid = self.subscription()
+        old = self.job('user:alice', 'Already watched')
+        fresh = self.job('user:alice', 'New episode')
+        for jid in (old, fresh):
+            core.q('UPDATE jobs SET created=?,source=? WHERE id=?', (time.time() + 1, f'sub:{sid}', jid))
+            sources.record_sub(sid, jid, {'url': core.q('SELECT url FROM jobs WHERE id=?', (jid,), one=True)['url']})
+        core.q('INSERT INTO watch(owner,job_id,part,pos,dur,done,updated) VALUES(?,?,0,100,100,1,?)', ('user:alice', old, time.time()))
+        self.assertEqual([item['job_id'] for item in self.inbox()['items']], [fresh])
+        response = self.alice.post(f'/api/watch/{fresh}', json={'pos':100, 'dur':100, 'part':0, 'ended':True, 'secs':0})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.inbox()['total'], 0)
+        self.assertEqual({item['state'] for item in self.inbox(state='all')['items']}, {'read'})
+
     def discover(self, cid=None, title='New lesson', old=False, url=None):
         cid = self.a if cid is None else cid
         source = core.q('SELECT * FROM crawls WHERE id=?', (cid,), one=True)
@@ -252,8 +266,8 @@ class SourceTests(unittest.TestCase):
         self.incremental(); self.discover()
         ident = self.inbox()['items'][0]['id']
         original = sources._snapshot
-        def revoked(owner, reveal):
-            result = original(owner, reveal)
+        def revoked(owner, reveal, **kwargs):
+            result = original(owner, reveal, **kwargs)
             web.privacy_tokens.pop('show', None)
             return result
         for endpoint in ('/api/sources', '/api/inbox', '/api/inbox/action', '/api/inbox/import'):

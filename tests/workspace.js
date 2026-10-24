@@ -30,8 +30,8 @@ const page = pageContext({
 });
 vm.runInContext(html.slice(html.indexOf("function renderChips("), html.indexOf("\nfunction card(")), page);
 page.renderChips();
-assert.equal((page.$("#workspaceNav").innerHTML.match(/<button/g) || []).length, 6);
-assert.ok(page.$("#workspaceNav").innerHTML.includes('onclick="openSources()"'));
+assert.equal((page.$("#workspaceNav").innerHTML.match(/<button/g) || []).length, 5);
+assert.ok(!page.$("#workspaceNav").innerHTML.includes('onclick="openSources()"'));
 assert.ok(!page.$("#workspaceNav").innerHTML.includes("电影"));
 assert.ok(page.$("#chips").innerHTML.includes("电影"));
 assert.ok(!page.$("#chips").innerHTML.includes("setVideoSort"));

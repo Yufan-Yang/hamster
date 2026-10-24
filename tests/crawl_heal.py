@@ -15,7 +15,11 @@ from shiguang import core, crawl, heal, web
 
 
 class CrawlHealTests(unittest.TestCase):
-    setUp = backend.BackendReliability.setUp
+    def setUp(self):
+        backend.BackendReliability.setUp(self)
+        enabled = patch.dict(core.app.config, DIRECTORY_COLLECTION_ENABLED=True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
 
     def collection(self, status='failed', owner=None, classification='general'):
         owner = owner or self.owner

@@ -4,7 +4,10 @@
 .player-series-head b { overflow-wrap: anywhere; }
 #playerSeriesQuery { width: 100%; min-width: 0; box-sizing: border-box; margin-bottom: 8px; }
 .player-series-list { position: relative; overflow-y: auto; max-height: 260px; overscroll-behavior: contain; }
-.player-series-item { width: 100%; display: block; text-align: left; padding: 9px; min-height: 56px; border: 1px solid var(--ink); background: var(--bg); margin: 0 0 6px; cursor: pointer; overflow-wrap: anywhere; }
+.player-series-item { width: 100%; display: flex; align-items: center; gap: 9px; text-align: left; padding: 9px; min-height: 56px; border: 1px solid var(--ink); background: var(--bg); margin: 0 0 6px; cursor: pointer; overflow-wrap: anywhere; }
+.player-series-item .player-series-cover { display:flex; align-items:center; justify-content:center; flex:0 0 84px; width:84px; height:48px; background:var(--soft); font-size:11px; color:var(--muted); }
+.player-series-cover img { width:100%; height:100%; object-fit:cover; }
+.player-series-item .player-series-text { display:block; min-width:0; flex:1; }
 .player-series-item span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .player-series-item small { display: block; margin-top: 4px; color: var(--muted); }
 .player-series-item.active { border: 2px solid var(--accent); background: var(--soft); }

@@ -22,7 +22,7 @@ class CrawlTests(unittest.TestCase):
             p = patch.object(target, name, value)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.dict(core.app.config, TESTING=True, SECRET_KEY='crawl-test')
+        p = patch.dict(core.app.config, TESTING=True, SECRET_KEY='crawl-test', DIRECTORY_COLLECTION_ENABLED=True)
         p.start()
         self.addCleanup(p.stop)
         core.init_db()

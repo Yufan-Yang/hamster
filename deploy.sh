@@ -67,8 +67,9 @@ node --check static/sources.js
 node --check static/ai_activity.js
 node --check static/intro.js
 node --check static/player_series.js
-for test in workspace live_interactions live_recordings series crawl_ui trash_ui privacy_ui main_search_ui search_evidence_ui saved_search_ui sources_ui ai_activity_ui download_retry_ui intro_ui player_series_ui; do node "tests/$test.js"; done
-for test in backend_reliability intelligence live_assistant live_finalization live_review live_result task_lifecycle television device_routes cast_protocol crawl crawl_extract crawl_duration crawl_search crawl_refresh crawl_network crawl_source crawl_sources crawl_home_search library_search search_index crawl_result_privacy crawl_metadata_privacy crawl_management crawl_health saved_search sources ai_activity intro player_series download_retry_api crawl_retry crawl_heal trash trash_review trash_privacy trash_source trash_performance privacy_selection report_privacy; do
+node --check static/library_updates.js
+for test in workspace live_interactions live_recordings series trash_ui privacy_ui main_search_ui search_evidence_ui saved_search_ui sources_ui ai_activity_ui download_retry_ui intro_ui player_series_ui library_updates_ui; do node "tests/$test.js"; done
+for test in backend_reliability intelligence live_assistant live_finalization live_review live_result task_lifecycle television device_routes cast_protocol directory_retired retirement_trash native_series crawl crawl_extract crawl_duration crawl_search crawl_refresh crawl_network crawl_source crawl_sources crawl_home_search library_search search_index crawl_result_privacy crawl_metadata_privacy crawl_management crawl_health saved_search sources ai_activity intro player_series download_retry_api crawl_retry crawl_heal trash trash_review trash_privacy trash_source trash_performance privacy_modes privacy_selection report_privacy; do
   sudo -u grabber "$APP/venv/bin/python" "tests/$test.py"
 done
 sudo -u grabber "$APP/venv/bin/python" tests/devices_browser.py

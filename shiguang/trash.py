@@ -6,7 +6,7 @@ import time
 import traceback
 from pathlib import Path
 
-from flask import g, jsonify
+from flask import g, jsonify, request
 
 from . import core
 from .core import AUDIO_EXT, MEDIA, SUB_EXT, VIDEO_EXT, app, db_lock, q
@@ -81,6 +81,40 @@ def move_owner(old, new):
         q('UPDATE job_trash SET owner=? WHERE owner=?', (new, old))
 
 
+def snapshot_private(db, owner, job_id, snapshot):
+    """Keep per-entry privacy independent of an archived/reused database ID.
+
+    Tags remain governed by the current account preferences; this flag captures
+    an explicit hidden choice or inherited source classification.
+    """
+    if type(snapshot.get('_trash_private')) is bool:
+        return snapshot['_trash_private']
+    prefs = db.execute('SELECT ids FROM privacy WHERE owner=?', (owner,)).fetchone()
+    if prefs and job_id in _json(prefs['ids'], []):
+        return True
+    keys = snapshot.get('_trash_source_keys')
+    if not isinstance(keys, list):
+        keys = [row['url_key'] for row in db.execute('SELECT url_key FROM crawl_source_jobs WHERE owner=? AND job_id=?',
+                                                    (owner, job_id))]
+    if keys:
+        return not db.execute("SELECT 1 FROM crawl_sources WHERE owner=? AND classification='general' "
+                              'AND url_key IN (SELECT value FROM json_each(?)) LIMIT 1', (owner, json.dumps(keys))).fetchone()
+    source = str(snapshot.get('source') or '')
+    if source.startswith('crawl:'):
+        row = db.execute('SELECT source_classification FROM crawls WHERE owner=? AND id=?', (owner, source[6:])).fetchone()
+        return not row or row['source_classification'] != 'general'
+    return False
+
+
+def _manual_ids(db, owner, *, add=(), remove=()):
+    prefs = db.execute('SELECT ids FROM privacy WHERE owner=?', (owner,)).fetchone()
+    before = set(_json(prefs['ids'], [])) if prefs else set()
+    ids = (before - set(remove)) | set(add)
+    if ids != before:
+        db.execute("INSERT INTO privacy(owner,tags,ids) VALUES(?,'[]',?) ON CONFLICT(owner) DO UPDATE SET ids=excluded.ids",
+                   (owner, json.dumps(sorted(ids))))
+
+
 def trash_job(jid, actor=None):
     """Atomically save the complete row before it leaves the active library."""
     with db_lock:
@@ -105,9 +139,17 @@ def trash_job(jid, actor=None):
             context = db.execute('SELECT context FROM crawl_downloads WHERE job_id=?', (jid,)).fetchone()
             if context:
                 snapshot['_trash_download_context'] = context['context']
+            snapshot['_trash_private'] = snapshot_private(db, owner, jid, snapshot)
+            # Older archived entries may share this ID. Capture their own flag
+            # before removing a now-dangling explicit ID preference.
+            for previous in db.execute('SELECT id,snapshot FROM job_trash WHERE owner=? AND job_id=?', (owner, jid)).fetchall():
+                saved = _json(previous['snapshot'], {})
+                saved['_trash_private'] = snapshot_private(db, owner, jid, saved)
+                db.execute('UPDATE job_trash SET snapshot=? WHERE id=?', (json.dumps(saved), previous['id']))
             db.execute('INSERT INTO job_trash (owner, job_id, snapshot, deleted_at) VALUES (?,?,?,?)',
                        (owner, jid, json.dumps(snapshot, ensure_ascii=False), time.time()))
             db.execute('DELETE FROM jobs WHERE id=?', (jid,))
+            _manual_ids(db, owner, remove=(jid,))
             db.execute('UPDATE jobs SET ref=NULL WHERE ref=?', (jid,))
             db.execute('UPDATE shares SET revoked=1 WHERE job_id=?', (jid,))
             db.execute('DELETE FROM tasks WHERE target=? OR target LIKE ?', (f'job:{jid}', f'job:{jid}:%'))
@@ -133,6 +175,7 @@ def restore(trash_id, owner):
         try:
             entry = _owned(db, trash_id, owner)
             snapshot = _json(entry['snapshot'], {})
+            private = snapshot_private(db, owner, entry['job_id'], snapshot)
             if not snapshot.get('url'):
                 raise ValueError('回收站记录不完整')
             fields = {row[1] for row in db.execute('PRAGMA table_info(jobs)').fetchall()}
@@ -161,6 +204,7 @@ def restore(trash_id, owner):
             cur = db.execute('INSERT INTO jobs (' + ','.join(columns) + ') VALUES (' + ','.join('?' for _ in columns) + ')',
                              tuple(row[key] for key in columns))
             jid = cur.lastrowid
+            _manual_ids(db, owner, add=(jid,) if private else (), remove=() if private else (jid,))
             if old_id and old_id != jid:
                 db.execute('UPDATE OR IGNORE watch SET job_id=? WHERE job_id=? AND owner=?', (jid, old_id, owner))
                 indexes = snapshot.get('_trash_index_ids') or {}
@@ -357,16 +401,31 @@ def _privacy_prefs():
     # Archived jobs no longer participate in web.hidden_ids(). Check their saved
     # metadata against the current owner's settings, including token expiry.
     from . import web
-    if web.revealed():
-        return None
     prefs = web.privacy_get(g.owner)
-    return {**prefs, 'ids': set(prefs['ids'])}
+    return {**prefs, 'ids': set(prefs['ids']), 'private_view': web.revealed()}
 
 
 def _hidden_snapshot(job_id, snapshot, prefs):
     from . import web
-    return bool(prefs is not None and (job_id in prefs['ids'] or job_id in web.source_hidden_ids() or
-                web.hides_tags(_json(snapshot.get('analysis'), {}).get('tags'), prefs)))
+    flag = snapshot.get('_trash_private')
+    private = flag if type(flag) is bool else job_id in prefs['ids'] or job_id in web.source_hidden_ids()
+    private = private or web.hides_tags(_json(snapshot.get('analysis'), {}).get('tags'), prefs)
+    return bool(private) != prefs['private_view']
+
+
+@app.before_request
+def trash_permission():
+    if request.path == '/api/trash' or request.path.startswith('/api/trash/'):
+        from . import web
+        if request.headers.get('X-Privacy-Token') and not web.privacy_token():
+            return jsonify(error='隐私权限已失效，请重新解锁'), 403, {'Cache-Control': 'no-store'}
+
+
+@app.after_request
+def trash_response(response):
+    if request.path == '/api/trash' or request.path.startswith('/api/trash/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 def _require_visible(trash_id):

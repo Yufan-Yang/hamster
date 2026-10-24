@@ -433,7 +433,7 @@ def api_intro(jid):
                 _pool.submit(_analyze, key, owner, job, part, path, signature, peers)
                 active = True
             result = {'status': 'pending' if active else 'busy' if full else 'unknown'}
-    for field in ('hidden_ids', 'source_hidden_ids', 'tag_aliases'):
+    for field in ('hidden_ids', 'privacy_job_ids', 'source_hidden_ids', 'tag_aliases'):
         g.pop(field, None)
     try:
         unchanged = file_key(path) == signature

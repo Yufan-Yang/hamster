@@ -145,6 +145,11 @@ def _guard(owner, reveal, db=None):
     snapshot = g.get('source_access_stamp')
     if snapshot is not None and snapshot != (owner, _source_stamp(owner, db), _privacy_stamp(owner, db)):
         raise PermissionError('来源或隐私权限已变化，请刷新后重试')
+    if db is None and 'source_job_visibility' in g:
+        for key in ('hidden_ids', 'privacy_job_ids', 'source_hidden_ids', 'tag_aliases'):
+            g.pop(key, None)
+        if web.hidden_ids() != g.source_job_visibility:
+            raise PermissionError('内容的隐私范围已变化，请刷新后重试')
 
 
 def _reply(**values):
@@ -171,13 +176,14 @@ def _source_stamp(owner, db=None):
     return (tuple(tuple(row) for row in crawls), tuple(tuple(row) for row in subs))
 
 
-def _snapshot(owner, reveal):
+def _snapshot(owner, reveal, *, unread_only=False, ids=None):
     from . import channels, crawl
     from .crawl_source import known_adult
     stamp = _privacy_stamp(owner)
     g.source_access_stamp = (owner, _source_stamp(owner), stamp)
-    hidden = set() if reveal else crawl._hidden_collected_job_ids(owner)
-    hidden_subs = set() if reveal else web.hidden_subs(hidden)
+    hidden = web.hidden_ids()
+    g.source_job_visibility = hidden
+    hidden_subs = web.hidden_subs(hidden)
     sources, crawl_rows, sub_rows = {}, {}, {}
     for row in q('SELECT * FROM crawls WHERE owner=?', (owner,)):
         if not crawl.source_visible(row, reveal):
@@ -188,7 +194,7 @@ def _snapshot(owner, reveal):
                         'url': row['url'], 'status': row['status'], 'unread': 0, 'found': 0,
                         'last_checked': row['last_refresh'], 'next_refresh': row['next_refresh']}
     for row in q('SELECT * FROM subs WHERE owner=?', (owner,)):
-        if not reveal and (row['id'] in hidden_subs or row['platform'] in channels.ADULT_PLATFORMS or known_adult(row['url'])):
+        if row['id'] in hidden_subs or not reveal and (row['platform'] in channels.ADULT_PLATFORMS or known_adult(row['url'])):
             continue
         key = f"sub:{row['id']}"
         sub_rows[row['id']] = row
@@ -196,11 +202,25 @@ def _snapshot(owner, reveal):
                         'url': row['url'], 'status': 'failed' if row['error'] else 'queued' if row['checked'] is None else 'done',
                         'unread': 0, 'found': 0, 'last_checked': row['checked'],
                         'next_refresh': (row['checked'] or time.time()) + (channels.SUB_RETRY if row['error'] else channels.SUB_INTERVAL)}
-    jobs = {row['id']: row for row in q('SELECT id,title,url,analysis,status,source FROM jobs WHERE owner=?', (owner,)) if row['id'] not in hidden}
-    all_crawled = {row['id']: row for row in q('SELECT id,title,url,page_url,job_id FROM crawl_items WHERE owner=?', (owner,))}
+    # The library reminder only needs incremental discoveries, not every archived
+    # page or every video's full transcript. Keep the detailed management view separate.
+    narrow = unread_only or ids is not None
+    rows = q('SELECT i.id,i.state,i.created,i.updated,l.source_kind,l.source_id,l.source_key,l.content_kind,l.content_id '
+             'FROM source_inbox i JOIN source_inbox_links l ON l.item_id=i.id WHERE i.owner=? '
+             + ("AND i.state='unread' " if unread_only else '')
+             + ('AND i.id IN (SELECT value FROM json_each(?)) ' if ids is not None else '')
+             + 'ORDER BY i.created DESC,i.id DESC', (owner, json.dumps(sorted(ids))) if ids is not None else (owner,))
+    crawl_ids = [row['content_id'] for row in rows if row['content_kind'] == 'crawl']
+    crawl_filter = ' AND id IN (SELECT value FROM json_each(?))' if narrow else ''
+    all_crawled = {row['id']: row for row in q('SELECT id,title,url,page_url,job_id FROM crawl_items WHERE owner=?' + crawl_filter,
+                                              (owner, json.dumps(crawl_ids)) if narrow else (owner,))}
+    job_ids = [row['content_id'] for row in rows if row['content_kind'] == 'job'] + [row['job_id'] for row in all_crawled.values() if row['job_id']]
+    jobs = {row['id']: row for row in q('SELECT id,title,url,analysis,status,source FROM jobs WHERE owner=?' + crawl_filter,
+                                       (owner, json.dumps(job_ids)) if narrow else (owner,)) if row['id'] not in hidden}
     crawled = {iid: row for iid, row in all_crawled.items() if row['job_id'] not in hidden}
     membership = {(r['crawl_id'], r['item_id']) for r in q('SELECT r.crawl_id,r.item_id FROM crawl_results r '
-                   'JOIN crawls c ON c.id=r.crawl_id WHERE c.owner=?', (owner,))}
+                   'JOIN crawls c ON c.id=r.crawl_id WHERE c.owner=?' + (' AND r.item_id IN (SELECT value FROM json_each(?))' if narrow else ''),
+                   (owner, json.dumps(crawl_ids)) if narrow else (owner,))}
     for cid, iid in membership:
         if cid in crawl_rows and iid in crawled:
             sources[f'crawl:{cid}']['found'] += 1
@@ -208,9 +228,7 @@ def _snapshot(owner, reveal):
         if str(job['source']).startswith('sub:') and job['source'] in sources:
             sources[job['source']]['found'] += 1
     found = {}
-    rows = q('SELECT i.id,i.state,i.created,i.updated,l.source_kind,l.source_id,l.source_key,l.content_kind,l.content_id '
-             'FROM source_inbox i JOIN source_inbox_links l ON l.item_id=i.id WHERE i.owner=? '
-             'ORDER BY i.created DESC,i.id DESC', (owner,))
+    watched = {row['job_id'] for row in q('SELECT job_id FROM watch WHERE owner=? AND done=1', (owner,))}
     blocked = {row['id'] for row in rows if (row['content_kind'] == 'job' and row['content_id'] in hidden) or
                (row['content_kind'] == 'crawl' and row['content_id'] in all_crawled and all_crawled[row['content_id']]['job_id'] in hidden)}
     for row in rows:
@@ -239,8 +257,6 @@ def _snapshot(owner, reveal):
         item = found[row['id']]
         if not any(entry['key'] == key for entry in item['sources']):
             item['sources'].append({field: sources[key][field] for field in ('key', 'type', 'id', 'title', 'url')})
-            if item['state'] == 'unread':
-                sources[key]['unread'] += 1
         if job:
             item['job_id'], item['job_status'] = job['id'], job['status']
         if row['content_kind'] == 'crawl' and not job:
@@ -251,6 +267,11 @@ def _snapshot(owner, reveal):
     for item in found.values():
         if item['job_id']:
             item['can_download'] = False
+        if item['state'] == 'unread' and item['job_id'] in watched:
+            item['state'] = 'read'
+        if item['state'] == 'unread':
+            for source in item['sources']:
+                sources[source['key']]['unread'] += 1
     if stamp != _privacy_stamp(owner):
         raise PermissionError('隐私设置已变化，请刷新后重试')
     _guard(owner, reveal)
@@ -289,7 +310,7 @@ def api_inbox():
         offset, limit = _page('offset', 0, 1_000_000_000), _page('limit', 50, 100)
         if not limit:
             raise ValueError('分页数量至少为 1')
-        _, items = _snapshot(owner, reveal)
+        _, items = _snapshot(owner, reveal, unread_only=state == 'unread')
         unread = sum(item['state'] == 'unread' for item in items)
         source = request.args.get('source')
         filtered = [item for item in items if (state == 'all' or item['state'] == state)
@@ -308,7 +329,7 @@ def _selected(body, owner, reveal):
     if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int or i < 1 for i in ids):
         raise ValueError('请选择 1–100 条内容')
     wanted = set(ids)
-    _, items = _snapshot(owner, reveal)
+    _, items = _snapshot(owner, reveal, ids=wanted)
     selected = [item for item in items if item['id'] in wanted]
     if len(selected) != len(wanted):
         raise ValueError('部分内容已移除或不可见，请刷新后重试')
