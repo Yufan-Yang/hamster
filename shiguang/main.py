@@ -3,7 +3,7 @@ import threading
 import time
 import os
 
-from . import migrations, board, channels, heal, library, live_calibration, live_editorial, live_recorder, pipeline, search, telegram, usage, web
+from . import migrations, board, channels, crawl, heal, library, live_calibration, live_editorial, live_recorder, pipeline, search, telegram, trash, usage, web
 from .core import (DOWNLOAD_WORKERS, EXTERNAL_PORT, INCOMPLETE, NOTE_MAX_UPLOAD, PORT, TG_TOKEN, app, finishing_threads, init_db, listen_bell)
 
 
@@ -13,6 +13,8 @@ def main_web():
     listen_bell("web")
     web.ensure_admin()
     heal.db_watch("web")
+    from . import search_index
+    search_index.start_background()
     threading.Thread(target=library.warm_probes, daemon=True).start()
     threading.Thread(target=live_calibration.progress_cache_loop, daemon=True).start()
     if (search.CLIP_DIR / "text.onnx").exists():
@@ -29,10 +31,14 @@ def main_worker():
     listen_bell("worker")
     INCOMPLETE.mkdir(parents=True, exist_ok=True)
     heal.db_watch("worker")
+    from . import search_index
+    search_index.start_background()
     for _ in range(DOWNLOAD_WORKERS):
         threading.Thread(target=pipeline.worker_loop, daemon=True).start()
     threading.Thread(target=pipeline.sweep_loop, daemon=True).start()
     threading.Thread(target=channels.sub_loop, daemon=True).start()
+    threading.Thread(target=crawl.worker_loop, daemon=True).start()
+    threading.Thread(target=trash.cleanup_loop, daemon=True).start()
     threading.Thread(target=board.now_loop, daemon=True).start()
     migrations.run_once_jobs()  # data jobs after an upgrade (each once)
     board.publish_pending_notes()

@@ -1,0 +1,26 @@
+.saved-search-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 2px 0 10px; }
+.saved-search-tools .link { min-height: 32px; }
+.saved-search-sheet { width: min(620px,100%); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; padding: 18px 20px; }
+.saved-search-heading { display: flex; align-items: center; gap: 16px; }
+.saved-search-heading h2 { flex: 1; margin: 0; }
+.saved-search-scroll { overflow-y: auto; min-height: 0; padding-right: 3px; }
+.saved-search-form { border: 1px solid var(--soft); background: var(--bg); padding: 12px; margin: 12px 0; }
+.saved-search-form h3 { font-size: 14px; font-weight: normal; margin: 0 0 10px; }
+.saved-search-form label { display: flex; flex-direction: column; gap: 6px; }
+.saved-search-form input { width: 100%; min-width: 0; height: 38px; border: 2px solid var(--ink); background: var(--panel); color: var(--ink); padding: 0 8px; font: inherit; }
+.saved-search-actions, .saved-search-item-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.saved-search-actions { margin-top: 10px; }
+.saved-search-count-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 12px 0; }
+.saved-search-count-row span { flex: 1; color: var(--muted); }
+.saved-search-item { border-top: 1px solid var(--soft); padding: 12px 0; min-width: 0; }
+.saved-search-item-heading { display: flex; align-items: start; flex-wrap: wrap; gap: 6px 12px; }
+.saved-search-use { text-align: left; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.saved-search-item-heading span { color: var(--muted); }
+.saved-search-query { color: var(--muted); margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.saved-search-item-actions .link, .saved-search-heading .link { min-height: 32px; }
+.saved-search-more { margin: 10px auto; display: block; }
+@media (max-width: 640px) {
+  #savedSearchSheet { padding: 8px; }
+  .saved-search-sheet { max-height: calc(100dvh - 16px); padding: 14px 12px; }
+  .saved-search-actions .btn { flex: 1; }
+}

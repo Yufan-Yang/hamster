@@ -433,6 +433,8 @@ def check_sub(sub_id, everything=False):
             update(jid, title=e["title"])  # the list already has the title: show it while the video waits
         if how == "new" and (wide or everything):
             update(jid, backfill=1)  # older videos: their subtitles are made in idle time
+        from . import sources
+        sources.record_sub(sub_id, jid, e, baseline=wide or everything)
     seen = (seen + [link_key(e["url"]) for e in reversed(new)])[-SUB_SEEN_MAX:]
     avatar = sub["avatar"] or ""
     if res["avatar"] and not (AVATARS / f"{sub_id}.jpg").exists():

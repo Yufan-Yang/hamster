@@ -46,6 +46,27 @@ assert.equal(items[2].group.name, "三国杀up锐评新三国re");
 assert.equal(items[2].group.jobs.length, 2);
 assert.equal(items[3].j.title, "新三国up锐评老三国23：正文");
 
+// Exercise the actual selected-order comparators and rendered series, including
+// conflicting episode metadata that previously moved episode 23 to the front.
+context.esc = String;
+context.openSeries = new Set();
+context.card = j => `<video-card data-id="${j.id}"></video-card>`;
+vm.runInContext(html.slice(html.indexOf('function seriesCard('), html.indexOf('function phone(')), context);
+const sortCode = html.slice(html.indexOf('  const videoSorts = {'), html.indexOf('  shown = jobs;'));
+vm.runInContext('function orderedSeries(input, videoSort) { const jobs = [...input], query = ""; ' + sortCode +
+  ' return seriesCard(seriesItems(jobs)[0].group); }', context);
+const sequence = [
+  {id: 23, created: 300, ...job('新三国up锐评老三国23：正文', {episode: 1, published: '2026-10-02'})},
+  {id: 1, created: 100, ...job('新三国up锐评老三国1：正文', {published: '2026-10-01'})},
+  {id: 24, created: 400, ...job('新三国up锐评老三国24：正文', {season: 0, published: '2026-10-04'})},
+  {id: 2, created: 200, ...job('新三国up锐评老三国2：正文', {published: '2026-10-03'})},
+];
+const renderedIds = mode => [...context.orderedSeries(sequence, mode).matchAll(/data-id="(\d+)"/g)].map(m => +m[1]);
+assert.deepEqual(renderedIds('added'), [24, 23, 2, 1]);
+assert.deepEqual(renderedIds('published'), [24, 2, 23, 1]);
+assert.deepEqual(sequence.map(j => j.id), [23, 1, 24, 2]);
+console.log('Series cards preserve the selected added/published order despite conflicting episode metadata.');
+
 if (process.argv[2]) {
   const jobs = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   for (const j of jobs) if (typeof j.expected_series === "string") {

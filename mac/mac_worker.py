@@ -64,7 +64,7 @@ AI_LOOPS = 2
 AI_EXTRA = 2  # more loops, only while LLM_BACKLOG or more AI requests are waiting
 LLM_BACKLOG = 6
 CODEX = Path(os.environ.get("CODEX_BIN") or shutil.which("codex") or "/usr/local/Homebrew/bin/codex")
-CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-6.1-sol")  # empty: the account's default model
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-6-luna")  # empty: the account's default model
 DROP = Path.home() / "拾光投递"  # files put here become 随记 (photos, videos, sound; .txt/.md as text), e-books go on the 书架
 DROPPED = DROP / "已投递"
 CONFIG = HERE / "config.json"  # {"account": "yufan"}: whose 随记 / 书架 the drop folder fills
@@ -452,6 +452,10 @@ class UsageLimit(Exception):
         self.until = until
 
 
+class TransientCodexError(RuntimeError):
+    """The request can be retried without treating the account as out of quota."""
+
+
 def proxy_env():
     """Use the router unless config.json explicitly selects an application proxy."""
     config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
@@ -517,12 +521,20 @@ def ask_codex(p, beat, *, cwd=None, timeout=300, model=None):
             text = ev["item"].get("text")
         elif ev.get("type") == "turn.completed":
             usage = ev.get("usage") or {}
+            error = None  # The CLI may recover a disconnected stream before completing.
         elif ev.get("type") in ("error", "turn.failed"):
-            error = str(ev.get("message") or (ev.get("error") or {}).get("message") or ev)
+            detail = ev.get("error") if isinstance(ev.get("error"), dict) else {}
+            message = ev.get("message") or detail.get("message") or ev
+            error = f"{detail.get('code') or ev.get('code') or ''} {message}".strip()
     if code != 0 or error or text is None:
         error = error or (stderr or stdout).strip()[-300:] or f"exit {code}"
-        if re.search(r"usage limit|rate limit|429|quota", error, re.I):
+        if re.search(r"usage[ _-]?limit|insufficient[ _-]?quota|quota.{0,30}(?:exhausted|exceeded|used up|depleted)|"
+                     r"(?:exceeded|exhausted).{0,30}quota", error, re.I):
             raise UsageLimit(f"codex: {error[:200]}", time.time() + 1800)
+        if re.search(r"\b(?:429|500|502|503|504)\b|rate[ _-]?limit|too many (?:requests|concurrent)|"
+                     r"connection|network|transport|stream.{0,40}(?:disconnect|closed)|timed? out|temporar|overloaded",
+                     error, re.I):
+            raise TransientCodexError(f"codex: {error[:300]}")
         raise RuntimeError(f"codex: {error[:300]}")
     answer = json.loads(re.sub(r"^```(json)?|```$", "", text.strip()))
     if not isinstance(answer, dict):
@@ -532,21 +544,53 @@ def ask_codex(p, beat, *, cwd=None, timeout=300, model=None):
             "tokens_out": (usage.get("output_tokens") or 0), "seconds": round(time.time() - started, 1)}
 
 
-def answer_llm(p, beat, limits):
+def answer_llm(p, beat, limits, activity=None):
     """Ask Codex unless its quota is exhausted; failures go back to the Pi for DeepSeek."""
     errors = []
+    deadline = time.monotonic() + 300
+    if activity is not None:
+        activity.update(model=CODEX_MODEL or None, retries=0, failure_code='worker_unavailable')
+        route_started = time.monotonic()
     for name, ask, there in (("codex", ask_codex, CODEX.exists()),):
         if not there or time.time() < limits.get(name, 0):
             continue
-        try:
-            return ask(p, beat)
-        except UsageLimit as e:
-            limits[name] = e.until
-            log(f"{name}: limits used up until", time.strftime("%m-%d %H:%M", time.localtime(e.until)), e)
-            errors.append(f"{name} limit: {e}")
-        except Exception as e:
-            traceback.print_exc()
-            errors.append(f"{name}: {e}")
+        for attempt in range(3):
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if activity is not None:
+                    activity.update(retries=attempt, failure_code=None)
+                result = ask(p, beat, timeout=remaining)
+                if activity is not None:
+                    activity.update(model=result.get('model'), run_seconds=time.monotonic() - route_started)
+                    result['_activity'] = dict(activity)
+                return result
+            except UsageLimit as e:
+                if activity is not None:
+                    activity['failure_code'] = 'quota_exhausted'
+                limits[name] = e.until
+                log(f"{name}: limits used up until", time.strftime("%m-%d %H:%M", time.localtime(e.until)), e)
+                errors.append(f"{name} limit: {e}")
+                break
+            except TransientCodexError as e:
+                if activity is not None:
+                    activity['failure_code'] = 'transient_failure'
+                errors.append(f"{name}: {e}")
+                delay = (2, 5)[attempt] if attempt < 2 else None
+                if delay is None or time.monotonic() + delay >= deadline:
+                    break
+                log(f"{name}: temporary failure, retrying in {delay}s", str(e)[:200])
+                beat()  # Stop retrying immediately if this request no longer owns the task.
+                time.sleep(delay)
+            except Exception as e:
+                if activity is not None:
+                    activity['failure_code'] = 'invalid_result' if isinstance(e, (ValueError, json.JSONDecodeError)) else 'execution_failed'
+                traceback.print_exc()
+                errors.append(f"{name}: {e}")
+                break
+    if activity is not None:
+        activity['run_seconds'] = time.monotonic() - route_started
     raise RuntimeError("; ".join(errors) or "no Codex to ask")
 
 
@@ -632,14 +676,21 @@ def codex_loop(n, extra=False):
                 traceback.print_exc()
                 call(f"/api/tasks/{tid}/fail", worker=name, claim_token=task.get("claim_token"), error=str(e)[:500], retry=False)
             continue
+        activity = {}
         try:
-            result = answer_llm(p, lambda: task_heartbeat(task, worker=name), limits)
+            result = answer_llm(p, lambda: task_heartbeat(task, worker=name), limits, activity=activity)
             call(f"/api/tasks/{tid}/done", worker=name, claim_token=task.get("claim_token"), result=result)
             log(result["engine"], tid, p.get("purpose"), result["model"], f"{result['seconds']}s",
                 f"{result['tokens_in']} in / {result['tokens_out']} out")
         except Exception as e:  # the Pi asks DeepSeek instead
             log("AI request", tid, p.get("purpose"), "-> DeepSeek:", str(e)[:300])
             try:
+                # Typed provenance, not a raw error string, lets the Pi distinguish
+                # actual quota exhaustion from rate limits and malformed output.
+                try:
+                    task_heartbeat(task, worker=name, progress={'ai_activity': activity})
+                except Exception:
+                    pass
                 call(f"/api/tasks/{tid}/fail", worker=name, claim_token=task.get("claim_token"), error=str(e)[:500], retry=False)
             except requests.RequestException:
                 pass
@@ -649,7 +700,7 @@ def codex_loop(n, extra=False):
 
 REPO = Path(os.environ.get("SHIGUANG_REPO") or Path.home() / "vpn" / "grabber")  # the code, deploy.sh next to it
 HEAL_DIR = HERE / "heal-worktree"  # a git worktree of it: the user's own checkout is never touched
-HEAL_MODEL = os.environ.get("HEAL_MODEL", CODEX_MODEL)
+HEAL_MODEL = os.environ.get("HEAL_MODEL", "gpt-6.1-sol")
 HEAL_ROUNDS = 2  # a fix the smoke test rejects goes back to Codex once, with what failed
 HEAL_PATHS = ("shiguang/", "grabber.py", "index.html", "static/", "tests/")
 PI_SSH = os.environ.get("PI_SSH", "pi@192.168.3.200")

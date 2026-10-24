@@ -1,5 +1,6 @@
 """Getting the file: yt-dlp, a headless browser for pages with an embedded player, aria2 for files and torrents."""
 import errno
+import hashlib
 import http.cookiejar
 import json
 import math
@@ -95,6 +96,18 @@ class UnsupportedStream(DownloadFailure):
     """This ffmpeg build cannot read this stream; another downloader may still work."""
 
 
+def temporary_download_error(error):
+    """Transport truncation is retryable even when a later decoder reports invalid data."""
+    if isinstance(error, Cancelled) or terminal_download_reason(error):
+        return False
+    if isinstance(error, DownloadFailure):
+        return error.retryable
+    return bool(re.search(r"timed? out|timeout|connection|\b429\b|\b50[0234]\b|"
+                          r"UNEXPECTED_EOF|EOF occurred|IncompleteRead|incomplete read|"
+                          r"\d+ bytes read, \d+ more expected|remote end closed|"
+                          r"network error|temporarily unavailable", str(error), re.I))
+
+
 def terminal_download_reason(error):
     text = str(error)
     if isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT):
@@ -182,7 +195,7 @@ def ytdlp_download(job_id, url, workdir, extra=None):
 
 def _ytdlp_download(job_id, url, workdir, extra=None, drop_subs_on_error=True):
     import yt_dlp
-    update(job_id, stage="downloading video")
+    update(job_id, stage=(extra or {}).get('_stage') or "yt-dlp 下载视频")
     try:
         with yt_dlp.YoutubeDL(ytdlp_opts(job_id, workdir, extra)) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -329,10 +342,11 @@ def usable_media_url(url):
         return False
 
 
-def dedupe_media(urls):
+def dedupe_media(urls, preserve_query=False):
     seen, out = set(), []
     for u in urls:
-        key = urllib.parse.urlsplit(u)._replace(query="", fragment="").geturl()
+        parsed = urllib.parse.urlsplit(u)
+        key = parsed._replace(query=parsed.query if preserve_query else "", fragment="").geturl()
         if key not in seen and usable_media_url(u):
             seen.add(key)
             out.append(u)
@@ -510,6 +524,30 @@ def sniff_page(job_id, url):
 
 # ---------------------------------------------------------------- bounded download fallback
 
+def _partial_file(path):
+    return bool(re.search(r'\.part(?:$|[-.])|\.ytdl$', path.name))
+
+
+def _resume_files(directory):
+    """Keep only yt-dlp's partial bytes/journals, never a failed completed media file."""
+    if not directory.exists():
+        return
+    for path in sorted(directory.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir():
+            if not any(path.iterdir()):
+                path.rmdir()
+        elif not _partial_file(path):
+            path.unlink(missing_ok=True)
+    if not any(directory.iterdir()):
+        directory.rmdir()
+
+
+def _candidate_key(url, referer):
+    # Signed URLs, quality/content query fields, scheme and Referer are all part
+    # of the exact candidate. Never resume another stream into the same bytes.
+    return hashlib.sha256(json.dumps([url, referer], ensure_ascii=False).encode()).hexdigest()
+
+
 def stream_kind(url):
     path = urllib.parse.urlsplit(url).path.lower()
     return next((ext for ext in ("mp4", "m3u8", "mpd") if path.endswith("." + ext)), None)
@@ -538,6 +576,8 @@ def media_cookies(cookiefile, url):
         if (domain_ok and path_ok and (not c.secure or parsed.scheme == "https")
                 and (not c.expires or c.expires > time.time())
                 and not any(ch in c.name + c.value + c.domain + cookie_path for ch in "\r\n;")):
+            if c.expires == 0:  # yt-dlp serializes session cookies as zero, not the epoch.
+                c.expires, c.discard = None, True
             selected.append(c)
     return selected
 
@@ -590,12 +630,18 @@ def ffmpeg_download(job_id, url, workdir, referer, cookiefile=None, timeout=2700
         raise UnsupportedStream("当前 FFmpeg 未启用 DASH（MPD）读取支持；请安装带 DASH/libxml2 支持的 FFmpeg。")
     workdir.mkdir(parents=True, exist_ok=True)
     output = workdir / "video.part.mkv"
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-xerror",
+    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-xerror",
                "-rw_timeout", "30000000", "-protocol_whitelist", "http,https,tcp,tls,crypto",
+               "-reconnect", "1", "-reconnect_on_network_error", "1",
+               "-reconnect_on_http_error", "429,500,502,503,504",
+               "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+               "-reconnect_max_retries", "3", "-reconnect_delay_total_max", "20",
                "-user_agent", UA, "-referer", referer]
     cookies = ffmpeg_cookies(cookiefile, url)
     if cookies:
         command += ["-cookies", cookies]
+    if stream_kind(url) == "m3u8":
+        command += ["-seg_max_retry", "3", "-http_multiple", "0"]
     command += ["-i", url, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-f", "matroska", str(output)]
     proc = None
     started, last = time.monotonic(), 0
@@ -612,19 +658,24 @@ def ffmpeg_download(job_id, url, workdir, referer, cookiefile=None, timeout=2700
                     size = output.stat().st_size if output.exists() else 0
                     rate = max(0, size - last_size) / max(.01, now - (last or started))
                     smoothed_speed = .35 * rate + .65 * smoothed_speed if smoothed_speed else rate
-                    update(job_id, stage=f"独立下载视频流 · 已接收 {human(size)}", progress=0,
+                    update(job_id, stage=f"FFmpeg 下载视频流 · 已接收 {human(size)}", progress=0,
                            speed=f"{human(smoothed_speed)}/s" if smoothed_speed else "等待视频分段")
                     last = now
                     last_size = size
                 time.sleep(0.25)
             check_cancel(job_id)
+            errors.seek(0)
+            detail = errors.read(1024 * 1024 + 1).decode("utf-8", "replace")
             if proc.returncode:
-                errors.seek(0, os.SEEK_END)
-                errors.seek(max(0, errors.tell() - 4096))
-                detail = errors.read().decode("utf-8", "replace")
                 if reason := terminal_download_reason(detail):
                     raise DownloadFailure(reason)
                 raise RuntimeError("独立流下载失败：" + failure_detail(detail))
+            # HLS can exit successfully after skipping unavailable segments.
+            # A playable file is not proof that the whole video was downloaded.
+            if (len(detail) > 1024 * 1024 or re.search(
+                    r"Segment [^\r\n]*failed[^\r\n]*skipping|"
+                    r"skipping segment|Packet corrupt|corrupt input packet", detail, re.I)):
+                raise DownloadFailure("视频分段未完整下载，暂不入库：" + failure_detail(detail), retryable=True)
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(output)],
                                capture_output=True, text=True, timeout=30, check=True)
         info = json.loads(probe.stdout)
@@ -648,11 +699,13 @@ def ffmpeg_download(job_id, url, workdir, referer, cookiefile=None, timeout=2700
 
 def fast_stream_download(job_id, url, workdir, referer, cookiefile=None):
     """Read HLS/DASH fragments concurrently; retain FFmpeg for unsupported streams."""
+    transport_error = None
     if stream_kind(url) in ("m3u8", "mpd"):
         check_cancel(job_id)
         check_manifest(url, referer, cookiefile)
         native = workdir / ".fragments"
         native.mkdir(parents=True, exist_ok=True)
+        resuming = any(native.iterdir())
         started = time.monotonic()
 
         def deadline(_progress):
@@ -661,39 +714,84 @@ def fast_stream_download(job_id, url, workdir, referer, cookiefile=None):
                 raise DownloadFailure("备用视频流下载超过 45 分钟，已停止，请检查网络后重试。", retryable=True)
 
         extra = {"cookiefile": cookiefile, "http_headers": {"Referer": referer, "User-Agent": UA},
-                 "outtmpl": str(native / "video.%(ext)s"), "concurrent_fragment_downloads": 8,
+                 "outtmpl": str(native / "video.%(ext)s"), "concurrent_fragment_downloads": 2 if resuming else 8,
                  "external_downloader": {"m3u8": "native", "dash": "native"},
                  "skip_unavailable_fragments": False, "socket_timeout": 20,
-                 "retries": 2, "fragment_retries": 2, "file_access_retries": 1,
+                 "retries": 2, "fragment_retries": 5 if resuming else 2, "file_access_retries": 1,
                  "writesubtitles": False, "writeautomaticsub": False, "writethumbnail": False,
-                 "postprocessors": [], "_stage": "并发下载备用视频流（8 路）"}
+                 "postprocessors": [], "_stage": "yt-dlp 续传视频流（2 路）" if resuming else "yt-dlp 下载视频流（8 路）"}
+        if resuming:
+            extra['retry_sleep_functions'] = {'fragment': lambda attempt: min(5, attempt)}
         try:
             update(job_id, stage=extra["_stage"], progress=0, speed="")
             # Retain the standard byte/speed hook and add the overall/cancellation limit.
             extra["progress_hooks"] = ytdlp_opts(job_id, native, extra)["progress_hooks"] + [deadline]
-            meta = ytdlp_download(job_id, url, native, extra)
+            try:
+                meta = ytdlp_download(job_id, url, native, extra)
+            except Exception as error:
+                check_cancel(job_id)
+                if not temporary_download_error(error) or resuming:
+                    raise
+                transport_error = error
+                # Reuse completed fragments and the resume journal. A busy origin
+                # may drop eight parallel connections; one bounded retry at two
+                # connections avoids immediately discarding that progress.
+                extra.update(concurrent_fragment_downloads=2, fragment_retries=5,
+                             retry_sleep_functions={"fragment": lambda attempt: min(5, attempt)},
+                             _stage="yt-dlp 连接中断，降低为 2 路继续下载")
+                extra["progress_hooks"] = ytdlp_opts(job_id, native, extra)["progress_hooks"] + [deadline]
+                update(job_id, stage=extra["_stage"], speed="")
+                meta = ytdlp_download(job_id, url, native, extra)
             check_cancel(job_id)
             files = [p for p in native.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXT
-                     and ".part." not in p.name]
+                     and not _partial_file(p)]
             if len(files) != 1:
                 raise RuntimeError("并发下载未产生完整的视频文件")
             files[0].replace(workdir / ("video" + files[0].suffix))
             return {**meta, "source": "sniffed-parallel"}
         except Exception as error:
-            check_cancel(job_id)
+            try:
+                check_cancel(job_id)
+            except Cancelled:
+                transport_error = None
+                raise
             if isinstance(error, Cancelled):
+                transport_error = None
                 raise
             if reason := terminal_download_reason(error):
+                transport_error = None
                 raise DownloadFailure(reason) from None
+            if temporary_download_error(error):
+                transport_error = error
             if isinstance(error, DownloadFailure):
+                if not error.retryable:
+                    transport_error = None
                 raise
-            update(job_id, stage="分段下载器不兼容，切换独立视频流下载", progress=0, speed="")
+            update(job_id, stage="yt-dlp 多次尝试未成功，切换 FFmpeg 下载", progress=0, speed="")
         finally:
-            shutil.rmtree(native, ignore_errors=True)
-    return ffmpeg_download(job_id, url, workdir, referer, cookiefile)
+            if transport_error is not None:
+                _resume_files(native)
+            else:
+                shutil.rmtree(native, ignore_errors=True)
+    try:
+        result = ffmpeg_download(job_id, url, workdir, referer, cookiefile)
+        shutil.rmtree(workdir / '.fragments', ignore_errors=True)
+        return result
+    except Exception as error:
+        try:
+            check_cancel(job_id)
+        except Cancelled:
+            shutil.rmtree(workdir / '.fragments', ignore_errors=True)
+            raise
+        if (transport_error is None or isinstance(error, Cancelled) or terminal_download_reason(error)
+                or isinstance(error, DownloadFailure) and not error.retryable):
+            shutil.rmtree(workdir / '.fragments', ignore_errors=True)
+            raise
+        raise DownloadFailure("分段连接中断：" + failure_detail(transport_error) +
+                              "；独立下载：" + failure_detail(error), retryable=True) from None
 
 
-def page_video_download(job_id, url, workdir, info=None, primary_error=None):
+def page_video_download(job_id, url, workdir, info=None, primary_error=None, media_context=None):
     """Return (metadata, successful directory), never mixing failed attempts into the library."""
     errors = [("网站下载器", primary_error)] if primary_error else []
     primary = workdir / ".ytdlp"
@@ -725,31 +823,43 @@ def page_video_download(job_id, url, workdir, info=None, primary_error=None):
     update(job_id, stage="网站下载失败，正在识别备用视频流" if errors else "识别页面中的公开播放器", progress=0, speed="")
     found = None
     fallback = workdir / ".fallback"
+    resumes = workdir / ".resume"
     try:
-        found = ({"media_urls": [url], "title": (info or {}).get("title") or "视频", "cookiefile": None}
+        found = media_context or ({"media_urls": [url], "title": (info or {}).get("title") or "视频", "cookiefile": None}
                  if usable_media_url(url) and stream_kind(url) else sniff_page(job_id, url))
         check_cancel(job_id)
         if not found:
             raise DownloadFailure("未找到公开可下载的视频。请确认链接能直接播放，或提供视频详情页/官方下载链接。")
         title = found.get("title") or (info or {}).get("title") or "视频"
+        referer = found.get('referer') or url
         update(job_id, title=title)
         shutil.rmtree(fallback, ignore_errors=True)
         fallback.mkdir()
         results = []
         groups = found.get("media_groups") or [found.get("media_urls", [])]
-        for group_index, group in enumerate(groups[:10], 1):
-            candidates = dedupe_media(group)[:3]
+        candidates_by_group = [dedupe_media(group, preserve_query=bool(media_context))[:3] for group in groups[:10]]
+        active_keys = {_candidate_key(candidate, referer) for group in candidates_by_group for candidate in group}
+        resumes.mkdir(exist_ok=True)
+        # Fresh signatures may replace old candidates. Bound storage to this
+        # scan's at-most 30 streams, without reusing bytes across signed URLs.
+        for stale in resumes.iterdir():
+            if stale.name not in active_keys:
+                shutil.rmtree(stale, ignore_errors=True)
+        for group_index, candidates in enumerate(candidates_by_group, 1):
+            # Collected players already group equivalent sources explicitly.
+            # Their query parameters may select a quality, ID or working token;
+            # removing them here would discard usable fallback candidates.
             for candidate_index, media_url in enumerate(candidates, 1):
                 check_cancel(job_id)
-                attempt = fallback / f"{group_index}-{candidate_index}"
-                attempt.mkdir()
+                attempt = resumes / _candidate_key(media_url, referer)
+                attempt.mkdir(exist_ok=True)
                 update(job_id, stage=f"尝试视频 {group_index}/{len(groups[:10])} 的备用流 {candidate_index}/{len(candidates)}",
                        progress=0, speed="")
                 try:
                     independent = bool(stream_kind(media_url))
                     if independent:
                         try:
-                            meta = fast_stream_download(job_id, media_url, attempt, url, found.get("cookiefile"))
+                            meta = fast_stream_download(job_id, media_url, attempt, referer, found.get("cookiefile"))
                             for video in attempt.glob("video.*"):
                                 if video.suffix.lower() in VIDEO_EXT:
                                     video.rename(attempt / f"{safe_name(title, 60)} {group_index:02}{video.suffix}")
@@ -757,19 +867,30 @@ def page_video_download(job_id, url, workdir, info=None, primary_error=None):
                             errors.append(("独立流下载", error))
                             independent = False
                     if not independent:
-                        extra = {"cookiefile": found.get("cookiefile"), "http_headers": {"Referer": url, "User-Agent": UA},
+                        extra = {"cookiefile": found.get("cookiefile"), "http_headers": {"Referer": referer, "User-Agent": UA},
                                  "outtmpl": str(attempt / f"{safe_name(title, 60)} {group_index:02}.%(ext)s"),
                                  "retries": 1, "fragment_retries": 1, "file_access_retries": 1}
                         meta = ytdlp_download(job_id, media_url, attempt, extra)
                         meta["source"] = "sniffed"
                     check_cancel(job_id)
+                    # A completed retry may leave old journals/fragment files;
+                    # none of them belong in the library's recursive file walk.
+                    for partial in attempt.rglob('*'):
+                        if partial.is_file() and _partial_file(partial):
+                            partial.unlink()
                     if not any(p.is_file() and p.suffix.lower() in VIDEO_EXT | AUDIO_EXT
-                               and ".part." not in p.name for p in attempt.rglob("*")):
+                               and not _partial_file(p) for p in attempt.rglob("*")):
                         raise RuntimeError("下载未产生有效媒体文件")
+                    # Only a successful candidate enters the directory returned
+                    # to the pipeline. Retained fragments stay outside it.
+                    attempt.rename(fallback / f"{group_index}-{candidate_index}")
                     results.append(meta)
                     break  # remaining URLs are quality/signature alternatives, not extra videos
                 except Exception as error:
-                    shutil.rmtree(attempt, ignore_errors=True)
+                    if temporary_download_error(error):
+                        _resume_files(attempt)
+                    else:
+                        shutil.rmtree(attempt, ignore_errors=True)
                     check_cancel(job_id)
                     if isinstance(error, Cancelled):
                         raise
@@ -782,19 +903,25 @@ def page_video_download(job_id, url, workdir, info=None, primary_error=None):
                 raise RuntimeError("当前播放器的备用流均不可用")
         if not results:
             raise DownloadFailure("未找到受支持的公开视频流，请提供视频详情页或官方下载链接。")
-        return {**results[0], "title": title, "webpage_url": url}, fallback
+        shutil.rmtree(resumes, ignore_errors=True)
+        return {**results[0], "title": title, "webpage_url": referer}, fallback
     except Exception as error:
         shutil.rmtree(fallback, ignore_errors=True)
-        check_cancel(job_id)
+        try:
+            check_cancel(job_id)
+        except Cancelled:
+            shutil.rmtree(resumes, ignore_errors=True)
+            raise
         if isinstance(error, Cancelled):
+            shutil.rmtree(resumes, ignore_errors=True)
             raise
         errors.append(("页面/视频流识别", error))
         reason = terminal_download_reason(error)
         details = "；".join(f"{step}：{failure_detail(e)}" for step, e in errors[-5:])
         retryable = (not reason and not (isinstance(error, DownloadFailure) and not error.retryable)
-                     and any((isinstance(e, DownloadFailure) and e.retryable)
-                             or re.search(r"timed? out|timeout|connection|429|50[0234]", str(e), re.I)
-                             for _, e in errors))
+                     and any(temporary_download_error(e) for _, e in errors))
+        if not retryable:
+            shutil.rmtree(resumes, ignore_errors=True)
         raise DownloadFailure((reason or "常规下载与备用流均未成功，请检查网络、链接有效期或提供官方下载链接。") +
                               "\n" + details, retryable=retryable) from None
     finally:

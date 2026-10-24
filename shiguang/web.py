@@ -276,6 +276,16 @@ def sign_in(name):
     q("INSERT INTO devices (id, user, ip, seen) VALUES (?,?,?,?) "
       "ON CONFLICT(id) DO UPDATE SET user=excluded.user", (g.device, name, client_ip(), time.time()))
     q("UPDATE jobs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
+    from . import crawl
+    from . import sources
+    sources.move_owner(g.device, f"user:{name}")
+    crawl.move_owner(g.device, f"user:{name}")
+    from . import trash
+    trash.move_owner(g.device, f"user:{name}")
+    from . import saved_search
+    saved_search.move_owner(g.device, f"user:{name}")
+    from . import ai_activity
+    ai_activity.move_owner(g.device, f"user:{name}")
     # followed uploaders too; one the account already follows stays once
     q("DELETE FROM subs WHERE owner=? AND key IN (SELECT key FROM subs WHERE owner=?)", (g.device, f"user:{name}"))
     q("UPDATE subs SET owner=? WHERE owner=?", (f"user:{name}", g.device))
@@ -320,7 +330,7 @@ def revealed():
 
 
 def hides_tags(tags, prefs):
-    """Whether a video with these tags is hidden by these privacy settings (hiding is by tag only). The aliases are
+    """Whether these tags match the privacy settings. The aliases are
     read once per request: this runs for every video of the library."""
     if not has_app_context():
         aliases = kv_get("tag_aliases", {})
@@ -332,8 +342,21 @@ def hides_tags(tags, prefs):
     return any(aliases.get(t, t).lower() in hide for t in tags or [])
 
 
+def source_hidden_ids():
+    """Inherited root classifications, cached for the request and independent of user tags."""
+    if 'source_hidden_ids' not in g:
+        # Import lazily: crawl routes import this module during application startup.
+        from .crawl import hidden_source_job_ids
+        scope, args = scope_sql()
+        owners = {g.owner} | {row['owner'] for row in q(f'SELECT DISTINCT owner FROM jobs WHERE {scope}', args)}
+        g.source_hidden_ids = set().union(*(hidden_source_job_ids(owner, reveal=False) for owner in owners))
+    return g.source_hidden_ids
+
+
 def is_hidden(d, prefs):
-    return hides_tags((d.get("analysis") or {}).get("tags"), prefs)
+    return (d.get("id") in prefs.get("ids", [])
+            or hides_tags((d.get("analysis") or {}).get("tags"), prefs)
+            or (d.get('id') is not None and d['id'] in source_hidden_ids()))
 
 
 def hidden_ids():
@@ -342,12 +365,18 @@ def hidden_ids():
     if "hidden_ids" in g:
         return g.hidden_ids
     prefs = privacy_get(g.owner)
-    if not prefs["tags"] or revealed():
+    if revealed():
         g.hidden_ids = set()
         return g.hidden_ids
+    inherited = source_hidden_ids()
+    if not (prefs["tags"] or prefs["ids"]):
+        g.hidden_ids = inherited
+        return g.hidden_ids
     scope, scope_args = scope_sql()
-    g.hidden_ids = {r["id"] for r in q(f"SELECT id, json_extract(analysis, '$.tags') tags FROM jobs WHERE {scope}", scope_args)
-                    if r["tags"] and hides_tags(json.loads(r["tags"]), prefs)}
+    manual = set(prefs["ids"])
+    g.hidden_ids = inherited | {r["id"] for r in q(f"SELECT id, owner, json_extract(analysis, '$.tags') tags FROM jobs WHERE {scope}", scope_args)
+                    if (r["owner"] == g.owner and r["id"] in manual)
+                    or (r["tags"] and hides_tags(json.loads(r["tags"]), prefs))}
     return g.hidden_ids
 
 
@@ -355,10 +384,11 @@ def hidden_subs(skip=None):
     """Followed uploaders this page must not name right now (privacy mode, not revealed): adult sites', and any with
     a hidden video."""
     prefs = privacy_get(g.owner)
-    if not prefs["tags"] or revealed():
+    if not (prefs["tags"] or prefs["ids"]) or revealed():
         return set()
     skip = hidden_ids() if skip is None else skip
-    out = {r["id"] for r in q("SELECT id, platform FROM subs") if r["platform"] in channels.ADULT_PLATFORMS}
+    out = {r["id"] for r in q("SELECT id, platform FROM subs")
+           if prefs["tags"] and r["platform"] in channels.ADULT_PLATFORMS}
     if skip:
         out |= {int(r["source"][4:]) for r in q(f"SELECT DISTINCT source FROM jobs WHERE source LIKE 'sub:%' AND id IN "
                                                  f"({','.join('?' * len(skip))})", tuple(skip))}
@@ -400,7 +430,13 @@ def privacy_info():
     if not privacy_token():
         return jsonify(error="locked"), 403
     prefs = privacy_get(g.owner)
-    return jsonify(**prefs, revealed=revealed(), library_tags=llm.library_tags()[:300])
+    manual = q("SELECT id, COALESCE(NULLIF(json_extract(analysis,'$.title'),''),NULLIF(title,''),'未命名视频') title "
+               "FROM jobs WHERE owner=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id DESC",
+               (g.owner, json.dumps(prefs["ids"])))
+    response = jsonify(**prefs, manual_items=[dict(row) for row in manual],
+                       revealed=revealed(), library_tags=llm.library_tags()[:300])
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.post("/api/privacy")
@@ -409,14 +445,55 @@ def privacy_update():
     tok = privacy_token()
     if not tok:
         return jsonify(error="locked"), 403
-    body = request.get_json(silent=True) or {}
-    prefs = privacy_get(g.owner)
-    if isinstance(body.get("tags"), list):
-        prefs["tags"] = list(dict.fromkeys(str(t).strip()[:40] for t in body["tags"] if str(t).strip()))[:200]
-    privacy_set(g.owner, prefs["tags"], [])
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or ("tags" in body and not isinstance(body["tags"], list)) \
+            or ("reveal" in body and type(body["reveal"]) is not bool):
+        return jsonify(error="隐私设置格式无效"), 400
+    if "tags" in body:
+        tags = list(dict.fromkeys(str(t).strip()[:40] for t in body["tags"] if str(t).strip()))[:200]
+        # Update only this field, preserving concurrent manual selections and the PIN.
+        q("INSERT INTO privacy(owner,tags) VALUES (?,?) ON CONFLICT(owner) DO UPDATE SET tags=excluded.tags",
+          (g.owner, json.dumps(tags, ensure_ascii=False)))
     if "reveal" in body:
-        tok["reveal"] = bool(body["reveal"])
+        tok["reveal"] = body["reveal"]
+    g.pop("hidden_ids", None)
     return jsonify(ok=True)
+
+
+@app.post("/api/privacy/ids")
+def privacy_select():
+    """Atomically add/remove this owner's explicit hidden videos after unlocking."""
+    if not privacy_token():
+        return jsonify(error="locked"), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or type(body.get("hidden")) is not bool:
+        return jsonify(error="请选择视频并指定隐藏状态"), 400
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 \
+            or any(type(jid) is not int or not 0 < jid <= 9223372036854775807 for jid in ids):
+        return jsonify(error="请选择 1–1000 个有效的视频编号"), 400
+    wanted = set(ids)
+    with db_lock:
+        db = core.DB
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            rows = db.execute('SELECT id,owner FROM jobs WHERE id IN (SELECT value FROM json_each(?))',
+                              (json.dumps(sorted(wanted)),)).fetchall()
+            if len(rows) != len(wanted) or any(row['owner'] != g.owner for row in rows):
+                db.rollback()
+                return jsonify(error="只能修改自己账号中的视频，请刷新后重试"), 404
+            row = db.execute('SELECT ids FROM privacy WHERE owner=?', (g.owner,)).fetchone()
+            selected = set(json.loads(row['ids'])) if row else set()
+            selected = selected | wanted if body['hidden'] else selected - wanted
+            selected = sorted(selected)
+            db.execute('INSERT INTO privacy(owner,ids) VALUES (?,?) ON CONFLICT(owner) DO UPDATE SET ids=excluded.ids',
+                       (g.owner, json.dumps(selected)))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    g.pop('hidden_ids', None)
+    return jsonify(ok=True, ids=selected)
 
 
 def credentials():
@@ -796,12 +873,26 @@ def list_columns():
 
 @app.get("/api/jobs")
 def jobs():
+    from . import library_search
     metadata_only = request.args.get('metadata') == '1'
     compact = request.args.get('compact') == '1'
     visual = request.args.get("visual") == "1"
-    term = request.args.get("q", "").strip()
-    term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
-    wanted_tags = tag_query(term)  # "#标签": only by tags
+    search_mode = request.args.get('mode')
+    if search_mode is not None and search_mode not in ('exact', 'wildcard', 'regex', 'ai'):
+        return jsonify(error='搜索模式无效'), 400
+    term = request.args.get("q", "") if search_mode else request.args.get("q", "").strip()
+    if search_mode == 'exact' and len(term) > 256:
+        return jsonify(error='搜索词最多 256 字符'), 400
+    if search_mode == 'wildcard' and len(term) > 256:
+        return jsonify(error='搜索词最多 256 字符'), 400
+    if search_mode and request.headers.get('X-Privacy-Token') and not privacy_token():
+        return jsonify(error='隐私权限已失效，请重新解锁'), 403
+    search_reveal = revealed()
+    search_access = library_search.access_stamp(g.owner) if search_mode else None
+    search_page = {}
+    if not search_mode:
+        term = kv_get("tag_aliases", {}).get(term, term)  # a merged-away tag searches for its canonical form
+    wanted_tags = tag_query(term) if search_mode in (None, 'exact') else []  # "#标签": only by tags
     # Sort before the finished-item page is cut off. The page repeats this for
     # its mixed cards (unfinished and resume items).
     sort = request.args.get("sort", "added")
@@ -813,7 +904,13 @@ def jobs():
                   "COALESCE(json_extract(analysis, '$.creator'), '') COLLATE NOCASE, "
                   "COALESCE(json_extract(analysis, '$.title'), title, '') COLLATE NOCASE, id DESC",
     }.get(sort, "created DESC, id DESC")
-    scope, scope_args = scope_sql()
+    scope, scope_args = ("owner = ?", (g.owner,)) if search_mode else scope_sql()
+    # Apply privacy before pagination and all search/model branches, so neither
+    # candidate text nor counts can expose inherited restricted-source videos.
+    hidden = hidden_ids()
+    if hidden:
+        scope += ' AND id NOT IN (SELECT value FROM json_each(?))'
+        scope_args = (*scope_args, json.dumps(sorted(hidden)))
     if request.args.get('only') == '1' and request.args.get('ids'):
         ids = [int(x) for x in request.args['ids'].split(',') if x.isdigit()][:50]
         scope += " AND id IN (" + ','.join('?' for _ in ids) + ")" if ids else " AND 0"
@@ -825,19 +922,40 @@ def jobs():
     # every unfinished job (queued / downloading / failed) is always sent; finished ones a page at a time
     limit = int(request.args["limit"]) if request.args.get("limit", "").isdigit() else 100
     if sub.isdigit():  # one followed uploader's videos
-        scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), max(limit, 1000)
+        scope, scope_args, limit = scope + " AND source = ?", (*scope_args, f"sub:{sub}"), limit if search_mode else max(limit, 1000)
     cat = request.args.get("cat", "")
     if cat:  # a category chip: every video in it (a small category can be spread over many pages of the newest)
         scope += f" AND {CATEGORY_SQL} = ?"  # the same key category_counts counts by ("Other" includes unsorted ones)
-        scope_args, limit = (*scope_args, cat), max(limit, 2000)
+        scope_args, limit = (*scope_args, cat), limit if search_mode else max(limit, 2000)
+    search_offset = 0
+    if search_mode:
+        value = request.args.get('offset', '0')
+        state = request.args.get('state', '')
+        if not value.isascii() or not value.isdecimal() or int(value) > 1_000_000 or state not in ('', 'all', 'active', 'failed', 'device'):
+            return jsonify(error='搜索分页或状态无效'), 400
+        search_offset = int(value)
+        if state == 'all':
+            scope += " AND NOT(status='queued' AND COALESCE(source,'') LIKE 'sub:%')"
+        elif state == 'active':
+            scope += " AND (status IN ('queued','downloading','processing','linked') OR (status='failed' AND retry_at IS NOT NULL))"
+        elif state == 'failed':
+            scope += " AND status='failed' AND retry_at IS NULL"
+        elif state == 'device':
+            device = request.args.get('device', '')
+            if not device or len(device) > 200:
+                return jsonify(error='设备筛选无效'), 400
+            library_search.register()
+            scope += ' AND library_phone(device,source)=?'
+            scope_args = (*scope_args, device)
     more = False
     parsed = None
-    grouped = request.args.get("grouped") == "1" and not term
+    search_interpretation, search_notice = None, None
+    grouped = request.args.get("grouped") == "1" and not term and not search_mode
     subscriptions = {f"sub:{r['id']}": dict(r) for r in q("SELECT id, platform, name FROM subs WHERE owner=? OR ?",
                                                         (g.owner, int(g.admin)))} if grouped else {}
     # A sentence ("上个月小王讲伊朗、画面里有地图的片段"): an AI reads it into keywords, what's on screen, an
     # uploader and dates (the page asks for this once typing pauses; `exact` searches the words as typed)
-    if term and not wanted_tags and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
+    if term and not search_mode and not wanted_tags and request.args.get("nl") == "1" and LLM_API_KEY and len(term) >= 6:
         try:
             ups = sub_names()
             parsed = llm.parse_query(term, ups, time.strftime("%Y-%m-%d"))
@@ -845,17 +963,69 @@ def jobs():
             traceback.print_exc()
         if parsed and not (parsed["keywords"] or parsed["visual"]) and not (parsed["uploader"] or parsed["since"]):
             parsed = None
-    if wanted_tags:
+    if term and search_mode in ('exact', 'wildcard') and not wanted_tags and not visual:
+        limit = max(1, min(limit, 500))
+        try:
+            out, search_page, more = library_search.find(term, search_mode, scope, scope_args, order,
+                                                         list_columns(), limit, search_offset)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        search_interpretation = ('精准搜索：按原文匹配，包含字幕。' if search_mode == 'exact' else
+                                 '通配搜索：* 匹配任意长度，? 匹配单个字符；包含字幕。')
+    elif search_mode and search_mode != 'exact':
+        from .crawl_search import search_items
+        hidden = hidden_ids()
+        rows = q(f"SELECT {list_columns()} FROM jobs WHERE {scope} ORDER BY {order}", scope_args)
+        candidates = [job_dict(row) for row in rows if row['id'] not in hidden]
+        records = []
+        for d in candidates:
+            analysis = d.get('analysis') or {}
+            description = []
+            for field in ('description', 'summary', 'tags', 'key_points', 'creator', 'show', 'episode_title'):
+                value = analysis.get(field)
+                if isinstance(value, str):
+                    description.append(value)
+                elif isinstance(value, list):
+                    description.extend(part for part in value if isinstance(part, str))
+            records.append({'id': d['id'], 'title': ' '.join(str(value) for value in
+                            (d.get('title'), analysis.get('title')) if value),
+                            'description': '\n'.join(description), 'url': d.get('url') or ''})
+        try:
+            found = search_items(records, term, search_mode, g.owner)
+        except (ValueError, TypeError) as exc:
+            return jsonify(error=str(exc)), 400
+        search_interpretation, search_notice = found['interpretation'], found.get('notice')
+        by_id = {d['id']: d for d in candidates}
+        out = []
+        for hit in found['items']:
+            d = by_id[hit['id']]
+            for field in ('score', 'match_reason'):
+                if field in hit:
+                    d[field] = hit[field]
+            out.append(d)
+        limit = max(1, min(limit, 500))
+        if search_mode == 'regex':
+            search_page = {'search_total': len(out), 'search_offset': search_offset, 'search_limit': limit}
+            more, out = search_offset + limit < len(out), out[search_offset:search_offset + limit]
+        else:
+            more, out = len(out) > limit, out[:limit]
+    elif wanted_tags:
         rows = q(f"SELECT * FROM jobs WHERE {scope} AND {' AND '.join(['analysis LIKE ?'] * len(wanted_tags))} ORDER BY {order}",
                  (*scope_args, *(f"%{t}%" for t in wanted_tags)))
         out = [d for d in map(job_dict, rows) if has_tags((d["analysis"] or {}).get("tags"), wanted_tags)]
+        if search_mode:
+            limit = max(1, min(limit, 500))
+            search_page = {'search_total': len(out), 'search_offset': search_offset, 'search_limit': limit}
+            more, out = search_offset + limit < len(out), out[search_offset:search_offset + limit]
     elif parsed:
         out = search.smart_search(parsed, scope, scope_args, g.owner)
     elif term:
         # Searches titles, links, summaries, key points, tags, file paths and transcripts
-        like = f"%{term}%"
-        rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ? OR url LIKE ? OR analysis LIKE ? OR files LIKE ? "
-                 f"OR transcript LIKE ?) ORDER BY {order} LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
+        literal = term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') if search_mode == 'exact' else term
+        like = f"%{literal}%"
+        escape = " ESCAPE '\\'" if search_mode == 'exact' else ''
+        rows = q(f"SELECT * FROM jobs WHERE {scope} AND (title LIKE ?{escape} OR url LIKE ?{escape} OR analysis LIKE ?{escape} OR files LIKE ?{escape} "
+                 f"OR transcript LIKE ?{escape}) ORDER BY {order} LIMIT ?", (*scope_args, *(like,) * 5, max(limit, 200)))
         # The idle-time index belongs to the job that downloaded the files; entries linked to it share it
         by_source = {}
         for r in q(f"SELECT id, ref FROM jobs WHERE {scope} AND status IN ('done', 'linked')", scope_args):
@@ -864,7 +1034,7 @@ def jobs():
         # Use seg_ref to search only this view's source jobs, including shared downloads.
         segments = q("SELECT ref, part, t, src, text FROM seg WHERE kind='job' AND ref IN "
                      f"(SELECT COALESCE(ref, id) FROM jobs WHERE {scope} AND status IN ('done', 'linked')) "
-                     "AND text LIKE ? ORDER BY ref, part, t", (*scope_args, like)) if by_source else []
+                     f"AND text LIKE ?{escape} ORDER BY ref, part, t", (*scope_args, like)) if by_source else []
         for r in segments:
             for jid in by_source.get(r["ref"], []):
                 said.setdefault(jid, []).append({"part": r["part"], "t": r["t"], "src": r["src"],
@@ -964,6 +1134,8 @@ def jobs():
                 d.update(status=src["status"] if src["status"] in ("queued", "downloading", "processing") else "queued",
                          stage=src["stage"], progress=src["progress"], speed=src["speed"], title=d["title"] or src["title"])
         owner = d.pop("owner", None)
+        d["privacy_editable"] = owner == g.owner
+        d["manual_hidden"] = owner == g.owner and d["id"] in prefs["ids"]
         d["media"] = cards.get(d['id'], []) if compact else library.media_info(d) if d["status"] == "done" else []
         d["missing"] = d["status"] == "done" and not d["media"] and any(
             Path(f).suffix.lower() in VIDEO_EXT | AUDIO_EXT for f in d["files"])
@@ -977,26 +1149,47 @@ def jobs():
                              if k not in ('summary', 'key_points', 'chapters', 'usage', 'raw', 'transcript')}
             d['compact'] = True
     usage = shutil.disk_usage(MEDIA)
-    return jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
+    listed_subs, listed_cats = subs_list(), category_counts()
+    if search_mode:
+        owned_subs = {r['id'] for r in q('SELECT id FROM subs WHERE owner=?', (g.owner,))}
+        listed_subs = [sub for sub in listed_subs if sub['id'] in owned_subs]
+        listed_cats = {}
+        hidden = hidden_ids()
+        for r in q(f"SELECT id,{CATEGORY_SQL} cat FROM jobs WHERE owner=? AND status IN ('done','linked')", (g.owner,)):
+            if r['id'] not in hidden:
+                listed_cats[r['cat']] = listed_cats.get(r['cat'], 0) + 1
+    response = jsonify(jobs=out, disk={"free": usage.free, "total": usage.total},
                    storage_owner=g.owner, secure_url=PUBLIC_URL if PUBLIC_URL.startswith("https://") else None,
                    features={"ai": bool(LLM_API_KEY), "telegram": bool(TG_TOKEN)}, admin=g.admin, user=g.user,
                    privacy={"revealed": show_hidden}, external=g.external,  # no hidden counts on purpose
-                   subs=subs_list(), sub_interval=channels.SUB_INTERVAL,
+                   subs=listed_subs, sub_interval=channels.SUB_INTERVAL,
                    bili_cookie=channels.bili_cookie_state() if g.admin else None, more=more,
                    notes=q("SELECT COUNT(*) n FROM notes WHERE owner=?", (g.owner,), one=True)["n"],
                    books=q("SELECT COUNT(*) n FROM books WHERE owner=?", (g.owner,), one=True)["n"],
                    # ... and books: by title / author and by what's written in them
-                   book_hits=book_hits(term) if term and not parsed and not wanted_tags else [],
+                   book_hits=book_hits(term) if term and not search_mode and not parsed and not wanted_tags else [],
                    reading=reading_now() if not term else [],
                    # a search also shows matching 随记 among the videos
-                   note_hits=[notes.note_dict(r, [], []) for r in q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC",
+                   note_hits=[] if search_mode else [notes.note_dict(r, [], []) for r in q("SELECT * FROM notes WHERE owner=? ORDER BY created DESC, id DESC",
                                                                     (g.owner,)) if has_tags(json.loads(r["tags"] or "[]"), wanted_tags)][:50]
                    if wanted_tags else
                    [notes.note_dict(r, m, seen) for r, m, seen in
                     search.notes_search(" ".join(parsed["keywords"]) if parsed and parsed["keywords"] else term, visual=visual)[:50]]
                    if term else [],
                    understood=search.understood(parsed) if parsed else None,
-                   partial=bool(parsed and out and out[0].get("partial")), cats=category_counts())
+                   parsed=parsed, search_interpretation=search_interpretation, notice=search_notice,
+                   partial=bool(parsed and out and out[0].get("partial")), cats=listed_cats, **search_page)
+    if search_mode:
+        if (revealed() != search_reveal or
+                request.headers.get('X-Privacy-Token') and not privacy_token()):
+            return jsonify(error='隐私权限已变化，请重新搜索'), 403
+        for key in ('hidden_ids', 'source_hidden_ids', 'tag_aliases'):
+            g.pop(key, None)
+        if (hidden_ids() != hidden or library_search.access_stamp(g.owner) != search_access or
+                revealed() != search_reveal or request.headers.get('X-Privacy-Token') and not privacy_token()):
+            return jsonify(error='隐藏内容设置已变化，请重新搜索'), 403
+        response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 def tag_query(term):
@@ -1831,23 +2024,52 @@ def book_search(bid):
     return jsonify(hits=books.search_in(bid, term))
 
 
+def _report_visibility():
+    """Current owner permissions for cached reports, including archived activity."""
+    hidden = hidden_ids()
+    jobs = {row['id']: dict(row) for row in q(
+        "SELECT id,title,analysis FROM jobs WHERE owner=? AND status!='cancelled'", (g.owner,))
+        if row['id'] not in hidden}
+    history = {row['ref'] for row in q(
+        "SELECT ref FROM activity WHERE owner=? AND kind='video' UNION SELECT job_id FROM watch WHERE owner=?",
+        (g.owner, g.owner))}
+    # A deleted/purged video must not survive through a historical count or an
+    # AI-written cached title, even when its live jobs row no longer exists.
+    skip = hidden | (history - jobs.keys())
+    hide = hidden_subs(skip)
+    if not revealed():
+        prefs = privacy_get(g.owner)
+        for row in q('SELECT job_id,snapshot FROM job_trash WHERE owner=?', (g.owner,)):
+            data = json.loads(row['snapshot'])
+            data['id'] = row['job_id']
+            data['analysis'] = json.loads(data.get('analysis') or '{}')
+            if is_hidden(data, prefs):
+                source = data.get('source') or ''
+                if source.startswith('sub:') and source[4:].isdigit():
+                    hide.add(int(source[4:]))
+    return jobs, skip, hide
+
+
 @app.get("/api/weekly")
 def weekly_get():
     """每周总结: this week so far, and the weeks kept on Monday mornings."""
-    start, skip = weekly.week_start(), hidden_ids()
-    hide = hidden_subs(skip)
+    start = weekly.week_start()
+    _, skip, hide = _report_visibility()
+    subs = {row['id'] for row in q('SELECT id FROM subs WHERE owner=?', (g.owner,))} - hide
+    books = {row['id'] for row in q('SELECT id FROM books WHERE owner=?', (g.owner,))}
     past = []
     for r in q("SELECT * FROM weekly WHERE owner=? ORDER BY start DESC LIMIT 12", (g.owner,)):
-        body = json.loads(r["body"])
-        if skip:  # kept before those were hidden (or with them): count the week again without them
-            t0 = time.mktime(time.strptime(r["start"], "%Y-%m-%d"))
-            body = {**body, **weekly.report(g.owner, t0, weekly.plus_days(t0, 7), backlog=False, skip=skip)}
+        saved = json.loads(r["body"])
+        t0 = time.mktime(time.strptime(r["start"], "%Y-%m-%d"))
+        body = weekly.report(g.owner, t0, weekly.plus_days(t0, 7), backlog=False, skip=skip)
+        if saved.get('backlog'):
+            backlog = saved['backlog']
+            excluded = {s['id'] for s in backlog.get('subs', []) if s['id'] not in subs}
+            body['backlog'] = weekly.without_subs(backlog, excluded)
+            body['backlog']['reading'] = [b for b in backlog.get('reading', []) if b['id'] in books]
         past.append({**body, "created": r["created"]})
     current = weekly.report(g.owner, start, weekly.plus_days(start, 7), skip=skip, skip_subs=hide)
-    for body in past:  # (kept with every uploader in it)
-        if body.get("backlog"):
-            body["backlog"] = weekly.without_subs(body["backlog"], hide)
-    return jsonify(current=current, past=past)
+    return jsonify(current=current, past=past), 200, {'Cache-Control': 'no-store'}
 
 
 @app.get("/api/points/<int:jid>")
@@ -1902,17 +2124,34 @@ def digests_list():
     rows = q("SELECT * FROM digests WHERE owner=? ORDER BY end DESC, id DESC LIMIT 8", (g.owner,))
     pending = q("SELECT state FROM tasks WHERE kind='digest' AND target LIKE ? AND state IN ('queued','running')",
                 (f"digest:{g.owner}:%",), one=True)
-    skip, out = hidden_ids(), []
-    hide = hidden_subs(skip)
+    allowed, skip, hide = _report_visibility()
+    subs = {row['id']: row['name'] for row in q('SELECT id,name FROM subs WHERE owner=?', (g.owner,))
+            if row['id'] not in hide}
+    out = []
     for r in rows:
         body = json.loads(r["body"])
-        body["uploaders"] = [u for u in body.get("uploaders") or [] if u.get("sub") not in hide]
-        for u in body.get("uploaders") or []:
-            u["videos"] = [v for v in u.get("videos") or [] if v.get("job") not in skip]
-        body["uploaders"] = [u for u in body.get("uploaders") or [] if u["videos"]]
+        uploaders, redacted = [], bool(skip or hide)
+        for u in body.get('uploaders') or []:
+            videos = [v for v in u.get('videos') or [] if v.get('job') in allowed]
+            if u.get('sub') not in subs or not videos:
+                redacted = True
+                continue
+            redacted |= len(videos) != len(u.get('videos') or [])
+            uploaders.append({**u, 'name': subs[u['sub']], 'videos': [
+                {**v, 'title': json.loads(allowed[v['job']]['analysis'] or '{}').get('title') or allowed[v['job']]['title']}
+                for v in videos]})
+        body['uploaders'] = uploaders
+        if redacted:
+            # Aggregate prose and even a per-video line can quote another video
+            # from the original model context. Keep only revalidated titles.
+            body['headline'] = ''
+            for u in uploaders:
+                u['overview'] = ''
+                for video in u['videos']:
+                    video['line'] = ''
         out.append({"id": r["id"], **body, "created": r["created"]})
     return jsonify(digests=out,
-                   pending=bool(pending))
+                   pending=bool(pending)), 200, {'Cache-Control': 'no-store'}
 
 
 @app.post("/api/notes/recap")
@@ -1987,11 +2226,8 @@ def job_action(jid, action):
     if action == "parts":  # the video page's offer: all the 分P of this B站 video
         return jsonify(msg=pipeline.take_parts(jid))
     if action == "delete":
-        with_files = bool((request.get_json(silent=True) or {}).get("files"))
-        result, files = pipeline.remove_job(jid, with_files)
-        if files:
-            library.plex_refresh()
-        return jsonify(msg="removed from list" if result != "stopping" else "still stopping; remove it again in a moment",
+        result, files = pipeline.remove_job(jid, owner=g.owner)
+        return jsonify(msg="已移入回收站，30 天内可恢复" if result != "stopping" else "任务正在停止，请稍后再次删除",
                        result=result, files=files)
     return jsonify(error="unknown action"), 400
 
@@ -2005,17 +2241,20 @@ def tags_merge():
 
 @app.post("/api/jobs/remove")
 def remove_many():
-    """Batch removal: {"ids": [...], "files": true/false}"""
+    """Move this account's selected jobs to the recycle bin: {"ids": [...]}"""
     body = request.get_json(silent=True) or {}
-    with_files = bool(body.get("files"))
-    out = {"removed": 0, "stopping": 0, "files": 0}
-    for jid in body.get("ids", [])[:500]:
-        if isinstance(jid, int) and visible(jid):
-            result, files = pipeline.remove_job(jid, with_files)
-            out[result] = out.get(result, 0) + 1
-            out["files"] += files
-    if out["files"]:
-        library.plex_refresh()
+    ids = body.get("ids", []) if isinstance(body, dict) else []
+    if not isinstance(ids, list):
+        return jsonify(error="ids 必须是列表"), 400
+    out = {"removed": 0, "trashed": 0, "stopping": 0, "files": 0, "errors": []}
+    for jid in list(dict.fromkeys(value for value in ids[:500] if isinstance(value, int) and not isinstance(value, bool))):
+        if visible(jid):
+            try:
+                result, files = pipeline.remove_job(jid, owner=g.owner)
+                out[result] = out.get(result, 0) + 1
+                out["files"] += files
+            except Exception:
+                out["errors"].append({"id": jid, "error": "暂时无法移入回收站，请重试"})
     return jsonify(out)
 
 
@@ -2180,6 +2419,8 @@ def setup_app():
 from . import ask, board, books, cast, channels, core, heal, library, llm, notes, pipeline, search, tasks, weekly  # noqa: E402
 __import__(__package__ + '.share')  # register sharing routes
 __import__(__package__ + '.devices')  # home television status and administration
+__import__(__package__ + '.crawl')  # directory collection and result search
+__import__(__package__ + '.trash')  # per-account recycle bin and legacy file recovery
 
 
 def _request_crashed(sender, exception, **extra):

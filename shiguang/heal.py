@@ -6,12 +6,15 @@ back up); the tasks that failed are then tried again.
 The same error over and over is one incident (counted), and healed once: again only if it comes back after a fix
 (at most HEAL_TRIES times). At most HEAL_PER_DAY are sent to the Mac a day."""
 import json
+import hashlib
 import os
 import re
 import threading
 import time
 
-from . import board
+from flask import g, has_request_context
+
+from . import board, core
 from .core import DB_PATH, _write, q
 
 HEAL = os.environ.get("HEAL", "1") != "0"
@@ -20,12 +23,18 @@ HEAL_TRIES = 2
 # not bugs to heal: AI requests fall back to DeepSeek on purpose, only a Mac signs shortcuts, and healing itself
 SKIP_KINDS = {"llm", "shortcut", "heal"}
 
-def signature(kind, error, trace):
+def signature(kind, error, trace, context=None):
     """The same bug however often it happens: the kind, the error without its numbers and paths, where it was raised."""
     where = re.findall(r'File "[^"]*/(shiguang/[^"]+|grabber\.py)", line \d+, in (\w+)', trace or "")
     text = re.sub(r"/[^\s'\"]+", "/…", str(error))
     text = re.sub(r"\d+", "N", text)[:200]
-    return f"{kind}|{text}|{'/'.join(where[-1]) if where else ''}"
+    sig = f"{kind}|{text}|{'/'.join(where[-1]) if where else ''}"
+    if kind == 'crawl' and isinstance(context, dict):
+        # Never merge one owner's private source into another owner's incident,
+        # or overwrite a different task's retry target with its latest failure.
+        scope = [context.get('owner'), context.get('url_key'), context.get('crawl_id')]
+        sig += '|' + hashlib.sha256(json.dumps(scope, ensure_ascii=False).encode()).hexdigest()[:24]
+    return sig
 
 
 def report(kind, label, error, trace="", context=None, task_id=None, title=""):
@@ -34,13 +43,17 @@ def report(kind, label, error, trace="", context=None, task_id=None, title=""):
     try:
         if not HEAL or kind in SKIP_KINDS or str(error).startswith("network:"):
             return
-        sig, now = signature(kind, error, trace), time.time()
+        sig, now = signature(kind, error, trace, context), time.time()
         row = q("SELECT * FROM incidents WHERE sig=?", (sig,), one=True)
         if row:
             tasks = json.loads(row["tasks"] or "[]")
             if task_id and task_id not in tasks:
                 tasks = (tasks + [task_id])[-50:]
-            back = row["state"] == "fixed" and row["healed"] and now > row["healed"] + 60  # came back after a fix
+            # A crawler exhausts its post-fix retries in about 12 seconds. Its
+            # per-page report marker suppresses later reports, so deferring this
+            # recurrence for 60 seconds would leave a failed page fixed forever.
+            back = (row["state"] == "fixed" and row["healed"]
+                    and (kind == 'crawl' or now > row["healed"] + 60))
             _write("UPDATE incidents SET count=count+1, last=?, tasks=?, error=?, trace=?, context=?, state=? WHERE id=?",
                    (now, json.dumps(tasks), str(error)[:2000], (trace or "")[-8000:],
                     json.dumps(context or {}, ensure_ascii=False, default=str)[:6000],
@@ -173,6 +186,40 @@ def heal_done(task, result):
             _write(f"UPDATE tasks SET state='queued', attempts=0, error='', not_before=NULL, worker=NULL, updated=? "
                    f"WHERE state='failed' AND id IN ({','.join('?' * len(ids))})", (time.time(), *ids))
             board.ring("tasks")
+        _retry_crawl_incident(iid)
+
+
+def _retry_crawl_incident(iid):
+    """Retry only this incident's still-failed pages in a live task generation."""
+    changed = 0
+    with core.db_lock:
+        db = core.DB
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            incident = db.execute("SELECT context FROM incidents WHERE id=? AND kind='crawl' AND state='fixed'", (iid,)).fetchone()
+            try:
+                context = json.loads(incident['context'] or '{}') if incident else {}
+                context = context if isinstance(context, dict) else {}
+            except (ValueError, TypeError):
+                context = {}
+            cid, owner, key = context.get('crawl_id'), context.get('owner'), context.get('url_key')
+            if type(cid) is int and isinstance(owner, str) and isinstance(key, str):
+                task = db.execute("SELECT generation,status FROM crawls WHERE id=? AND owner=? AND url_key=? "
+                                  "AND status IN ('done','failed','limited','running','queued')", (cid, owner, key)).fetchone()
+                if task:
+                    changed = db.execute("UPDATE crawl_pages SET state='queued',error='',failures=0,retry_at=NULL,heal_reported=0 "
+                                         "WHERE crawl_id=? AND generation=? AND state='failed' AND heal_reported=?",
+                                         (cid, task['generation'], iid)).rowcount
+                    if changed and task['status'] not in ('running', 'queued'):
+                        db.execute("UPDATE crawls SET status='queued',error='',current_url='',next_refresh=NULL,updated=? WHERE id=?",
+                                   (time.time(), cid))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    if changed:
+        board.ring('crawls')
+    return changed
 
 
 board.TASK_KINDS["heal"]["then"] = heal_done
@@ -181,8 +228,16 @@ board.TASK_KINDS["heal"]["then"] = heal_done
 def recent(n=8):
     """For 资源使用: the latest incidents and how healing went."""
     out = []
+    scope, args = '', []
+    if has_request_context():
+        from . import web
+        owner = getattr(g, 'owner', None)
+        scope = "WHERE i.kind!='crawl' OR (CASE WHEN json_valid(i.context) THEN json_extract(i.context,'$.owner') END=? " \
+                "AND (? OR EXISTS(SELECT 1 FROM crawl_sources s WHERE s.owner=? AND s.classification='general' " \
+                "AND s.url_key=CASE WHEN json_valid(i.context) THEN json_extract(i.context,'$.url_key') END))) "
+        args = [owner, bool(owner and web.revealed()), owner]
     for r in q("SELECT i.*, t.state task_state, t.error task_error, t.result task_result FROM incidents i LEFT JOIN tasks t "
-               "ON t.kind='heal' AND t.target='incident:' || i.id ORDER BY i.last DESC LIMIT ?", (n,)):
+               "ON t.kind='heal' AND t.target='incident:' || i.id " + scope + "ORDER BY i.last DESC LIMIT ?", (*args, n)):
         state = r["state"]
         if state == "healing" and r["task_state"] == "failed":
             state = "error"

@@ -101,6 +101,7 @@
            font-variant-numeric: tabular-nums; }
   .badge.left { left: 0; right: auto; top: 0; bottom: auto; }
   .badge.bad { background: var(--accent); color: var(--on-accent); }
+  .badge.retry { max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
   .prog { position: absolute; left: 6px; right: 6px; bottom: 6px; height: 12px; border: 2px solid #fff; background: rgba(0,0,0,.5); }
   .prog > div { height: 100%; transition: width .6s;
                 background: repeating-linear-gradient(90deg, var(--yellow) 0 6px, transparent 6px 8px); }
@@ -127,6 +128,7 @@
   .sheet-bg { position: fixed; inset: 0; background: var(--overlay); z-index: 25; display: grid; place-items: center; padding: 16px; }
   .sheet { width: min(520px, 100%); background: var(--panel); border: 2px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding: 20px; }
   .sheet h2 { margin: 0 0 12px; font-size: 24px; line-height: 1.3; font-weight: normal; }
+  #privacyBody { max-height: calc(100dvh - 32px); overflow-y: auto; }
   .sheet input[type=text], .sheet input[type=password] { width: 100%; height: 40px; padding: 0 12px; border: 2px solid var(--ink);
          background: var(--bg); outline: none; margin-bottom: 10px; box-shadow: inset 3px 3px 0 var(--soft); }
   .sheet input:focus { box-shadow: inset 3px 3px 0 var(--soft), 0 0 0 2px var(--yellow); }
@@ -616,7 +618,8 @@
     .sheet input[type=text], .sheet input[type=password] { height: 46px; }
     .btn.wide { height: 46px; }
     .eye { top: 8px; }
-    .selbar { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); }
+    .selbar { padding: 10px 12px max(10px, env(safe-area-inset-bottom)); flex-wrap: wrap; gap: 8px; }
+    .selbar .btn { padding: 0 10px; }
   }
   /* motion: stepped (pixel-like) entrances and exits, quick but visible */
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -722,13 +725,20 @@ a.link {display: inline-block; max-width: 100%;}
   }
 </style>
 <link rel="stylesheet" href="/static/live.css?v=20261020-assistant-v1">
+<link rel="stylesheet" href="/static/crawl.css?v=20261023-v9">
+<link rel="stylesheet" href="/static/trash.css?v=20261023-v9">
+<link rel="stylesheet" href="/static/saved_search.css?v=20261023-v9">
+<link rel="stylesheet" href="/static/sources.css?v=20261023-v9">
+<link rel="stylesheet" href="/static/ai_activity.css?v=20261023-v9">
 </head>
 <body>
 <div class="topbar">
 <header>
   <a class="logo" href="#" onclick="setChip('all'); return false"><b>拾光</b><span>朝花夕拾，下载留存</span></a>
-  <form class="search" onsubmit="return false">
-    <input type="search" id="search" aria-label="搜索片库" placeholder="搜索标题、简介、字幕…  #标签 只搜标签" autocomplete="off">
+  <form class="search" onsubmit="submitMainSearch(event)">
+    <select id="mainSearchMode" aria-label="搜索模式" onchange="changeMainSearchMode()"><option value="exact">精准</option><option value="wildcard">通配（模糊）</option><option value="regex">正则</option><option value="ai">AI 语义</option></select>
+    <input type="search" id="search" aria-label="搜索片库和采集结果" placeholder="搜索片库和采集结果" autocomplete="off">
+    <button class="btn plain" id="mainSearchGo" type="submit">搜索</button>
   </form>
   <div class="right">
     <button class="btn plain" onclick="openAsk()" title="问拾光：用片库和随记回答问题">问</button>
@@ -743,13 +753,24 @@ a.link {display: inline-block; max-width: 100%;}
 <main>
   <div class="workspace-heading"><div><h1 id="workspaceTitle">片库</h1><p id="workspaceDescription">留存喜欢的内容，随时接着看。</p></div><div class="view-tools" id="viewTools"></div></div>
   <div class="chips" id="chips" aria-label="片库分类"></div>
-  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><div class="toolbar-actions"><a class="link" href="/devices">设备状态</a><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div></div>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><div class="toolbar-actions"><a class="link" href="/devices">设备状态</a><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" onclick="openTrash()">回收站</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div></div>
   <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite" hidden><p id="workspaceStatusText"></p><button class="btn plain" id="workspaceRetry" onclick="refresh()">重新连接</button></div>
   <div class="understood" id="understood" hidden></div>
+  <div class="saved-search-tools" id="savedSearchTools"><button type="button" class="link" onclick="openSavedSearches()">常用搜索</button><button type="button" class="link" id="savedSearchSaveCurrent" onclick="openSavedSearches(true)" hidden>保存搜索</button></div>
+  <p id="mainSearchHelp" class="hint" hidden></p>
+  <section id="mainCrawlSearch" class="main-crawl-search" aria-labelledby="mainCrawlTitle" hidden>
+    <div class="main-search-heading"><h2 id="mainCrawlTitle">目录采集结果</h2><span id="mainCrawlCount"></span></div>
+    <p class="hint" id="mainCrawlNote" hidden></p><p class="form-err" id="mainCrawlError" role="alert" hidden></p>
+    <div id="mainCrawlResults" class="main-crawl-results"></div>
+    <div id="mainCrawlPages" class="crawl-pagination" hidden><button class="btn plain" id="mainCrawlPrev" onclick="pageMainCrawl(-1)">上一页</button><span id="mainCrawlPage"></span><button class="btn plain" id="mainCrawlNext" onclick="pageMainCrawl(1)">下一页</button></div>
+  </section>
+  <div id="mainLibraryHeading" class="main-search-heading" hidden><h2>片库结果</h2><span id="mainLibraryCount"></span></div>
+  <p class="hint" id="mainLibraryNote" hidden></p>
   <div class="notehits" id="noteHits" hidden onclick="setChip('notes')"></div>
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
   <div id="contRead" hidden><div class="contitle">继续阅读</div><div class="controw" id="controwRead"></div></div>
   <div class="grid" id="grid"></div>
+  <div id="mainLibraryPages" class="crawl-pagination" hidden><button type="button" class="btn plain" id="mainLibraryPrev" onclick="pageMainLibrary(-1)">上一页</button><span id="mainLibraryPage"></span><button type="button" class="btn plain" id="mainLibraryNext" onclick="pageMainLibrary(1)">下一页</button></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
   <div class="subs" id="subs" hidden></div>
   <div id="liveWorkspace" hidden></div>
@@ -787,12 +808,33 @@ a.link {display: inline-block; max-width: 100%;}
   <div class="empty" id="empty">正在加载…</div>
 </main>
 
+<div class="sheet-bg" id="savedSearchSheet" hidden onclick="if (event.target === this) hide(this)">
+  <section class="sheet px saved-search-sheet" role="dialog" aria-modal="true" aria-labelledby="savedSearchTitle">
+    <div class="saved-search-heading"><h2 id="savedSearchTitle">常用搜索</h2><button type="button" class="link" onclick="hide($('#savedSearchSheet'))">关闭</button></div>
+    <div class="saved-search-scroll">
+      <p class="hint">保存搜索词和模式，点击名称即可再次搜索。AI 搜索仅在点击名称后运行。</p>
+      <p class="hint">未登录时保存在当前浏览器名下；登录后并入账号，可跨设备使用。</p>
+      <form id="savedSearchForm" class="saved-search-form" onsubmit="saveNamedSearch(event)" hidden>
+        <h3 id="savedSearchFormTitle">保存当前搜索</h3>
+        <label for="savedSearchName">名称<input id="savedSearchName" type="text" maxlength="60" required autocomplete="off"></label>
+        <p class="saved-search-query" id="savedSearchPreview"></p><p class="hint" id="savedSearchPrivacyHint"></p>
+        <div class="saved-search-actions"><button type="submit" class="btn" id="savedSearchFormSave">保存搜索</button><button type="button" class="btn plain" id="savedSearchFormCancel" onclick="cancelSavedSearchForm()">取消</button></div>
+      </form>
+      <p class="form-err" id="savedSearchError" role="alert" hidden></p>
+      <div class="saved-search-count-row"><span id="savedSearchCount"></span><button type="button" class="link" id="savedSearchRefresh" onclick="loadSavedSearches()">刷新列表</button></div>
+      <div id="savedSearchList"></div>
+      <button type="button" class="btn plain saved-search-more" id="savedSearchMore" onclick="loadSavedSearches(true)" hidden>加载更多</button>
+    </div>
+  </section>
+</div>
+
 <div class="selbar" id="selbar" hidden>
   <span id="selCount">已选 0 个</span>
   <button class="link" onclick="selectAll()">全选</button>
   <span style="flex:1"></span>
   <button class="btn plain" onclick="toggleSelect()">取消</button>
-  <button class="btn" id="selRemove" onclick="askRemove([...selected])">移除</button>
+  <button class="btn plain" id="selHide" data-privacy-action onclick="changePrivacySelection([...selected], true)" disabled hidden>加入隐藏清单</button>
+  <button class="btn" id="selRemove" onclick="askRemove([...selected])">移入回收站</button>
 </div>
 
 <!-- remove confirm -->
@@ -800,11 +842,54 @@ a.link {display: inline-block; max-width: 100%;}
   <div class="sheet">
     <h2 id="removeTitle">移除</h2>
     <p class="hint" id="removeHint"></p>
-    <label class="check"><input type="checkbox" id="removeFiles"> 同时从硬盘删除文件<span>删除后无法恢复</span></label>
+    <p class="hint">回收站保留 30 天，可以随时恢复，也可以手动永久删除。到期后自动清理。</p>
     <div class="row" style="margin-top:16px">
       <button class="btn plain" onclick="hide($('#removeSheet'))">取消</button>
-      <button class="btn" id="removeGo">移除</button>
+      <button class="btn" id="removeGo">移入回收站</button>
     </div>
+  </div>
+</div>
+
+<!-- personal recycle bin -->
+<div class="sheet-bg" id="sourcesSheet" hidden onclick="if (event.target === this) closeSources()">
+  <section class="sheet px sources-sheet" role="dialog" aria-modal="true" aria-labelledby="sourcesTitle">
+    <div class="sources-heading"><h2 id="sourcesTitle">来源与新内容</h2><button type="button" class="link" id="sourcesRefresh" onclick="refreshSources()">刷新列表</button><button type="button" class="link" onclick="closeSources()">关闭</button></div>
+    <div class="sources-tabs"><button type="button" class="btn plain" id="sourcesTabInbox" aria-pressed="true" onclick="switchSourcesTab('inbox')">新内容</button><button type="button" class="btn plain" id="sourcesTabAll" aria-pressed="false" onclick="switchSourcesTab('sources')">全部来源</button></div>
+    <div class="sources-scroll">
+      <p class="hint">频道追更和目录采集的新发现汇总到这里。账号之间隔离；隐藏内容仍遵守隐私模式。</p>
+      <p class="form-err" id="sourcesError" role="alert" hidden></p>
+      <section id="sourcesOverview" aria-label="全部来源" hidden>
+        <div class="sources-add"><span id="sourcesTotal"></span><button type="button" class="btn plain" onclick="sourceAdd('sub')">添加频道追更</button><button type="button" class="btn plain" onclick="sourceAdd('crawl')">添加目录采集</button></div>
+        <div id="sourceCards" class="source-cards"></div>
+      </section>
+      <section id="sourcesInbox" aria-label="新内容收件箱">
+        <p class="hint">从启用后发现的内容开始记录。首次采集和历史补抓不标为未读，后续增量发现的新内容进入未读。</p>
+        <div class="inbox-filters"><label for="inboxSource">来源<select id="inboxSource" onchange="filterInbox()"><option value="">全部来源</option></select></label><label for="inboxState">状态<select id="inboxState" onchange="filterInbox()"><option value="unread">未读</option><option value="read">已读</option><option value="ignored">已忽略</option><option value="all">全部</option></select></label></div>
+        <div class="inbox-select-row"><label><input type="checkbox" id="inboxPickPage" onchange="pickInboxPage(this.checked)">选择本页</label><span id="inboxCount"></span><span id="inboxSelected"></span></div>
+        <div class="inbox-actions"><button type="button" class="btn plain" id="inboxRead" onclick="inboxAction('read')" disabled>标为已读</button><button type="button" class="btn plain" id="inboxUnread" onclick="inboxAction('unread')" disabled>标为未读</button><button type="button" class="btn plain" id="inboxIgnore" onclick="inboxAction('ignore')" disabled>忽略</button><button type="button" class="btn" id="inboxDownload" onclick="inboxAction('download')" disabled>加入下载</button></div>
+        <p class="hint">忽略只整理收件箱，不删除视频。加入下载需要手动选择并点击，已有内容不会重复下载。</p>
+        <p class="form-err" id="inboxError" role="alert" hidden></p>
+        <div id="inboxItems"></div>
+        <div class="crawl-pagination" id="inboxPages" hidden><button type="button" class="btn plain" id="inboxPrev" onclick="pageInbox(-1)">上一页</button><span id="inboxPageLabel"></span><button type="button" class="btn plain" id="inboxNext" onclick="pageInbox(1)">下一页</button></div>
+      </section>
+    </div>
+  </section>
+</div>
+
+<div class="sheet-bg" id="aiActivitySheet" hidden onclick="if (event.target === this) closeAIActivity()"><div class="sheet wide-sheet" id="aiActivityBody"></div></div>
+
+<div class="sheet-bg" id="trashSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet trash-sheet" role="dialog" aria-modal="true" aria-labelledby="trashTitle">
+    <div class="trash-heading"><h2 id="trashTitle">我的回收站</h2><button type="button" class="link" onclick="hide($('#trashSheet'))">关闭</button></div>
+    <p class="hint">只显示当前账号移除的内容。保留 30 天后自动清理，期间可以恢复或手动永久删除。</p>
+    <div class="trash-toolbar"><span id="trashCount" role="status" aria-live="polite"></span><button type="button" class="link" id="trashRefresh" onclick="loadTrash()">刷新</button><button type="button" class="btn plain" id="trashScan" onclick="scanTrash()" hidden>找回遗留文件</button><button type="button" class="btn plain" id="trashEmpty" onclick="askDeleteTrash('all')" disabled>清空当前列表</button></div>
+    <p class="hint" id="trashScanHint" hidden>管理员可以扫描硬盘中失去记录的旧文件，找回到自己的回收站。历史遗留文件等待你确认后处理。</p>
+    <p class="form-err" id="trashError" role="alert" hidden></p>
+    <div class="trash-confirm" id="trashConfirm" hidden>
+      <p id="trashConfirmText"></p><p>无法恢复；仍被其他账号使用的共享文件会保留。</p>
+      <div class="row"><button type="button" class="btn plain" id="trashCancel" onclick="cancelDeleteTrash()">取消</button><button type="button" class="btn" id="trashDeleteGo" onclick="deleteTrash()">确认永久删除</button></div>
+    </div>
+    <div class="trash-list" id="trashList"></div>
   </div>
 </div>
 
@@ -821,10 +906,97 @@ a.link {display: inline-block; max-width: 100%;}
       </div>
       <input type="file" id="file" accept=".torrent" hidden multiple>
     </form>
+    <button type="button" class="btn plain crawl-entry" onclick="openCrawl()">目录采集 · 自动翻页找视频</button>
     <div id="addTips"></div>
   </div>
 </div>
 <div id="dropAll" hidden>松开就开始下载</div>
+
+<!-- directory crawl -->
+<div class="sheet-bg" id="crawlSheet" hidden onclick="if (event.target === this) hide(this)">
+  <div class="sheet crawl-sheet" role="dialog" aria-modal="true" aria-labelledby="crawlTitle">
+    <div class="crawl-heading"><h2 id="crawlTitle">目录采集</h2><button type="button" class="link" onclick="hide($('#crawlSheet'))">关闭</button></div>
+    <div class="crawl-scroll">
+      <p class="hint">可一次粘贴多个目录，每行一个，最多 20 个。后台同时采集 2 个目录，其余排队；自动翻页并合并重复地址。关闭窗口后仍会继续采集。</p>
+      <p class="hint">来源在根目录判别一次，结果沿用该分级。成人来源需先解锁隐私，并勾选「显示隐藏的内容」。</p>
+      <form id="crawlCreateForm" class="crawl-create" onsubmit="startCrawl(event)">
+        <label class="crawl-url-field" for="crawlURL">目录网址<textarea id="crawlURL" rows="3" placeholder="https://example.com/videos/&#10;https://example.org/list/" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="50000"></textarea></label>
+        <label for="crawlMaxPages">每个目录最多页数<input type="number" id="crawlMaxPages" min="1" max="500" step="1" value="50" required></label>
+        <label for="crawlRefreshHours">自动增量刷新<select id="crawlRefreshHours"><option value="6">每 6 小时</option><option value="1">每小时</option><option value="24">每天</option><option value="0">关闭</option></select></label>
+        <button type="submit" class="btn" id="crawlStart">开始采集</button>
+      </form>
+      <p class="form-err" id="crawlError" role="alert" hidden></p>
+      <p class="hint" id="crawlPrivacyNotice" role="status" hidden>隐私来源已隐藏。解锁隐私并开启“显示隐藏的内容”后可查看。</p>
+      <div class="crawl-history-row" id="crawlHistoryRow">
+        <label for="crawlHistory">最近采集</label>
+        <select id="crawlHistory" onchange="selectCrawl(this.value)"><option value="">暂无采集记录</option></select>
+        <button type="button" class="link" onclick="refreshCrawl()">刷新</button>
+      </div>
+      <div id="crawlDetail" hidden>
+        <section class="crawl-progress-panel" aria-label="采集进度">
+          <div class="crawl-progress-heading"><strong id="crawlStatus" role="status" aria-live="polite"></strong><button type="button" class="btn plain" id="crawlControl" onclick="controlCrawl()" hidden></button><button type="button" class="link" id="crawlEdit" onclick="editCrawl()">编辑任务</button><button type="button" class="link" id="crawlDelete" onclick="askDeleteCrawl()">删除任务</button></div>
+          <div class="crawl-stats" id="crawlStats"></div>
+          <progress id="crawlProgress" value="0" max="50" aria-label="目录页采集进度"></progress>
+          <p class="crawl-current" id="crawlCurrent"></p>
+          <p class="crawl-status-hint" id="crawlStatusHint"></p>
+          <p class="crawl-status-hint" id="crawlSourceRating"></p>
+          <p class="crawl-status-hint" id="crawlLastError" hidden></p>
+          <div class="crawl-issues-toggle"><button type="button" class="link" id="crawlIssuesToggle" onclick="toggleCrawlIssues()" aria-expanded="false" aria-controls="crawlIssuesPanel">查看问题页面</button></div>
+          <section id="crawlIssuesPanel" class="crawl-issues-panel" aria-label="问题页面" hidden>
+            <div class="crawl-issues-heading"><h3>问题页面</h3><button type="button" class="link" id="crawlIssuesRefresh" onclick="loadCrawlIssues()">刷新状态</button><button type="button" class="btn plain" id="crawlIssuesRetry" onclick="retryFailedCrawlPages()">仅重试失败页</button></div>
+            <p class="crawl-status-hint" id="crawlIssuesSummary" role="status"></p>
+            <p class="crawl-status-hint" id="crawlIssuesHint"></p>
+            <p class="form-err" id="crawlIssuesError" role="alert" hidden></p>
+            <div id="crawlIssuesList"></div>
+            <div class="crawl-pagination" id="crawlIssuesPages" hidden><button type="button" class="link" id="crawlIssuesPrev" onclick="pageCrawlIssues(-1)">上一页</button><span id="crawlIssuesPageLabel"></span><button type="button" class="link" id="crawlIssuesNext" onclick="pageCrawlIssues(1)">下一页</button></div>
+          </section>
+          <div class="crawl-auto-row"><label for="crawlCurrentRefresh">自动刷新</label><select id="crawlCurrentRefresh" onchange="saveCrawlRefresh(this.value)"><option value="0">关闭</option><option value="1">每小时</option><option value="6">每 6 小时</option><option value="24">每天</option></select><button type="button" class="btn plain" id="crawlRefreshNow" onclick="refreshCrawlNow()">立即增量刷新</button><span id="crawlNextRefresh"></span></div>
+          <p class="crawl-status-hint" id="crawlManageHint"></p>
+          <form id="crawlEditForm" class="crawl-manage-panel" onsubmit="saveCrawlEdit(event)" hidden>
+            <h3>编辑当前任务</h3>
+            <div class="crawl-edit-fields"><label class="crawl-url-field" for="crawlEditURL">目录网址<input type="url" id="crawlEditURL" required autocomplete="url"></label><label for="crawlEditMaxPages">最多目录页<input type="number" id="crawlEditMaxPages" min="1" max="500" step="1" required></label><label for="crawlEditRefreshHours">自动增量刷新<select id="crawlEditRefreshHours"><option value="0">关闭</option><option value="1">每小时</option><option value="6">每 6 小时</option><option value="24">每天</option></select></label></div>
+            <p class="crawl-status-hint">更换目录网址会清除这个任务的进度和采集结果，并重新采集。已加入下载的视频会保留。</p>
+            <p class="form-err" id="crawlEditError" role="alert" hidden></p>
+            <div class="crawl-manage-actions"><button type="submit" class="btn" id="crawlEditSave">保存修改</button><button type="button" class="btn plain" id="crawlEditCancel" onclick="cancelCrawlEdit()">取消</button></div>
+          </form>
+          <div id="crawlDeleteConfirm" class="crawl-manage-panel" hidden>
+            <h3>删除这个采集任务？</h3><p class="crawl-delete-url" id="crawlDeleteURL"></p>
+            <p>任务会停止，采集记录和结果会删除。已加入下载的视频会保留，其他采集任务不受影响。</p>
+            <p class="form-err" id="crawlDeleteError" role="alert" hidden></p>
+            <div class="crawl-manage-actions"><button type="button" class="btn plain" id="crawlDeleteCancel" onclick="cancelDeleteCrawl()">取消</button><button type="button" class="btn" id="crawlDeleteGo" onclick="deleteCrawl()">确认删除任务</button></div>
+          </div>
+        </section>
+        <form id="crawlSearchForm" class="crawl-search" onsubmit="searchCrawl(event)">
+          <label class="crawl-sr-only" for="crawlSearchMode">搜索模式</label>
+          <select id="crawlSearchMode" onchange="crawlSearchModeChanged()">
+            <option value="exact">精准</option><option value="wildcard">通配（模糊）</option><option value="regex">正则</option><option value="ai">AI 语义</option>
+          </select>
+          <label class="crawl-sr-only" for="crawlQuery">搜索采集结果</label>
+          <input type="search" id="crawlQuery" placeholder="搜索标题、描述或地址" maxlength="256" autocomplete="off" aria-describedby="crawlSearchHelp">
+          <button type="submit" class="btn plain" id="crawlSearchGo">搜索</button>
+          <button type="button" class="link" id="crawlClearSearch" onclick="clearCrawlSearch()" hidden>清除</button>
+        </form>
+        <p class="crawl-search-help" id="crawlSearchHelp"></p>
+        <p class="crawl-search-note" id="crawlSearchNote" role="status" hidden></p>
+        <p class="crawl-search-note" id="crawlSearchPending" hidden>正在搜索，下面仍是上一次结果。</p>
+        <div class="crawl-results-bar">
+          <label class="crawl-pick-page"><input type="checkbox" id="crawlPickPage" onchange="pickCrawlPage(this.checked)">选择本页</label>
+          <span id="crawlResultCount"></span><span id="crawlSelectedCount"></span>
+          <button type="button" class="link" onclick="clearCrawlSelection()" id="crawlClearSelection" hidden>取消选择</button>
+        </div>
+        <div class="crawl-actions">
+          <button type="button" class="btn plain" id="crawlCopy" onclick="copyCrawlAddresses()" disabled>复制地址</button>
+          <button type="button" class="btn plain" id="crawlExport" onclick="exportCrawlAddresses()" disabled>导出全部地址</button>
+          <button type="button" class="btn" id="crawlImportSelected" onclick="importCrawl(false)" disabled>下载选中</button>
+          <button type="button" class="btn plain" id="crawlImportAll" onclick="importCrawl(true)" disabled>下载全部结果</button>
+        </div>
+        <p class="crawl-action-hint">优先复制和导出视频直链，未解析到直链时使用详情页地址；添加下载后会继续解析。</p>
+        <div id="crawlResults" class="crawl-results"></div>
+        <div class="crawl-pagination"><button type="button" class="btn plain" id="crawlPrev" onclick="pageCrawl(-1)" disabled>上一页</button><span id="crawlPageLabel"></span><button type="button" class="btn plain" id="crawlNext" onclick="pageCrawl(1)" disabled>下一页</button></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Android share setup -->
 <div class="sheet-bg" id="androidSheet" hidden onclick="if (event.target === this) hide(this)">
@@ -974,12 +1146,20 @@ let castQueue = Promise.resolve();
 let selecting = false, selected = new Set(), shown = [], cardHtml = [], lastBody = "";
 let workspaceLoaded = false, workspaceLoading = false, workspaceError = "";
 let videoSort = lsGet("videoSort", "added");
-let storageOwner = lsGet("shiguangOwner", "unidentified"), refreshEpoch = 0, notesEpoch = 0, booksEpoch = 0;
+let storageOwner = lsGet("shiguangOwner", "unidentified"), refreshEpoch = 0, notesEpoch = 0, booksEpoch = 0, refreshController = null;
 const privateKey = (key, owner = storageOwner) => `${key}:${owner}`;
 function setStorageOwner(owner) {
   if (!owner || owner === storageOwner) return;
   lsSet(privateKey('noteDraft'), $('#noteText').value);
   storageOwner = owner; lsSet('shiguangOwner', owner);
+  if (typeof resetCrawl === 'function') resetCrawl();
+  if (typeof resetTrash === 'function') resetTrash();
+  if (typeof resetMainSearch === 'function') resetMainSearch();
+  if (typeof resetSavedSearches === 'function') resetSavedSearches();
+  if (typeof resetSources === 'function') resetSources();
+  if (typeof resetAIActivity === 'function') resetAIActivity();
+  ++removeEpoch; $('#removeGo').disabled = false;
+  cancelPrivacySelection(); ++privacyMenuEpoch; ++privateViewEpoch;
   ++notesEpoch; ++booksEpoch; ++watchOpenEpoch;
   if (rd.id) rdClose(true, true);
   watching = null; casting = null; clearTimeout(castTimer);
@@ -1003,6 +1183,7 @@ function setStorageOwner(owner) {
   $('#lightbox').hidden = true; lb.list = []; $('#lightbox').querySelectorAll('img,video').forEach(el => el.removeAttribute('src'));
   saving = false; $('#noteGo').disabled = false; $('#upState').textContent = '';
   privacyToken = null; selected.clear(); selecting = false; lastBody = ''; cardHtml = [];
+  updatePrivacySelectionVisibility();
   state = {jobs: [], user: null, admin: false}; $('#grid').innerHTML = ''; $('#grid').dataset.ids = '';
   workspaceLoaded = false; workspaceError = "";
   for (const el of document.querySelectorAll('.sheet-bg:not([hidden])')) hide(el);
@@ -1017,9 +1198,15 @@ const openSeries = new Set();
 // Close a sheet / the watch page with a short exit animation instead of vanishing
 function hide(el, after) {
   if (el?.id === "learningSheet") cancelLearningPlan();
+  if (el?.id === "crawlSheet" && typeof suspendCrawl === 'function') suspendCrawl();
+  if (el?.id === "trashSheet" && typeof suspendTrash === 'function') suspendTrash();
+  if (el?.id === "savedSearchSheet" && typeof closeSavedSearches === 'function') closeSavedSearches();
+  if (el?.id === "sourcesSheet" && typeof resetSources === 'function') resetSources();
+  if (el?.id === "aiActivitySheet" && typeof resetAIActivity === 'function') resetAIActivity();
+  if (el?.id === "privacySheet") { cancelPrivacySelection(); ++privacyMenuEpoch; }
   if (!el || el.hidden || el.classList.contains("closing")) return;
   el.classList.add("closing");
-  setTimeout(() => { el.hidden = true; el.classList.remove("closing"); after && after(); }, 170);
+  setTimeout(() => { el.hidden = true; el.classList.remove("closing"); after && after(); if (el.id === 'crawlSheet') schedule(); }, 170);
 }
 function toast(t) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 3000); }
 // Escape, then highlight the search term
@@ -1104,13 +1291,9 @@ function toggleSeries(el) {
 }
 function seriesCard(g) {
   const first = g.jobs[0], done = g.jobs.filter(j => j.watch && j.watch.done).length;
-  const jobs = [...g.jobs].sort((a, b) => {
-    const aa = a.analysis || {}, ba = b.analysis || {};
-    // Specials follow the numbered seasons; unnumbered entries use natural title order.
-    return ((+aa.season === 0 ? 9999 : +aa.season || 1) - (+ba.season === 0 ? 9999 : +ba.season || 1))
-      || ((aa.episode ?? Infinity) - (ba.episode ?? Infinity))
-      || titleOf(a).localeCompare(titleOf(b), "zh-CN", {numeric: true}) || a.id - b.id;
-  });
+  // render() already applies the selected library order before grouping.
+  // Episode metadata must not silently override that choice inside a series.
+  const jobs = g.jobs;
   return `<details class="series" data-series="${esc(g.key)}"${openSeries.has(g.key) ? " open" : ""} ontoggle="toggleSeries(this)">
     <summary>${esc(g.name)}${first.thumb ? `<img class="series-cover" src="/thumb/${first.id}" alt="" loading="lazy">` : ""}
       <span class="meta">${g.jobs.length} 个视频${done ? ` · 已看完 ${done} 个` : ""} · 展开 / 收起</span></summary>
@@ -1127,11 +1310,11 @@ function renderChips() {
   // categories: counted over the whole library on the Pi (the list only holds a page of the newest)
   const counts = {...(state.cats || {})};
   if (!state.cats) state.jobs.forEach(j => { const c = category(j); if (c) counts[c] = (counts[c] || 0) + 1; });
-  const active = state.jobs.filter(j => ACTIVE.includes(j.status)).length;
-  const failed = state.jobs.filter(j => j.status === "failed").length;
+  const active = state.jobs.filter(downloadActive).length;
+  const failed = state.jobs.filter(j => j.status === "failed" && !waitingDownloadRetry(j)).length;
   const primary = [["all", "片库"], ["live", "直播切片"], ["notes", "随记"], ["books", "书架"], ["subs", "追更"]];
   const workspace = chip.startsWith("sub:") ? "subs" : primary.some(([key]) => key === chip) ? chip : "all";
-  const navHtml = primary.map(([key, label]) => `<button class="chip${workspace === key ? " on" : ""}" aria-pressed="${workspace === key}" onclick="setChip('${key}')">${label}</button>`).join("");
+  const navHtml = primary.map(([key, label]) => `<button class="chip${workspace === key ? " on" : ""}" aria-pressed="${workspace === key}" onclick="setChip('${key}')">${label}</button>`).join("") + '<button class="chip" aria-haspopup="dialog" onclick="openSources()">来源与新内容</button>';
   if ($("#workspaceNav").innerHTML !== navHtml) $("#workspaceNav").innerHTML = navHtml;
   const library = !["notes", "books", "subs", "live"].includes(chip);
   $("#chips").hidden = !library;
@@ -1157,7 +1340,7 @@ function renderChips() {
     notes: ["随记", "随手记录文字、照片和声音，也能找回以前记下的细节。"],
     books: ["书架", "收藏电子书、接着阅读，也可以把书缓存到当前设备。"],
     subs: ["追更", "关注喜欢的创作者，让新的内容自动来到片库。"],
-    active: ["下载中", "查看下载与处理进度。完成的内容会自动回到对应分类。"],
+    active: ["下载中", "查看下载、处理和等待自动重试的任务。完成的内容会自动回到对应分类。"],
     failed: ["需要处理", "打开内容查看失败原因，再决定重试或移除。"],
     device: ["设备内容", deviceFilter ? `查看由 ${deviceFilter} 添加的内容。` : "查看指定设备添加的内容。"],
   };
@@ -1173,13 +1356,14 @@ function syncSearchControl() {
   if (live) search.value = ""; else if (wasDisabled) search.value = query;
   search.placeholder = live ? "直播切片请使用下方的主播、状态筛选" : chip === "notes" ? "搜索随记（文字和语音里说的话）…" : chip === "books" ? "搜索书名、作者、书里的文字…" : "搜索标题、简介、标签、字幕…";
   search.setAttribute("aria-label", live ? "直播切片使用工作台内筛选" : chip === "notes" ? "搜索随记" : chip === "books" ? "搜索书架" : "搜索片库");
+  if (typeof syncMainSearchControls === 'function') syncMainSearchControls();
 }
 function renderWorkspaceStatus() {
   const box = $("#workspaceStatus"), firstLoad = !workspaceLoaded && workspaceLoading;
   box.hidden = !workspaceError && !firstLoad;
   box.classList.toggle("error", !!workspaceError);
   $("#workspaceStatusText").textContent = workspaceError
-    ? (workspaceLoaded ? "连接暂时中断，当前内容已保留。联网后会自动恢复，也可以手动重试。" : "暂时无法加载内容。请检查连接后重试。")
+    ? (query && typeof mainSearchAvailable === 'function' && mainSearchAvailable() ? '片库搜索失败：' + workspaceError : workspaceLoaded ? "连接暂时中断，当前内容已保留。联网后会自动恢复，也可以手动重试。" : "暂时无法加载内容。请检查连接后重试。")
     : "正在加载你的内容…";
   $("#workspaceRetry").hidden = !workspaceError;
   $("#workspaceRetry").disabled = workspaceLoading;
@@ -1191,7 +1375,7 @@ function setChip(k) {
   if (k === "all") deviceFilter = null;
   if (k.startsWith("sub:") && chip === k) k = "subs";  // click the uploader chip again: back to the list
   const isCat = x => !!(FOLDERS[x] || LIBS[x]);
-  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || k === "live" || chip === "live" || isCat(k) || isCat(chip);
+  const refetch = k.startsWith("sub:") || chip.startsWith("sub:") || k === "notes" || k === "books" || chip === "books" || k === "live" || chip === "live" || isCat(k) || isCat(chip) || !!query;
   clearTimeout(searchTimer); $("#search").value = query;
   chip = k; pageLimit = 100; saveNavigation(true); render();
   updateSearchOptions();
@@ -1200,12 +1384,23 @@ function setChip(k) {
   if (k === "subs" && Date.now() - digestState.at > 60000) loadDigests();
 }
 
+function waitingDownloadRetry(j) { return j.status === 'failed' && Number(j.retry_at) > 0; }
+function downloadActive(j) { return ACTIVE.includes(j.status) || waitingDownloadRetry(j); }
+function downloadRetryLabel(j, compact = false) {
+  if (!waitingDownloadRetry(j)) return '';
+  const saved = String(j.error || '').match(/第\s*(\d+)\s*\/\s*(\d+)\s*次/);
+  const limit = Math.max(1, Number(saved?.[2]) || 3), attempt = Math.min(limit, Math.max(1, Number(j.attempts) || Number(saved?.[1]) || 1));
+  const seconds = Math.max(0, Math.ceil(Number(j.retry_at) - Date.now() / 1000));
+  const delay = seconds >= 3600 ? `约 ${Math.ceil(seconds / 3600)} 小时后` : seconds >= 60 ? `约 ${Math.ceil(seconds / 60)} 分钟后` : seconds ? `${seconds} 秒后` : '正在等待调度';
+  return compact ? `自动重试 · ${delay} · ${attempt}/${limit}` : `等待自动重试：${delay}，第 ${attempt}/${limit} 次`;
+}
+
 function card(j, clearableWatch = false) {
   const a = j.analysis || {}, m = (j.media || [])[0];
   let over = "";
   if (ACTIVE.includes(j.status)) over = `<div class="state">${j.status === "queued" ? "排队中" : esc(STAGES[j.stage] || j.stage || "处理中")}${j.progress ? " " + j.progress.toFixed(0) + "%" : ""}${j.speed ? "<br>" + esc(j.speed) : ""}</div>
                       <div class="prog"><div style="width:${j.progress || 0}%"></div></div>`;
-  else if (j.status === "failed") over = j.retry_at ? `<span class="badge left">等待自动重试</span>` : `<span class="badge left bad">失败</span>`;
+  else if (j.status === "failed") over = waitingDownloadRetry(j) ? `<span class="badge left retry">${esc(downloadRetryLabel(j, true))}</span>` : `<span class="badge left bad">失败</span>`;
   else if (j.status === "cancelled") over = `<span class="badge left bad">已取消</span>`;
   else if (j.missing) over = `<span class="badge left bad">文件已删除</span>`;
   // a search that found it by how a moment looks shows that moment as the cover
@@ -1216,8 +1411,9 @@ function card(j, clearableWatch = false) {
   const meta = [category(j) ? catName(category(j)) : null, ago(j.created), subOf(j) ? "追更 · " + subOf(j).name : phone(j),
                 j.owner_label ? "@" + j.owner_label : null].filter(Boolean).map(esc).join(" · ");
   // where the search found it: in the subtitles at 12:34, written on the cover, a moment that looks like it...
-  const h0 = (j.hits || []).find(h => h.src === j.match_where && h.text === j.match);
-  const hit = h0 ? `<div class="hit">${hitLabel(h0)}${j.hits.length > 1 ? ` 等 ${j.hits.length} 处` : ""}：${hl(h0.text)}</div>`
+  const h0 = (j.hits || []).find(h => h.src === j.match_where && h.text === j.match) || (j.hits || [])[0];
+  const timedHit = h0 && validSearchHit(h0);
+  const hit = h0 ? `<div class="hit">${hitLabel(h0)}${j.hits.length > 1 ? ` 等 ${j.hits.length} 处` : ""}：${searchHitText(h0)}${timedHit && !selecting ? `<br><button type="button" class="link" onclick="event.stopPropagation(); openWatch(${j.id}, ${h0.part}, ${h0.t})">${['画面', '封面'].includes(h0.src) ? '定位片段' : '定位原文'}</button>` : ''}</div>`
     : j.match ? `<div class="hit">${esc(j.match_where || "字幕")}：${hl(j.match)}</div>` : "";
   const picking = selecting ? `<span class="pick">${selected.has(j.id) ? "✓" : ""}</span>` : "";
   if (j.hidden) over += `<span class="badge left hid">已隐藏</span>`;
@@ -1227,7 +1423,7 @@ function card(j, clearableWatch = false) {
   if (w && w.done) over += `<span class="badge tr">已看完</span>`;
   else if (w && w.dur && w.pos >= 5) over += `<div class="watched"><div style="width:${Math.min(100, w.pos / w.dur * 100).toFixed(1)}%"></div></div>`;
   const clear = clearableWatch ? `<button class="clear-watch" title="清除观看记录" aria-label="清除观看记录" onclick="event.stopPropagation(); clearWatch(${j.id})">×</button>` : "";
-  return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${h0 ? `, ${h0.part}, ${h0.t}` : ""})`}">
+  return `<div class="card${selected.has(j.id) ? " picked" : ""}${j.hidden ? " is-hidden" : ""}" onclick="${selecting ? `togglePick(${j.id})` : `openWatch(${j.id}${timedHit ? `, ${h0.part}, ${h0.t}` : ""})`}">
     ${clear}
     ${picking}<div class="cover">${cover}${badge}${parts}${over}</div>
     <div class="info"><div class="title">${hl(episodeOf(j) || titleOf(j))}</div><div class="meta">${meta}</div>${hit}</div>
@@ -1272,7 +1468,7 @@ function render() {
   if (notes) renderNotes();
   if (shelf) renderBooks();
   // searching from 全部 mixes matching 随记 in with the videos, newest first; other chips just point to them
-  const hits = state.note_hits || [], mixNotes = chip === "all" && !!query;
+  const hits = state.note_hits || [], mixNotes = chip === "all" && !!query && !(typeof mainSearchAvailable === 'function' && mainSearchAvailable());
   $("#noteHits").hidden = notes || shelf || mixNotes || !query || !hits.length;
   $("#noteHits").textContent = `随记里也有 ${hits.length} 条匹配 →`;
   $("#understood").hidden = !(query && state.understood);
@@ -1282,8 +1478,8 @@ function render() {
     // 首页 skips 追更 videos still waiting in line (hundreds after a backfill); they're under 下载中 and the UP chip
     chip === "all" ? !(j.status === "queued" && (j.source || "").startsWith("sub:")) :
     chip.startsWith("sub:") ? j.source === chip :
-    chip === "active" ? ACTIVE.includes(j.status) :
-    chip === "failed" ? j.status === "failed" :
+    chip === "active" ? downloadActive(j) :
+    chip === "failed" ? j.status === "failed" && !waitingDownloadRetry(j) :
     chip === "device" ? phone(j) === deviceFilter : category(j) === chip);
   const videoSorts = {
     published: (a, b) => String((b.analysis || {}).published || "").localeCompare(String((a.analysis || {}).published || ""), "zh-CN") || b.id - a.id,
@@ -1343,6 +1539,7 @@ function render() {
   const voice = $('#recBtn');
   if (!recorder) {voice.textContent = navigator.mediaDevices && window.MediaRecorder ? '语音' : '导入语音';voice.title = navigator.mediaDevices ? '录制语音' : '选择音频文件，或使用键盘语音输入';}
   renderAvatar();
+  if (typeof renderMainSearch === 'function') renderMainSearch();
 }
 function renderAvatar() {
   $("#privState").innerHTML = privacyToken && (state.privacy || {}).revealed
@@ -1353,40 +1550,60 @@ function renderAvatar() {
   if (watching) updateWatchStatus();
 }
 
-async function refresh() {
+async function refresh(options = {}) {
+  if (options.background && !options.explicitSearch && typeof crawlVisible === 'function' && crawlVisible()) return;
+  if (typeof queueMainLibraryRefresh === 'function' && mainSearchAvailable() && (query || hasMainLibraryFlight()))
+    return queueMainLibraryRefresh(options, () => refreshNow(options));
+  return refreshNow(options);
+}
+async function refreshNow(options = {}) {
   const epoch = ++refreshEpoch;
+  const requestOwner = storageOwner;
+  const searchRequest = typeof mainLibraryRequest === 'function' ? mainLibraryRequest(options.explicitSearch === true) : null;
+  refreshController?.abort(); const controller = new AbortController(); refreshController = controller;
   workspaceLoading = true; renderWorkspaceStatus();
   try {
     const params = new URLSearchParams({compact:"1"});
     if (chip === 'live') params.set('metadata', '1');
-    if (query && !["books","notes","live"].includes(chip)) params.set("q", query);  // on 书架 the search is in the books (loadBooks)
+    if (searchRequest) {
+      for (const [key, value] of Object.entries(searchRequest.params)) params.set(key, value);
+    } else if (query && !["books","notes","live"].includes(chip)) params.set("q", query);  // on 书架 the search is in the books (loadBooks)
     if (!query && !selecting) params.set("grouped", "1");
     if (chip.startsWith("sub:")) params.set("sub", chip.slice(4));
     if (FOLDERS[chip] || LIBS[chip]) params.set("cat", chip);  // the whole category, not a page of the newest
     if (videoSort !== "added") params.set("sort", videoSort);
-    if (query && smartSearch && !exactSearch) params.set("nl", "1");
-    if (pageLimit > 100) params.set("limit", pageLimit);
+    if (!searchRequest && query && smartSearch && !exactSearch) params.set("nl", "1");
+    if (pageLimit > 100 && !searchRequest?.pageKey) params.set("limit", pageLimit);
     if (visualSearch) params.set('visual', '1');
-    const response = await fetch("/api/jobs" + (params.size ? "?" + params : ""));
-    if (!response.ok) throw Error('加载失败');
+    const response = await fetch("/api/jobs" + (params.size ? "?" + params : ""), {signal: controller.signal});
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      if (response.status === 403 && epoch === refreshEpoch && requestOwner === storageOwner && typeof clearMainSearchPermission === 'function') { clearMainSearchPermission(error.error); return; }
+      throw Error(error.error || '加载失败');
+    }
     const body = await response.text();
-    if (epoch !== refreshEpoch) return;
-    const next = JSON.parse(body);
+    if (epoch !== refreshEpoch || requestOwner !== storageOwner) return;
+    let next = JSON.parse(body);
+    if (state.privacy?.revealed && !next.privacy?.revealed && typeof resetPrivateViews === 'function') resetPrivateViews();
+    if (searchRequest && typeof applyMainLibraryResult === 'function') next = applyMainLibraryResult(next, searchRequest);
     setStorageOwner(next.storage_owner);
     workspaceLoaded = true; workspaceError = "";
     if (chip === "notes") loadNotes();
     if (chip === "books") loadBooks();
-    if (body !== lastBody) {  // nothing changed: leave the page alone
-      lastBody = body;
+    const renderedBody = searchRequest ? JSON.stringify(next) : body;
+    if (renderedBody !== lastBody) {  // nothing changed: leave the page alone
+      lastBody = renderedBody;
       state = next;
       render();
       updateSearchOptions();
       if (chip === "live" && !liveData) await loadLive();
       // From outside the home network everything needs an account: go straight to the login form
       if (state.login_required && $("#accountSheet").hidden) openAccount();
+    } else if (state.jobs.some(waitingDownloadRetry)) {
+      render(); // Refresh retry countdowns even when the stored job row is unchanged.
     }
   } catch (e) {
-    if (epoch !== refreshEpoch) return;
+    if (epoch !== refreshEpoch || e.name === 'AbortError') return;
     workspaceError = e.message || "连接中断";
     if (chip === 'books') { await loadBooks(); render(); schedule(); return; }
     // no Pi: if this device has books cached, the shelf still works
@@ -1397,14 +1614,14 @@ async function refresh() {
     }
     render();
   } finally {
-    if (epoch === refreshEpoch) { workspaceLoading = false; renderWorkspaceStatus(); }
+    if (epoch === refreshEpoch) { workspaceLoading = false; renderWorkspaceStatus(); if (typeof renderMainSearch === 'function') renderMainSearch(); }
   }
   schedule();
 }
 let wentOffline = false;
 // Finished entries come 100 at a time; a complete series occupies one entry. Unfinished jobs are always sent.
 let pageLimit = 100;
-function loadMore() { pageLimit += 100; $("#more").disabled = true; refresh().finally(() => $("#more").disabled = false); }
+function loadMore() { pageLimit += 100; $("#more").disabled = true; refresh({explicitSearch: true}).finally(() => $("#more").disabled = false); }
 function setVideoSort(sort) {
   videoSort = ["published", "added", "title", "author"].includes(sort) ? sort : "added";
   lsSet("videoSort", videoSort);
@@ -1418,12 +1635,12 @@ function setVideoSort(sort) {
 let pollTimer;
 function schedule() {
   clearTimeout(pollTimer);
-  if (document.hidden) return;
-  const busy = state.jobs.some(j => ACTIVE.includes(j.status)) || (state.subs || []).some(s => s.pending)
+  if (document.hidden || typeof crawlVisible === 'function' && crawlVisible()) return;
+  const busy = state.jobs.some(downloadActive) || (state.subs || []).some(s => s.pending)
     || (chip === "notes" && notesState.notes.some(n => n.pending)) || (chip === "books" && booksState.books.some(b => b.status === "importing"));
-  pollTimer = setTimeout(refresh, busy ? 5000 : 60000);
+  pollTimer = setTimeout(() => refresh({background: true}), busy ? 5000 : 60000);
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh({background: true}); });
 
 /* ---------- 追更: followed uploaders ---------- */
 const PLAT = {bilibili: "B站", bangumi: "追番", youtube: "YouTube", pornhub: "PH"};
@@ -1508,7 +1725,7 @@ function subRow(s) {
   const counts = [`已下载 ${s.done}`, s.active ? `下载中/排队 ${s.active}` : "", s.failed ? `失败 ${s.failed}` : "",
                   s.total ? `UP 主共 ${s.total} 个` : ""].filter(Boolean).join(" · ");
   const partial = s.backfill && s.total >= s.backfill;
-  return `<div class="px subrow" style="padding:12px 14px">
+  return `<div class="px subrow" data-source-sub="${s.id}" style="padding:12px 14px">
     <div class="face">${s.avatar ? `<img src="/subavatar/${s.id}" alt="" loading="lazy">` : "▶"}</div>
     <div class="body">
       <div class="name" onclick="setChip('sub:${s.id}')">${esc(s.name)}<span class="plat ${esc(s.platform)}">${PLAT[s.platform] || esc(s.platform)}</span></div>
@@ -1531,8 +1748,8 @@ function subRow(s) {
 /* 追更周报 */
 let digestState = {digests: [], pending: false, at: 0}, digestPick = 0;
 async function loadDigests() {
-  const owner = storageOwner;
-  try { const data = await (await fetch("/api/digests")).json(); if(owner!==storageOwner)return; digestState = {...data, at: Date.now()}; } catch (e) { return; }
+  const owner = storageOwner, epoch = privateViewEpoch;
+  try { const data = await (await fetch("/api/digests")).json(); if(owner!==storageOwner || epoch!==privateViewEpoch)return; digestState = {...data, at: Date.now()}; } catch (e) { return; }
   if (chip === "subs") { $("#subs").dataset.html = ""; renderSubs(); }
   if (digestState.pending) setTimeout(loadDigests, 5000);  // being written: look again soon
 }
@@ -2047,20 +2264,35 @@ let watchOpenEpoch = 0;
 async function openWatch(id, part = 0, t = 0) {
   const openEpoch = ++watchOpenEpoch, owner = storageOwner;
   let item = state.jobs.find(x => x.id === id);
-  if (!item || item.compact) {
+  const privacyEpoch = typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch;
+  const searchEpoch = typeof mainSearchEpoch === 'undefined' ? 0 : mainSearchEpoch;
+  const searchContext = query && item?.hits?.length ? {q: query, mode: typeof mainSearchMode === 'function' ? mainSearchMode() : '',
+    hits: item.hits, match: item.match, match_where: item.match_where} : null;
+  const stillCurrent = () => openEpoch === watchOpenEpoch && owner === storageOwner
+    && privacyEpoch === (typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch)
+    && (!searchContext || searchEpoch === (typeof mainSearchEpoch === 'undefined' ? 0 : mainSearchEpoch)
+      && searchContext.q === query && searchContext.mode === (typeof mainSearchMode === 'function' ? mainSearchMode() : ''));
+  if (!item || item.compact || searchContext) {
     try {
-      const response = await fetch(`/api/jobs?only=1&ids=${id}`);
+      const response = await fetch(`/api/jobs?${searchContext ? 'mode=exact&' : ''}only=1&ids=${id}`);
+      if (response.status === 403 && stillCurrent() && typeof clearMainSearchPermission === 'function') { clearMainSearchPermission('播放权限已变化，请重新解锁或登录'); return; }
       if (!response.ok) throw Error();
       const result = await response.json();
-      if (openEpoch !== watchOpenEpoch || owner !== storageOwner) return;
+      if (!stillCurrent()) return;
+      if (result.storage_owner && result.storage_owner !== owner) return;
       item = result.jobs.find(x => x.id === id);
       if (!item) {toast('这个视频不见了');return;}
+      if (searchContext) item = {...item, hits: searchContext.hits, match: searchContext.match, match_where: searchContext.match_where};
       const index = state.jobs.findIndex(j => j.id === id);
       if (index < 0) state.jobs.push(item); else state.jobs[index] = item;
-    } catch(e) {toast('视频详情加载失败，请重试');return;}
+    } catch(e) {if (stillCurrent()) toast('视频详情加载失败，请重试');return;}
   }
   const explicitTime = arguments.length >= 3;
   const j = state.jobs.find(x => x.id === id); if (!j) return;
+  if (explicitTime && (!validSearchHit({part, t}) || !(j.media || [])[part]
+      || Number(j.media[part].duration) > 0 && t > Number(j.media[part].duration))) {
+    toast('这个原文位置已不可用，请重新搜索后打开'); return;
+  }
   stopMedia();  // re-rendering (another part, a retry...) must not leave the old player sounding
   // opened from the list (not from a search hit or a part button): carry on where you left off, on any device
   const w = j.watch, resumed = arguments.length < 2 && w && !w.done && w.pos >= 5 && (j.media || [])[w.part];
@@ -2111,9 +2343,10 @@ async function openWatch(id, part = 0, t = 0) {
       ${m && airplayAvailable() ? `<button onclick="showAirPlay()">AirPlay</button>` : ""}
       ${m ? `<button onclick="findCast(${id},${part})">${casting ? '更换投屏设备' : '投屏到电视'}</button>` : ""}
       ${m && j.status === "done" ? `<button onclick="openShares(${id})">分享</button>` : ""}
-      ${active ? `<button onclick="act(${id},'cancel')">取消下载</button>` : ""}
-      ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">重试</button>` : ""}
-      ${!active ? `<button onclick="askRemove([${id}])">移除…</button>` : ""}
+      ${active || waitingDownloadRetry(j) ? `<button onclick="act(${id},'cancel')">${waitingDownloadRetry(j) ? '取消自动重试' : '取消下载'}</button>` : ""}
+      ${["failed", "cancelled"].includes(j.status) ? `<button onclick="act(${id},'retry')">${waitingDownloadRetry(j) ? '立即重试' : '重试'}</button>` : ""}
+      ${state.user && j.privacy_editable ? `<button data-privacy-action${privacyToken ? '' : ' hidden'} onclick="changePrivacySelection([${id}], ${!j.manual_hidden})">${j.manual_hidden ? '移出隐藏清单' : '加入隐藏清单'}</button>` : ''}
+      ${!active ? `<button onclick="askRemove([${id}])">移入回收站…</button>` : ""}
     </div>
     <div id="castBox"></div>
     <div id="shareBox"></div>
@@ -2258,19 +2491,27 @@ async function clearWatch(id) {
 document.addEventListener("visibilitychange", () => { if (document.hidden) saveWatch(); });
 
 // a search found the words in the subtitles: every place they're said, click to jump there
+function validSearchHit(h) { return Number.isSafeInteger(h?.part) && h.part >= 0 && typeof h.t === 'number' && Number.isFinite(h.t) && h.t >= 0; }
+function searchHitText(h) {
+  const marks = Array.isArray(h.marks) ? h.marks.filter(mark => typeof mark === 'string').slice(0, 30)
+    : typeof mainSearchMode === 'function' && mainSearchMode() === 'wildcard' ? query.split(/[*?]+/).filter(Boolean).slice(0, 30) : null;
+  return hl(h.text, marks);
+}
 function hitLabel(h, multi) {
-  const at = h.t == null ? "" : ` <b class="at">${multi ? `P${h.part + 1} ` : ""}${dur(h.t) || "0:00"}</b>`;
+  const at = !validSearchHit(h) ? "" : ` <b class="at">${multi ? `P${h.part + 1} ` : ""}${dur(h.t) || "0:00"}</b>`;
   return `${esc(h.src || "字幕")}${at}`;
 }
 function hitList(j) {
   const hits = j.hits || [];
   if (!hits.length || !query) return "";
-  const multi = (j.media || []).length > 1, timed = hits.filter(h => h.t != null).length;
-  return `<div class="hits"><div class="psec">「${esc(query)}」出现在 ${hits.length}${hits.length >= 30 ? "+" : ""} 处${timed ? "，点一下跳到那里" : ""}</div>
-    ${hits.map(h => h.t == null ? `<div class="hitrow">${hitLabel(h)}：${hl(h.text)}</div>`
-      : `<button onclick="seekTo(${j.id}, ${h.part}, ${h.t})">${hitLabel(h, multi)}：${hl(h.text)}</button>`).join("")}</div>`;
+  const multi = (j.media || []).length > 1, timed = hits.filter(validSearchHit).length;
+  return `<div class="hits"><div class="psec">「${esc(query)}」${hits.some(h => ['画面', '封面'].includes(h.src)) ? '搜索' : '原文'}命中 ${hits.length}${hits.length >= 30 ? "+" : ""} 处${timed ? "，点击时间定位" : ""}</div>
+    ${hits.map(h => !validSearchHit(h) ? `<div class="hitrow">${hitLabel(h)}：${searchHitText(h)}</div>`
+      : `<button onclick="seekTo(${j.id}, ${h.part}, ${h.t})">${hitLabel(h, multi)}：${searchHitText(h)}</button>`).join("")}</div>`;
 }
 function seekTo(id, part, t) {
+  if (!Number.isSafeInteger(id) || id < 1 || !validSearchHit({part, t})) { toast('这个原文位置无效'); return; }
+  if (query && state.jobs.find(job => job.id === id)?.hits?.length) { openWatch(id, part, t); return; }
   const v = $("#watchBody video, #watchBody audio");
   if (!v || !watching || watching.id !== id || watching.part !== part) { openWatch(id, part, t); return; }
   if (casting) { castSeek(casting.device, t); return; }
@@ -2517,7 +2758,7 @@ function updateWatchStatus() {
   const el = $("#wstatus"); if (!el || !watching) return;
   const j = state.jobs.find(x => x.id === watching.id); if (!j) return;
   if (j.status === "done" && (j.media || []).length) { openWatch(j.id); return; }  // just finished: show the player
-  el.innerHTML = j.status === "queued" ? "排队中…" : j.status === "failed" ? "下载失败" : j.status === "cancelled" ? "已取消"
+  el.innerHTML = j.status === "queued" ? "排队中…" : waitingDownloadRetry(j) ? esc(downloadRetryLabel(j)) : j.status === "failed" ? "下载失败（自动重试已结束或此错误不能自动恢复）" : j.status === "cancelled" ? "已取消"
     : j.missing ? "文件已经从硬盘上删除了（可能是从共享文件夹里删除的）"
     : j.status === "done" ? "这个任务没有可以播放的文件"
     : `${esc(STAGES[j.stage] || j.stage || "处理中")} ${j.progress ? j.progress.toFixed(0) + "%" : ""}<br>${esc(j.speed || "")}`;
@@ -2529,9 +2770,10 @@ function closeWatch() {
   hide($("#watch"), () => { $("#watchBody").innerHTML = ""; });
 }
 async function act(id, action, close) {
+  const owner = storageOwner;
   const r = await (await fetch(`/api/jobs/${id}/${action}`, {method: "POST"})).json();
-  toast(r.error || (action === "delete" && r.msg.startsWith("still") ? "正在停止，稍后再移除"
-    : {cancel: "正在取消", retry: "已重新开始", delete: "已从列表移除（文件还在）"}[action] || r.msg));
+  if (owner !== storageOwner) return;
+  toast(r.error || ({cancel: "正在取消", retry: "已重新开始"}[action] || r.msg || '已处理'));
   if (close) closeWatch();
   await refresh();
   if (watching) openWatch(watching.id, watching.part);
@@ -2572,6 +2814,75 @@ document.addEventListener('keydown', e => {
 }, true);
 
 /* ---------- privacy mode (hidden menu: tap the avatar three times) ---------- */
+let privacySelectionPending = null, privacySelectionBusy = false, privacySelectionEpoch = 0, privacyMenuEpoch = 0, privateViewEpoch = 0;
+function cancelPrivacySelection() {
+  ++privacySelectionEpoch; privacySelectionPending = null; privacySelectionBusy = false;
+  document.querySelectorAll('[data-privacy-action]').forEach(button => { button.disabled = false; });
+  updateSelbar();
+}
+function updatePrivacySelectionVisibility() {
+  document.querySelectorAll('[data-privacy-action]').forEach(button => { button.hidden = !state.user || !privacyToken; });
+}
+function resetPrivateViews() {
+  ++privateViewEpoch; ++refreshEpoch; refreshController?.abort(); workspaceLoading = false;
+  // Clear synchronously: an offline refresh must never leave revealed cards,
+  // categories or cached reports visible after the user locks privacy.
+  state = {...state, jobs: [], cats: {}, subs: [], more: false, understood: '', search_interpretation: '', notice: '',
+    privacy: {...state.privacy, revealed: false}};
+  shown = []; cardHtml = []; lastBody = '';
+  digestState = {digests: [], pending: false, at: 0}; digestPick = 0; weeklyData = null; weeklyPick = 0;
+  for (const id of ['grid','controw','chips','subs','weeklyBody','usageBody','askOut','learningResult']) {
+    const el = $('#' + id); el.innerHTML = ''; el.dataset.html = ''; el.dataset.ids = '';
+  }
+  $('#continue').hidden = true; $('#askGo').disabled = false;
+  for (const id of ['weeklySheet','usageSheet','askSheet','learningSheet']) $('#' + id).hidden = true;
+  cancelLearningPlan(); $('#learningError').hidden = true;
+  if (typeof resetMainSearch === 'function') resetMainSearch();
+  if (typeof resetSavedSearches === 'function') resetSavedSearches();
+  if (typeof resetSources === 'function') resetSources();
+  if (typeof resetAIActivity === 'function') resetAIActivity();
+  if (typeof resetCrawl === 'function') resetCrawl();
+  if (typeof resetTrash === 'function') resetTrash();
+}
+async function changePrivacySelection(ids, hidden = true, fromMenu = false) {
+  ids = [...new Set(ids)].filter(id => Number.isSafeInteger(id) && id > 0);
+  if (!ids.length || privacySelectionBusy) return false;
+  if (!state.user) { openAccount(); toast('先登录账号'); return false; }
+  const owner = storageOwner;
+  if (!privacyToken) {
+    privacySelectionPending = {ids, hidden, fromMenu, owner}; await openPrivacy(); return false;
+  }
+  const epoch = ++privacySelectionEpoch;
+  privacySelectionPending = null; privacySelectionBusy = true;
+  document.querySelectorAll('[data-privacy-action]').forEach(button => { button.disabled = true; });
+  try {
+    const response = await fetch('/api/privacy/ids', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids, hidden})});
+    const data = await response.json();
+    if (owner !== storageOwner || epoch !== privacySelectionEpoch) return false;
+    if (response.status === 403 && data.error === 'locked') {
+      lockPrivacy(true);
+      privacySelectionPending = {ids, hidden, fromMenu, owner}; await openPrivacy(); return false;
+    }
+    if (!response.ok || data.error) throw Error(data.error || '隐藏清单更新失败');
+    const wasRevealed = !!state.privacy?.revealed;
+    if (watching && ids.includes(watching.id) && hidden && !wasRevealed) closeWatch();
+    resetPrivateViews();
+    if (selecting) { selected.clear(); selecting = false; $('#manageBtn').textContent = '批量管理'; }
+    await refresh();
+    if (owner !== storageOwner || epoch !== privacySelectionEpoch) return false;
+    toast(hidden ? `已将 ${ids.length} 个视频加入隐藏清单` : '已移出手动隐藏清单；符合隐藏标签的视频仍会隐藏');
+    if (fromMenu) await openPrivacy();
+    else { hide($('#privacySheet')); if (watching && ids.includes(watching.id)) openWatch(watching.id, watching.part); }
+    return true;
+  } catch (e) {
+    if (owner === storageOwner && epoch === privacySelectionEpoch) toast(e.message || '隐藏清单更新失败，请重试');
+    return false;
+  } finally {
+    if (owner === storageOwner && epoch === privacySelectionEpoch) {
+      privacySelectionBusy = false; document.querySelectorAll('[data-privacy-action]').forEach(button => { button.disabled = false; }); updateSelbar();
+    }
+  }
+}
 // Triple tap, or press and hold for a second, opens the privacy menu; a single tap opens the account menu
 let taps = 0, tapTimer, holdTimer, held = false;
 function avatarTap() {
@@ -2589,14 +2900,19 @@ function avatarTap() {
   av.addEventListener("contextmenu", e => e.preventDefault());
 })();
 function lockPrivacy(quiet) {
+  cancelPrivacySelection(); ++privacyMenuEpoch;
   if (!privacyToken) return;
+  const closeHiddenWatch = watching && (state.jobs.find(j => j.id === watching.id) || {}).hidden;
   privacyToken = null; clearTimeout(privacyTimer);
+  updatePrivacySelectionVisibility();
+  resetPrivateViews();
   cancelLearningPlan(); $("#learningResult").innerHTML = ""; $("#learningError").hidden = true;
   if (!$("#privacySheet").hidden) hide($("#privacySheet"));
+  $('#privacyBody').innerHTML = '';
   if (selecting) toggleSelect();
   if (!quiet) toast("已隐藏");
   // leave the player alone unless it's showing something that is now hidden again
-  if (watching && (state.jobs.find(j => j.id === watching.id) || {}).hidden) closeWatch();
+  if (closeHiddenWatch) closeWatch();
   refresh();
 }
 document.addEventListener("visibilitychange", () => {
@@ -2604,39 +2920,64 @@ document.addEventListener("visibilitychange", () => {
   else if (privacyToken && Date.now() - hiddenSince > 60000) lockPrivacy(true);
 });
 async function privacyApi(body) {
-  const r = await fetch("/api/privacy", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  if (r.status === 403) { lockPrivacy(true); toast("隐私菜单已锁上，请重新打开"); return false; }
-  return true;
+  const owner = storageOwner;
+  try {
+    const r = await fetch("/api/privacy", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await r.json(); if (owner !== storageOwner) return false;
+    if (r.status === 403) { lockPrivacy(true); toast("隐私菜单已锁上，请重新打开"); return false; }
+    if (!r.ok || data.error) { toast(data.error || '隐私设置保存失败'); return false; }
+    resetPrivateViews();
+    return true;
+  } catch (e) { if (owner === storageOwner) toast(e.message || '隐私设置保存失败'); return false; }
 }
 async function openPrivacy() {
   if (!state.user) { openAccount(); toast("先登录账号"); return; }
+  const owner = storageOwner, epoch = ++privacyMenuEpoch;
   if (!privacyToken) {
+    const pending = privacySelectionPending?.owner === owner ? privacySelectionPending : null;
     $("#privacyBody").innerHTML = `
       <h2>验证身份</h2>
       <p class="hint">输入账号 ${esc(state.user)} 的密码。</p>
+      ${pending ? `<p class="hint">验证后，将选中的 ${pending.ids.length} 个视频${pending.hidden ? '加入' : '移出'}你自己的隐藏清单。</p>` : ''}
       <form id="unlockForm">
         <input type="password" id="unlockPw" placeholder="密码" autocomplete="current-password">
         <div class="form-err" id="unlockErr" hidden></div>
-        <button class="btn wide">确定</button>
-      </form>`;
+        <button class="btn wide" type="submit">验证并继续</button>
+      </form><button type="button" class="link" onclick="hide($('#privacySheet'))">取消</button>`;
     $("#privacySheet").hidden = false;
-    setTimeout(() => $("#unlockPw").focus(), 50);
+    setTimeout(() => { if (owner === storageOwner && epoch === privacyMenuEpoch && !$('#privacySheet').hidden) $('#unlockPw')?.focus(); }, 50);
     $("#unlockForm").onsubmit = async e => {
       e.preventDefault();
+      const button = e.target.querySelector('[type=submit]'); if (button.disabled) return; button.disabled = true;
+      try {
       const r = await fetch("/api/privacy/unlock", {method: "POST", headers: {"Content-Type": "application/json"},
                                                     body: JSON.stringify({password: $("#unlockPw").value})});
       const j = await r.json();
+      if (owner !== storageOwner || epoch !== privacyMenuEpoch) return;
       if (!r.ok) { $("#unlockErr").textContent = j.error; $("#unlockErr").hidden = false; $("#unlockPw").select(); return; }
       privacyToken = j.token;
+      updatePrivacySelectionVisibility(); updateSelbar();
       clearTimeout(privacyTimer);
       privacyTimer = setTimeout(() => lockPrivacy(true), j.expires_in * 1000);
-      openPrivacy();
+      const action = privacySelectionPending;
+      if (action && action.owner === owner) await changePrivacySelection(action.ids, action.hidden, action.fromMenu);
+      else await openPrivacy();
+      } catch (error) {
+        if (owner === storageOwner && epoch === privacyMenuEpoch) { $('#unlockErr').textContent = error.message || '验证失败，请重试'; $('#unlockErr').hidden = false; }
+      } finally { button.disabled = false; }
     };
     return;
   }
-  const r = await fetch("/api/privacy");
-  if (!r.ok) { lockPrivacy(true); return openPrivacy(); }
-  const p = await r.json();
+  let p;
+  try {
+    const r = await fetch("/api/privacy");
+    if (owner !== storageOwner || epoch !== privacyMenuEpoch) return;
+    if (r.status === 403) { lockPrivacy(true); return openPrivacy(); }
+    if (!r.ok) throw Error('隐私设置暂时无法加载，请重试');
+    p = await r.json();
+    if (owner !== storageOwner || epoch !== privacyMenuEpoch) return;
+  } catch (e) { if (owner === storageOwner && epoch === privacyMenuEpoch) toast(e.message || '隐私设置加载失败'); return; }
+  const manual = p.manual_items || [];
   const tagChips = p.tags.map((t, i) =>
     `<span class="ptag">#${esc(t)} <button onclick='savePrivacyTags(${esc(JSON.stringify(p.tags.filter((_, k) => k !== i)))})'>✕</button></span>`).join("");
   $("#privacyBody").innerHTML = `
@@ -2644,6 +2985,9 @@ async function openPrivacy() {
     <div class="psec">显示隐藏的内容</div>
     <label class="check" style="margin-bottom:16px"><input type="checkbox" id="revealBox" ${p.revealed ? "checked" : ""}> 显示
       <span style="color:var(--muted)">只在这个页面有效；刷新页面、离开超过 1 分钟或 30 分钟后会自动恢复隐藏</span></label>
+    <div class="psec">手动隐藏清单 · ${manual.length} 个视频</div>
+    <p class="hint">在视频详情或批量管理中点击「加入隐藏清单」。移出后，符合隐藏标签的视频仍会继续隐藏。</p>
+    <div style="max-height:220px;overflow-y:auto;margin-bottom:16px">${manual.map(item => `<div class="dev"><div class="dev-main">${esc(item.title || '未命名视频')}</div><button type="button" class="btn plain" data-privacy-action onclick="changePrivacySelection([${Number(item.id)}], false, true)">移出清单</button></div>`).join('') || '<p class="hint">还没有手动添加的视频。</p>'}</div>
     <div class="psec">按标签隐藏</div>
     <div class="ptags">${tagChips || '<span class="sub">还没有</span>'}</div>
     <form id="ptagForm" class="row" style="margin:10px 0 16px">
@@ -2661,10 +3005,12 @@ async function openPrivacy() {
   };
 }
 async function savePrivacyTags(tags) {
-  if (await privacyApi({tags})) { await refresh(); openPrivacy(); }
+  const owner = storageOwner;
+  if (await privacyApi({tags})) { await refresh(); if (owner === storageOwner) openPrivacy(); }
 }
 
 /* ---------- removing (one or many) ---------- */
+let removeEpoch = 0;
 function toggleSelect() {
   selecting = !selecting; selected.clear();
   $("#manageBtn").textContent = selecting ? "完成" : "批量管理";
@@ -2680,36 +3026,40 @@ function updateSelbar() {
   $("#selbar").hidden = !selecting;
   $("#selCount").textContent = `已选 ${selected.size} 个`;
   $("#selRemove").disabled = !selected.size;
-  document.body.style.paddingBottom = selecting ? "72px" : "";
+  $('#selHide').hidden = !state.user || !privacyToken;
+  $('#selHide').disabled = privacySelectionBusy || !selected.size || [...selected].some(id => !state.jobs.find(job => job.id === id)?.privacy_editable);
+  $('#selHide').title = '只修改当前账号拥有的视频；需要先验证身份';
+  document.body.style.paddingBottom = selecting ? ($('#selbar').offsetHeight || 72) + 16 + 'px' : '';
 }
 function askRemove(ids) {
   if (!ids.length) return;
+  ++removeEpoch; $('#removeGo').disabled = false;
   const one = ids.length === 1 ? state.jobs.find(j => j.id === ids[0]) : null;
   const busy = ids.filter(id => ACTIVE.includes((state.jobs.find(j => j.id === id) || {}).status)).length;
-  $("#removeTitle").textContent = one ? "移除这个内容？" : `移除 ${ids.length} 个内容？`;
-  $("#removeHint").textContent = (one ? `「${titleOf(one)}」` : "") + "会从列表里移除。"
-    + (busy ? `其中 ${busy} 个还在下载，会先停止。` : "") + "不勾选下面的选项，硬盘上的文件会保留，可以继续通过共享文件夹访问。";
-  $("#removeFiles").checked = false;
-  $("#removeGo").textContent = "移除";
-  $("#removeFiles").onchange = () => $("#removeGo").textContent = $("#removeFiles").checked ? "移除并删除文件" : "移除";
-  $("#removeGo").onclick = () => doRemove(ids, $("#removeFiles").checked);
+  $("#removeTitle").textContent = one ? "移入回收站？" : `将 ${ids.length} 个内容移入回收站？`;
+  $("#removeHint").textContent = (one ? `「${titleOf(one)}」` : "这些内容") + "会进入你自己的回收站。"
+    + (busy ? `其中 ${busy} 个还在下载，会先停止。` : "");
+  $("#removeGo").textContent = "移入回收站";
+  $("#removeGo").onclick = () => doRemove(ids);
   $("#removeSheet").hidden = false;
 }
-async function doRemove(ids, files) {
-  const btn = $("#removeGo"); btn.disabled = true;
+async function doRemove(ids) {
+  const btn = $("#removeGo"); if (btn.disabled) return;
+  const owner = storageOwner, epoch = removeEpoch; btn.disabled = true;
   try {
-    const r = await (await fetch("/api/jobs/remove", {method: "POST", headers: {"Content-Type": "application/json"},
-                                                     body: JSON.stringify({ids, files})})).json();
-    let msg = `已移除 ${(r.removed || 0) + (r.kept_shared || 0)} 个` + (files ? `，删除了 ${r.files} 个文件` : "，文件保留");
-    if (r.kept_shared) msg += `；${r.kept_shared} 个的文件别的账号还在用，文件没删`;
-    if (r.stopping) msg += `；${r.stopping} 个正在停止，稍后再移除一次`;
+    const response = await fetch("/api/jobs/remove", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ids})});
+    const r = await response.json(); if (owner !== storageOwner || epoch !== removeEpoch) return;
+    if (!response.ok || r.error) throw Error(r.error || '移入回收站失败');
+    let msg = `已移入回收站 ${r.trashed ?? ((r.removed || 0) + (r.kept_shared || 0))} 个，30 天内可以恢复`;
+    if (r.stopping) msg += `；${r.stopping} 个正在停止，稍后可重试`;
+    if (r.errors?.length) msg += `；${r.errors.length} 个失败：${r.errors[0].error}`;
     toast(msg);
-  } catch { toast("移除失败，连不上 Pi"); }
-  btn.disabled = false;
-  hide($("#removeSheet"));
-  if (watching && ids.includes(watching.id)) closeWatch();
-  if (selecting) toggleSelect();
-  refresh();
+    hide($("#removeSheet"));
+    if (watching && ids.includes(watching.id)) closeWatch();
+    if (selecting) toggleSelect();
+    refresh();
+  } catch (e) { if (owner === storageOwner && epoch === removeEpoch) toast(e.message || "移入回收站失败，连不上 Pi"); }
+  finally { if (epoch === removeEpoch) btn.disabled = false; }
 }
 
 /* ---------- ways to send links in (no manual adding on the page) ---------- */
@@ -3867,9 +4217,14 @@ function rdZoom(d) {
 /* ---------- 每周总结 ---------- */
 let weeklyData = null, weeklyPick = 0;
 async function openWeekly() {
+  const owner = storageOwner, epoch = privateViewEpoch;
   $("#weeklySheet").hidden = false;
   if (!weeklyData) $("#weeklyBody").innerHTML = "<h2>每周总结</h2><p class='hint'>正在统计…</p>";
-  try { weeklyData = await (await fetch("/api/weekly")).json(); } catch (e) { toast("连不上 Pi"); return; }
+  try {
+    const data = await (await fetch("/api/weekly")).json();
+    if (owner !== storageOwner || epoch !== privateViewEpoch) return;
+    weeklyData = data;
+  } catch (e) { if (owner === storageOwner && epoch === privateViewEpoch) toast("连不上 Pi"); return; }
   renderWeekly();
 }
 function mins(sec) { sec = sec || 0; return sec >= 3600 ? (sec / 3600).toFixed(1) + " 小时" : sec > 0 && sec < 60 ? "不到 1 分钟" : Math.round(sec / 60) + " 分钟"; }
@@ -3920,11 +4275,13 @@ function renderWeekly() {
 function openAsk() { $("#askSheet").hidden = false; setTimeout(() => $("#askText").focus(), 50); }
 async function ask(e) {
   e.preventDefault();
+  const owner = storageOwner, epoch = privateViewEpoch;
   const qtext = $("#askText").value.trim(); if (!qtext) return;
   $("#askGo").disabled = true; $("#askOut").innerHTML = '<p class="hint">正在翻字幕和随记…</p>';
   let r;
   try { r = await (await fetch("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({q: qtext})})).json(); }
   catch (err) { r = {error: "连不上 Pi"}; }
+  if (owner !== storageOwner || epoch !== privateViewEpoch) return;
   $("#askGo").disabled = false;
   if (r.error) { $("#askOut").innerHTML = `<div class="form-err">${esc(r.error)}</div>`; return; }
   // 【n】 -> a button that opens the source at its moment
@@ -4043,11 +4400,13 @@ const SPACE_NAMES = {Videos: "视频", Movies: "电影", TV: "剧集", Music: "�
                      ".notes": "随记", ".grabber": "拾光数据库", ".incomplete": "下载中 / 临时文件", ".cache": "缓存",
                      ".trash": "回收暂存", ".backups": "备份", ".live-clips": "直播切片与录播缓存"};
 async function openUsage(days) {
+  const owner = storageOwner, epoch = privateViewEpoch;
   if (days) usageDays = days;
   $("#usageSheet").hidden = false;
   if (!$("#usageBody").innerHTML) $("#usageBody").innerHTML = "<h2>资源使用</h2><p class='hint'>正在统计…</p>";
   let u;
-  try { u = await (await fetch(`/api/usage?days=${usageDays}`)).json(); } catch (e) { toast("连不上 Pi"); return; }
+  try { u = await (await fetch(`/api/usage?days=${usageDays}`)).json(); } catch (e) { if (owner === storageOwner && epoch === privateViewEpoch) toast("连不上 Pi"); return; }
+  if (owner !== storageOwner || epoch !== privateViewEpoch) return;
   const tt = u.traffic_total || {}, get = k => tt[k] || 0;
   // one bar a day; over two months (全部) one a week, so the bars stay wide enough to read
   const daysList = Object.keys(u.traffic || {}).sort(), week = daysList.length > 62;
@@ -4087,7 +4446,7 @@ async function openUsage(days) {
       <p class="hint">各文件夹大小每小时统计一次，上次 ${esc(ago(u.space.ts))}。</p>` : '<p class="hint">各文件夹大小正在统计，几分钟后再打开就有。</p>'}`;
   const hours2 = x => x == null ? "–" : x >= 24 * 365 ? (x / 24 / 365).toFixed(1) + " 年" : Math.round(x / 24) + " 天";
   $("#usageBody").innerHTML = `
-    <h2>资源使用</h2>
+    <h2>资源使用</h2><button type="button" class="link" onclick="openAIActivity()">AI 运行明细</button>
     <div class="usec"><b>设备状态</b><span class="sub">Pi 和两块硬盘</span></div>
     ${h.warnings.length ? `<div class="form-err" style="margin:8px 0">${h.warnings.map(esc).join("<br>")}</div>` : `<p class="hint" style="margin:6px 0">一切正常</p>`}
     <div class="ugrid">
@@ -4286,7 +4645,7 @@ function togglePw() {
   $(".eye").textContent = show ? "隐藏" : "显示";
 }
 
-function filterDevice(name) { deviceFilter = name; chip = "device"; hide($("#accountSheet")); render(); }
+function filterDevice(name) { deviceFilter = name; chip = "device"; hide($("#accountSheet")); render(); if (query) { lastBody = ''; refresh(); } }
 async function removeDevice(id, current) {
   await fetch(`/api/devices/${id}/remove`, {method: "POST"});
   toast(current ? "已退出" : "已移除这台设备（它添加的内容还在账号里）");
@@ -4304,21 +4663,23 @@ async function logout() {
 }
 
 /* ---------- search ---------- */
-function searchFor(t) { closeWatch(); $("#search").value = t; query = t; visualSearch = false; saveNavigation(); refresh(); window.scrollTo(0, 0); }
+function searchFor(t) { closeWatch(); $("#search").value = t; if (/^[#＃]/.test(t)) $('#mainSearchMode').value = 'exact'; if (typeof submitMainSearch === 'function') submitMainSearch(); else { query = t; visualSearch = false; saveNavigation(); refresh(); } window.scrollTo(0, 0); }
 let searchTimer;
 // A sentence ("上个月小王讲伊朗、画面里有地图的片段") is read by the AI once typing pauses; words search right away
 let smartSearch = false, exactSearch = false, visualSearch = false;
 function updateSearchOptions() {
   let el = $('#searchOptions');
   if (!el) {el = document.createElement('div');el.id = 'searchOptions';el.className = 'hint';$('#chips').after(el);}
-  el.hidden = !query || ['books','live'].includes(chip) || query.startsWith('#');
+  el.hidden = !query || ['books','live'].includes(chip) || /^[#＃]/.test(query)
+    || typeof mainSearchAvailable === 'function' && mainSearchAvailable() && mainSearchMode() !== 'exact';
   el.innerHTML = `<span>${visualSearch ? '文字与画面搜索' : chip === 'notes' ? '文字搜索：随记、语音和图片文字' : '文字搜索：标题、简介、标签、字幕'}</span> <button class="link" onclick="visualSearch=!visualSearch;refresh()">${visualSearch?'只看文字结果':chip === 'notes' ? '补充图片结果（较慢）' : '补充画面结果（较慢）'}</button>`;
 }
 let restoringNavigation = false;
 function saveNavigation(push = false) {
   if (restoringNavigation) return;
   const url = new URL(location.href);
-  for (const [k,v] of Object.entries({tab: chip === 'all' ? '' : chip, q: query, sort: videoSort === 'added' ? '' : videoSort,
+  const navigationQuery = typeof savedSearchPrivateQuery !== 'undefined' && savedSearchPrivateQuery ? '' : query;
+  for (const [k,v] of Object.entries({tab: chip === 'all' ? '' : chip, q: navigationQuery, mode: navigationQuery && $('#mainSearchMode').value !== 'exact' ? $('#mainSearchMode').value : '', sort: videoSort === 'added' ? '' : videoSort,
                                     live: chip === 'live' ? liveTab : '', status: chip === 'live' && liveStatus !== 'all' ? liveStatus : '',
                                     live_source: chip === 'live' ? liveSourceFilter : '', live_cursor: chip === 'live' ? liveCursor : ''})) {
     if (v) url.searchParams.set(k,v); else url.searchParams.delete(k);
@@ -4330,6 +4691,7 @@ function saveNavigation(push = false) {
 function restoreNavigation() {
   const p = new URLSearchParams(location.search);
   query = p.get('q') || ''; $('#search').value = query;
+  $('#mainSearchMode').value = ['exact','wildcard','regex','ai'].includes(p.get('mode')) ? p.get('mode') : 'exact';
   videoSort = ['published','added','title','author'].includes(p.get('sort')) ? p.get('sort') : 'added';
   const tab = p.get('tab') || 'all';
   chip = ['all','notes','books','live','subs','active','failed','device',...Object.keys(FOLDERS),...Object.keys(LIBS)].includes(tab) || /^sub:\d+$/.test(tab) ? tab : 'all';
@@ -4349,13 +4711,14 @@ window.addEventListener('popstate', async () => {
 });
 function looksLikeSentence(t) { return !/^[#＃]/.test(t) && t.length >= 6 && /[\u4e00-\u9fff]/.test(t) && chip !== "notes" && chip !== "books"; }
 $("#search").oninput = () => {
+  if (typeof mainSearchInput === 'function' && mainSearchInput()) return;
   clearTimeout(searchTimer);
   if (chip === "live") return;
   const t = $("#search").value.trim();
   exactSearch = false;
   searchTimer = setTimeout(() => { query = t; visualSearch = false; smartSearch = looksLikeSentence(t); saveNavigation(); refresh(); }, looksLikeSentence(t) ? 900 : 250);
 };
-function searchExact() { exactSearch = true; lastBody = ""; refresh(); }
+function searchExact() { exactSearch = true; lastBody = ""; if (typeof changeMainSearchMode === 'function') { $('#mainSearchMode').value='exact'; changeMainSearchMode(); } else refresh(); }
 
 window.addEventListener("DOMContentLoaded", () => {
 restoreNavigation(); render();
@@ -4386,5 +4749,11 @@ refreshCacheIndex();
 if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 <script src="/static/live.js?v=20261020-assistant-v1"></script>
+<script src="/static/crawl.js?v=20261023-v9"></script>
+<script src="/static/trash.js?v=20261023-v9"></script>
+<script src="/static/main_search.js?v=20261023-v9"></script>
+<script src="/static/saved_search.js?v=20261023-v9"></script>
+<script src="/static/sources.js?v=20261023-v9"></script>
+<script src="/static/ai_activity.js?v=20261023-v9"></script>
 </body>
 </html>

@@ -9,6 +9,7 @@ import functools
 import http.server
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,9 @@ class DownloadFallback(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.work = self.directory / "work"
         self.work.mkdir()
+        incomplete_patch = patch.object(pipeline, 'INCOMPLETE', self.directory / 'incomplete')
+        incomplete_patch.start()
+        self.addCleanup(incomplete_patch.stop)
         self.cookiefile = self.directory / "cookies.txt"
         self.cookiefile.write_text("# Netscape HTTP Cookie File\n")
         cookie_patch = patch.object(download, "COOKIES", self.directory / "unused-cookies.txt")
@@ -49,6 +53,10 @@ class DownloadFallback(unittest.TestCase):
     def stream_ok(self, job_id, url, directory, *args):
         (directory / "video.mkv").write_bytes(b"verified video")
         return {"source": "sniffed-ffmpeg", "duration": 1}
+
+    def failure_update(self, job_id, **fields):
+        pipeline.update(job_id, **fields)
+        return False
 
     def test_primary_success_keeps_resume_and_never_sniffs(self):
         (self.work / "old.mp4.part").write_bytes(b"partial")
@@ -94,6 +102,27 @@ class DownloadFallback(unittest.TestCase):
             _, directory = download.page_video_download(1, "https://page.test/v", self.work)
         self.assertEqual(ffmpeg.call_count, 2)
         self.assertEqual(len(list(directory.rglob("*.mkv"))), 2)
+
+    def test_collected_player_preserves_query_alternatives_after_failure(self):
+        primary = "https://media.test/stream.m3u8?id=11&quality=hd&token=old"
+        alternate = "https://media.test/stream.m3u8?id=11&quality=sd&token=new"
+        context = {"title": "Collected lesson", "referer": "https://page.test/lesson/11",
+                   "media_urls": [primary, primary + "#duplicate", alternate]}
+
+        def stream(job, url, directory, referer, cookies):
+            self.assertEqual(referer, context["referer"])
+            if url == primary:
+                raise download.DownloadFailure("503 temporary fixture failure", retryable=True)
+            self.assertEqual(url, alternate)
+            return self.stream_ok(job, url, directory, referer, cookies)
+
+        with patch.object(download, "fast_stream_download", side_effect=stream) as fetch, \
+             patch.object(download, "sniff_page") as sniff:
+            meta, directory = download.page_video_download(1, primary, self.work, media_context=context)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], [primary, alternate])
+        self.assertEqual(meta["webpage_url"], context["referer"])
+        self.assertEqual(len(list(directory.rglob("*.mkv"))), 1)
+        sniff.assert_not_called()
 
     def test_terminal_errors_do_not_sniff_or_retry(self):
         for error in (download.Cancelled(), OSError(errno.ENOSPC, "full"),
@@ -152,6 +181,7 @@ class DownloadFallback(unittest.TestCase):
                 self.assertTrue(caught.exception.retryable)
                 self.assertFalse((self.work / ".fallback").exists())
                 with patch.object(pipeline, "process", side_effect=caught.exception), \
+                     patch.object(pipeline, '_commit_job_failure', side_effect=self.failure_update), \
                      patch.object(pipeline, "q", return_value={"attempts": 0}), \
                      patch.object(pipeline, "finish_links"), patch.object(pipeline, "ring"), \
                      patch.object(pipeline, "LLM_API_KEY", ""), patch.object(pipeline.traceback, "print_exc"), \
@@ -254,6 +284,161 @@ class DownloadFallback(unittest.TestCase):
                 download.fast_stream_download(1, "https://media.test/v.m3u8", self.work, "https://page.test")
         ffmpeg.assert_not_called()
 
+    def test_fragment_disconnect_retries_with_lower_concurrency_and_keeps_resume(self):
+        connections = []
+
+        def fetch(job, url, directory, opts):
+            connections.append(opts["concurrent_fragment_downloads"])
+            journal = directory / "video.mp4.ytdl"
+            if len(connections) == 1:
+                journal.write_text("completed fragments")
+                raise RuntimeError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")
+            self.assertEqual(journal.read_text(), "completed fragments")
+            (directory / "video.mp4").write_bytes(b"complete")
+            return {"duration": 1}
+
+        with patch.object(download, "check_manifest"), \
+             patch.object(download, "ytdlp_download", side_effect=fetch), \
+             patch.object(download, "ffmpeg_download") as ffmpeg:
+            result = download.fast_stream_download(1, "https://media.test/v.m3u8", self.work, "https://page.test")
+        self.assertEqual(connections, [8, 2])
+        self.assertEqual(result["source"], "sniffed-parallel")
+        ffmpeg.assert_not_called()
+        self.assertEqual((self.work / "video.mp4").read_bytes(), b"complete")
+
+    def test_truncated_fragments_remain_retryable_after_decoder_failure(self):
+        self.found["media_urls"] = ["https://media.test/main.m3u8"]
+        with patch.object(download, "sniff_page", return_value=self.found), \
+             patch.object(download, "check_manifest"), \
+             patch.object(download, "ytdlp_download", side_effect=RuntimeError("0 bytes read, 524000 more expected")) as native, \
+             patch.object(download, "ffmpeg_download", side_effect=RuntimeError("Invalid data found when processing input")):
+            with self.assertRaises(download.DownloadFailure) as caught:
+                download.page_video_download(1, "https://page.test/v", self.work,
+                                             primary_error=RuntimeError("Unsupported URL"))
+        self.assertEqual(native.call_count, 2)
+        self.assertTrue(caught.exception.retryable)
+        self.assertIn("524000", str(caught.exception))
+        self.assertFalse((self.work / ".fallback").exists())
+        with patch.object(pipeline, "process", side_effect=caught.exception), \
+             patch.object(pipeline, '_commit_job_failure', side_effect=self.failure_update), \
+             patch.object(pipeline, "q", return_value={"attempts": 0}), \
+             patch.object(pipeline, "finish_links"), patch.object(pipeline, "ring"), \
+             patch.object(pipeline, "LLM_API_KEY", ""), patch.object(pipeline.traceback, "print_exc"), \
+             patch.object(pipeline.time, "time", return_value=1000):
+            pipeline.run_job(1)
+        self.assertEqual(pipeline.update.call_args.kwargs["retry_at"], 1060)
+
+    def test_next_task_attempt_resumes_exact_candidate_without_promoting_failed_files(self):
+        context = {'title': 'Resumed lesson', 'referer': 'https://page.test/lesson',
+                   'media_urls': ['https://media.test/stream.m3u8?token=exact&quality=hd']}
+        connections = []
+        directories = []
+
+        def native(job, url, directory, opts):
+            connections.append(opts['concurrent_fragment_downloads'])
+            directories.append(directory)
+            if len(connections) <= 2:
+                (directory / 'video.mp4.part').write_bytes(b'completed fragment bytes')
+                (directory / 'video.mp4.ytdl').write_text('resume journal')
+                (directory / 'failed.mp4').write_bytes(b'incomplete unverified output')
+                raise RuntimeError('HTTP Error 503: Service not available')
+            self.assertEqual((directory / 'video.mp4.part').read_bytes(), b'completed fragment bytes')
+            self.assertEqual((directory / 'video.mp4.ytdl').read_text(), 'resume journal')
+            self.assertFalse((directory / 'failed.mp4').exists())
+            (directory / 'video.mp4').write_bytes(b'complete verified output')
+            return {'duration': 1}
+
+        with patch.object(download, 'check_manifest'), \
+             patch.object(download, 'ytdlp_download', side_effect=native), \
+             patch.object(download, 'ffmpeg_download', side_effect=RuntimeError('HTTP Error 502: Bad Gateway')):
+            with self.assertRaises(download.DownloadFailure) as caught:
+                download.page_video_download(1, 'https://page.test/lesson', self.work, media_context=context)
+            self.assertTrue(caught.exception.retryable)
+            self.assertFalse((self.work / '.fallback').exists())
+            self.assertTrue(list((self.work / '.resume').rglob('*.ytdl')))
+            meta, output = download.page_video_download(1, 'https://page.test/lesson', self.work, media_context=context)
+        self.assertEqual(connections, [8, 2, 2])
+        self.assertEqual(len(set(directories)), 1)
+        self.assertEqual(meta['source'], 'sniffed-parallel')
+        self.assertEqual([p.name for p in output.rglob('*') if p.is_file()], ['Resumed lesson 01.mp4'])
+        self.assertFalse((self.work / '.resume').exists())
+
+    def test_candidate_resume_isolates_query_scheme_referer_and_discards_stale_cache(self):
+        addresses = [
+            ('https://media.test/v.m3u8?ref=one&token=a', 'https://page.test/one'),
+            ('https://media.test/v.m3u8?ref=two&token=a', 'https://page.test/one'),
+            ('https://media.test/v.m3u8?ref=two&token=b', 'https://page.test/one'),
+            ('http://media.test/v.m3u8?ref=two&token=b', 'https://page.test/one'),
+            ('http://media.test/v.m3u8?ref=two&token=b', 'https://page.test/two'),
+        ]
+        directories = []
+        def fail(job, url, directory, referer, cookiefile):
+            self.assertFalse(list(directory.iterdir()), 'different candidate reused another stream')
+            directories.append(directory)
+            (directory / 'video.mp4.part').write_bytes(url.encode())
+            (directory / 'video.mp4.ytdl').write_text('journal')
+            raise download.DownloadFailure('503 temporary network failure', retryable=True)
+        with patch.object(download, 'fast_stream_download', side_effect=fail):
+            for address, referer in addresses:
+                context = {'title': 'Lesson', 'referer': referer, 'media_urls': [address]}
+                with self.assertRaises(download.DownloadFailure):
+                    download.page_video_download(1, 'https://page.test/lesson', self.work, media_context=context)
+                self.assertEqual(len(list((self.work / '.resume').iterdir())), 1)
+        self.assertEqual(len(set(directories)), len(addresses))
+
+    def test_retryable_candidate_cache_never_enters_successful_alternative(self):
+        urls = ['https://media.test/a.m3u8?quality=hd', 'https://media.test/a.m3u8?quality=sd']
+        def fetch(job, url, directory, *args):
+            if url == urls[0]:
+                (directory / 'video.mp4.part').write_bytes(b'partial first quality')
+                (directory / 'bad.mp4').write_bytes(b'not complete')
+                raise download.DownloadFailure('502 temporarily unavailable', retryable=True)
+            self.assertFalse(list(directory.iterdir()))
+            (directory / 'video.mp4').write_bytes(b'complete second quality')
+            (directory / 'obsolete.part.mp4').write_bytes(b'stale partial')
+            (directory / 'video.mp4.ytdl').write_text('obsolete journal')
+            return {'source': 'sniffed-parallel'}
+        with patch.object(download, 'fast_stream_download', side_effect=fetch):
+            _, output = download.page_video_download(1, 'https://page.test', self.work,
+                        media_context={'title': 'Selected lesson', 'media_urls': urls})
+        self.assertEqual([p.name for p in output.rglob('*') if p.is_file()], ['Selected lesson 01.mp4'])
+        self.assertFalse((self.work / '.resume').exists())
+
+    def test_terminal_error_or_cancellation_cleans_retained_candidate_cache(self):
+        context = {'title': 'Lesson', 'media_urls': ['https://media.test/v.m3u8']}
+        def temporary(job, url, directory, *args):
+            (directory / 'video.mp4.part').write_bytes(b'partial')
+            raise download.DownloadFailure('503 temporary failure', retryable=True)
+        for terminal in (download.Cancelled(), OSError(errno.ENOSPC, 'full'), download.DownloadFailure('需要人工处理')):
+            with self.subTest(error=type(terminal).__name__):
+                with patch.object(download, 'fast_stream_download', side_effect=temporary):
+                    with self.assertRaises(download.DownloadFailure):
+                        download.page_video_download(1, 'https://page.test', self.work, media_context=context)
+                self.assertTrue((self.work / '.resume').exists())
+                with patch.object(download, 'fast_stream_download', side_effect=terminal):
+                    with self.assertRaises((download.DownloadFailure, download.Cancelled)):
+                        download.page_video_download(1, 'https://page.test', self.work, media_context=context)
+                self.assertFalse((self.work / '.resume').exists())
+
+    def test_low_concurrency_retry_cancellation_and_terminal_errors_stop(self):
+        for final in (download.Cancelled(), OSError(errno.ENOSPC, "full"), RuntimeError("Login required")):
+            with self.subTest(error=type(final).__name__), \
+                 patch.object(download, "check_manifest"), \
+                 patch.object(download, "ytdlp_download", side_effect=[RuntimeError("IncompleteRead"), final]) as native, \
+                 patch.object(download, "ffmpeg_download") as ffmpeg:
+                with self.assertRaises((download.Cancelled, download.DownloadFailure)):
+                    download.fast_stream_download(1, "https://media.test/v.m3u8", self.work, "https://page.test")
+                self.assertEqual(native.call_count, 2)
+                ffmpeg.assert_not_called()
+
+    def test_transport_error_does_not_override_terminal_ffmpeg_failure(self):
+        with patch.object(download, "check_manifest"), \
+             patch.object(download, "ytdlp_download", side_effect=RuntimeError("IncompleteRead")), \
+             patch.object(download, "ffmpeg_download", side_effect=download.DownloadFailure("需要人工处理")):
+            with self.assertRaises(download.DownloadFailure) as caught:
+                download.fast_stream_download(1, "https://media.test/v.m3u8", self.work, "https://page.test")
+        self.assertFalse(caught.exception.retryable)
+
     def test_fragment_progress_reports_percentage_speed_and_backup_stage(self):
         opts = download.ytdlp_opts(1, self.work, {"_stage": "并发下载备用视频流（8 路）"})
         opts["progress_hooks"][0]({"status":"downloading", "fragment_index":2,
@@ -282,12 +467,94 @@ class DownloadFallback(unittest.TestCase):
     def test_job_does_not_auto_retry_storage_or_explicit_terminal_failure(self):
         for error in (OSError(errno.ENOSPC, "full"), download.DownloadFailure("需要人工处理")):
             with self.subTest(error=str(error)), patch.object(pipeline, "process", side_effect=error), \
+                 patch.object(pipeline, '_commit_job_failure', side_effect=self.failure_update), \
                  patch.object(pipeline, "q", return_value={"attempts": 0}), \
                  patch.object(pipeline, "finish_links"), patch.object(pipeline, "ring"), \
                  patch.object(pipeline, "LLM_API_KEY", ""), patch.object(pipeline.traceback, "print_exc"):
                 pipeline.update.reset_mock()
                 pipeline.run_job(1)
                 self.assertIsNone(pipeline.update.call_args.kwargs["retry_at"])
+
+    def test_temporary_503_keeps_three_bounded_task_retries(self):
+        for prior, delay in enumerate((60, 300, 900, None)):
+            with self.subTest(attempt=prior + 1), \
+                 patch.object(pipeline, 'process', side_effect=RuntimeError('HTTP Error 503: Service not available')), \
+                 patch.object(pipeline, '_commit_job_failure', side_effect=self.failure_update), \
+                 patch.object(pipeline, 'q', return_value={'attempts': prior}), \
+                 patch.object(pipeline, 'finish_links'), patch.object(pipeline, 'ring'), \
+                 patch.object(pipeline, 'LLM_API_KEY', ''), patch.object(pipeline.traceback, 'print_exc'), \
+                 patch.object(pipeline.time, 'time', return_value=1000):
+                pipeline.run_job(1)
+            self.assertEqual(pipeline.update.call_args.kwargs['attempts'], prior + 1)
+            self.assertEqual(pipeline.update.call_args.kwargs['retry_at'], None if delay is None else 1000 + delay)
+
+    def test_waiting_retry_can_be_cancelled_without_resetting_attempts(self):
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.row_factory = sqlite3.Row
+        db.execute('CREATE TABLE jobs(id INTEGER PRIMARY KEY,status TEXT,retry_at REAL,cancel INTEGER,stage TEXT,speed TEXT,updated REAL,attempts INTEGER)')
+        db.execute("INSERT INTO jobs VALUES(1,'failed',1000,0,'','',0,2)")
+        db.commit()
+        partial = pipeline.INCOMPLETE / '1' / '.resume' / 'exact-candidate'
+        partial.mkdir(parents=True)
+        (partial / 'video.mp4.part').write_bytes(b'partial')
+        with patch.object(pipeline.core, 'DB', db), patch.object(pipeline, 'finish_links') as links, patch.object(pipeline, 'ring'):
+            self.assertEqual(pipeline.cancel_job(1), 'Cancelling #1')
+            # The exact worker requeue predicate must no longer match this job.
+            db.execute("UPDATE jobs SET status='queued',retry_at=NULL WHERE status='failed' AND retry_at IS NOT NULL AND retry_at<=?", (2000,))
+        row = db.execute('SELECT * FROM jobs WHERE id=1').fetchone()
+        self.assertEqual((row['status'], row['retry_at'], row['attempts']), ('cancelled', None, 2))
+        self.assertFalse(partial.exists())
+        links.assert_called_once_with(1)
+
+    def test_cancel_and_claim_with_separate_connections_never_revive_stale_selection(self):
+        path = self.directory / 'claim-race.sqlite'
+        worker, browser = sqlite3.connect(path), sqlite3.connect(path)
+        self.addCleanup(worker.close); self.addCleanup(browser.close)
+        worker.row_factory = browser.row_factory = sqlite3.Row
+        worker.execute('CREATE TABLE jobs(id INTEGER PRIMARY KEY,status TEXT,retry_at REAL,cancel INTEGER,stage TEXT,speed TEXT,updated REAL,attempts INTEGER)')
+        worker.execute("INSERT INTO jobs VALUES(1,'failed',1000,0,'','',0,2)")
+        worker.execute("UPDATE jobs SET status='queued',retry_at=NULL WHERE status='failed' AND retry_at<=2000")
+        worker.commit()
+        selected = worker.execute("SELECT id FROM jobs WHERE status='queued'").fetchone()
+        with patch.object(pipeline.core, 'DB', browser), patch.object(pipeline, 'finish_links'), patch.object(pipeline, 'ring'):
+            pipeline.cancel_job(1)
+        with patch.object(pipeline.core, 'DB', worker):
+            self.assertFalse(pipeline._claim_job(selected['id']))
+        self.assertEqual(tuple(worker.execute('SELECT status,cancel,attempts FROM jobs').fetchone()), ('cancelled', 1, 2))
+        # Opposite ordering: cancellation sees a claimed download and signals
+        # the running child instead of marking its bytes as a completed cancel.
+        worker.execute("UPDATE jobs SET status='queued',cancel=0")
+        worker.commit()
+        with patch.object(pipeline.core, 'DB', worker):
+            self.assertTrue(pipeline._claim_job(1))
+        with patch.object(pipeline.core, 'DB', browser), patch.object(pipeline, 'finish_links') as links, patch.object(pipeline, 'ring'):
+            pipeline.cancel_job(1)
+            links.assert_not_called()
+        self.assertEqual(tuple(worker.execute('SELECT status,cancel FROM jobs').fetchone()), ('downloading', 1))
+
+    def test_cancel_during_last_network_failure_does_not_schedule_an_uncancellable_retry(self):
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.row_factory = sqlite3.Row
+        db.execute('CREATE TABLE jobs(id INTEGER PRIMARY KEY,status TEXT,retry_at REAL,cancel INTEGER,stage TEXT,speed TEXT,updated REAL,attempts INTEGER,error TEXT,advice TEXT)')
+        db.execute("INSERT INTO jobs VALUES(1,'downloading',NULL,0,'','',0,1,'','')")
+        db.commit()
+        partial = self.directory / 'incomplete' / '1'
+        partial.mkdir(parents=True)
+        (partial / 'video.mp4.part').write_bytes(b'partial')
+        def late_failure(_job_id):
+            db.execute('UPDATE jobs SET cancel=1 WHERE id=1')
+            db.commit()
+            raise RuntimeError('HTTP Error 503: Service not available')
+        with patch.object(pipeline.core, 'DB', db), patch.object(pipeline, 'process', side_effect=late_failure), \
+             patch.object(pipeline, 'INCOMPLETE', partial.parent), patch.object(pipeline, 'finish_links'), \
+             patch.object(pipeline, 'ring'), patch.object(pipeline, 'LLM_API_KEY', ''), \
+             patch.object(pipeline.traceback, 'print_exc'):
+            pipeline.run_job(1)
+        row = db.execute('SELECT status,retry_at,attempts FROM jobs').fetchone()
+        self.assertEqual(tuple(row), ('cancelled', None, 1))
+        self.assertFalse(partial.exists())
 
 
 @unittest.skipUnless(LOCAL_HTTP and shutil.which("ffmpeg") and shutil.which("ffprobe"),
@@ -302,6 +569,7 @@ class LocalHTTP(unittest.TestCase):
         cls.headers_ok = True
         cls.header_failures = []
         cls.inflight, cls.peak = 0, 0
+        cls.retry_hits = 0
         cls.fragment_lock = threading.Lock()
         commands = [
             ["-f", "lavfi", "-i", "testsrc=size=64x64:rate=10", "-f", "lavfi", "-i", "sine=frequency=440",
@@ -316,6 +584,19 @@ class LocalHTTP(unittest.TestCase):
             subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *command],
                            check=True, capture_output=True, timeout=30)
         (cls.directory / "bad.mp4").write_text("not video")
+        manifest = (cls.directory / "sample.m3u8").read_text()
+        first_segment = next(line for line in manifest.splitlines() if line and not line.startswith("#"))
+        shutil.copyfile(cls.directory / first_segment, cls.directory / "retry.ts")
+        (cls.directory / "retry.m3u8").write_text(manifest.replace(first_segment, "retry.ts", 1))
+        (cls.directory / "missing.m3u8").write_text(manifest.replace(first_segment, "missing.ts", 1))
+        segments = [line for line in manifest.splitlines() if line and not line.startswith('#')]
+        cls.resume_segments = [f'resume-{index}.ts' for index in range(len(segments))]
+        resume_manifest = manifest
+        for original, renamed in zip(segments, cls.resume_segments):
+            shutil.copyfile(cls.directory / original, cls.directory / renamed)
+            resume_manifest = resume_manifest.replace(original, renamed)
+        (cls.directory / 'resume.m3u8').write_text(resume_manifest)
+        cls.resume_blocked = True
 
         class Handler(http.server.SimpleHTTPRequestHandler):
             def do_GET(self):
@@ -327,6 +608,20 @@ class LocalHTTP(unittest.TestCase):
                     cls.headers_ok = False
                     cls.header_failures.append({name: self.headers.get(name) for name in ("Referer", "User-Agent", "Cookie")})
                     self.send_error(403)
+                    return
+                if self.path == "/retry.ts":
+                    cls.retry_hits += 1
+                    if cls.retry_hits == 1:
+                        self.send_response(503)
+                        self.send_header("Retry-After", "0")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                if self.path == "/missing.ts":
+                    self.send_error(503)
+                    return
+                if self.path == '/' + cls.resume_segments[-1] and cls.resume_blocked:
+                    self.send_error(503)
                     return
                 is_fragment = self.path.endswith((".ts", ".m4s"))
                 if is_fragment:
@@ -372,7 +667,58 @@ class LocalHTTP(unittest.TestCase):
 
     def test_mp4_hls_download_and_headers(self):
         self.check_downloads(("mp4", "m3u8"))
+
+    def test_ffmpeg_reconnects_after_temporary_segment_failure(self):
+        work = self.directory / "retry-output"
+        type(self).retry_hits = 0
+        with patch.object(download, "check_cancel"), patch.object(download, "update"):
+            result = download.ffmpeg_download(1, self.base + "/retry.m3u8", work,
+                                               self.base + "/page", str(self.cookiefile), timeout=20)
+        self.assertGreaterEqual(type(self).retry_hits, 2)
+        self.assertGreater(result["duration"], 0)
+        self.assertTrue((work / "video.mkv").is_file())
         self.assertTrue(any(".ts" in path for path in self.requests))
+
+    def test_ffmpeg_does_not_promote_video_with_missing_segment(self):
+        work = self.directory / "missing-output"
+        with patch.object(download, "check_cancel"), patch.object(download, "update"):
+            with self.assertRaises((download.DownloadFailure, RuntimeError)):
+                download.ffmpeg_download(1, self.base + "/missing.m3u8", work,
+                                         self.base + "/page", str(self.cookiefile), timeout=20)
+        self.assertFalse((work / "video.mkv").exists())
+
+    def test_task_retry_uses_real_hls_resume_journal_without_repeating_completed_segments(self):
+        work = self.directory / 'resume-output'
+        work.mkdir()
+        cls = type(self)
+        cls.resume_blocked = True
+        original_opts = download.ytdlp_opts
+        def quick_options(*args, **kwargs):
+            return {**original_opts(*args, **kwargs), 'retries': 0, 'fragment_retries': 0,
+                    'retry_sleep_functions': {'fragment': lambda _attempt: 0}}
+        cookiefile = self.directory / 'resume-cookies.txt'
+        context = {'title': 'Resume test', 'referer': self.base + '/page',
+                   'media_urls': [self.base + '/resume.m3u8'], 'cookiefile': str(cookiefile)}
+        with patch.object(download, 'check_cancel'), patch.object(download, 'update'), \
+             patch.object(download, 'ytdlp_opts', side_effect=quick_options), \
+             patch.object(download, 'ffmpeg_download', side_effect=RuntimeError('HTTP Error 503: Service not available')):
+            shutil.copyfile(cls.cookiefile, cookiefile)
+            with self.assertRaises(download.DownloadFailure) as caught:
+                download.page_video_download(1, self.base + '/page', work, media_context=context)
+            self.assertTrue(caught.exception.retryable, str(caught.exception))
+            self.assertTrue(list((work / '.resume').rglob('*.ytdl')))
+            completed = {path: cls.requests.count('/' + path) for path in cls.resume_segments[:-1]}
+            self.assertTrue(all(count == 1 for count in completed.values()), completed)
+            cls.resume_blocked = False
+            shutil.copyfile(cls.cookiefile, cookiefile)
+            _, output = download.page_video_download(1, self.base + '/page', work, media_context=context)
+        self.assertEqual({path: cls.requests.count('/' + path) for path in completed}, completed)
+        videos = [path for path in output.rglob('*') if path.is_file()]
+        self.assertEqual(len(videos), 1)
+        info = json.loads(subprocess.run(['ffprobe', '-v', 'error', '-show_format', '-of', 'json', str(videos[0])],
+                                       capture_output=True, text=True, check=True).stdout)
+        self.assertGreater(float(info['format']['duration']), 1)
+        self.assertFalse((work / '.resume').exists())
 
     def test_dash_download_and_headers(self):
         if "dash" not in download.ffmpeg_demuxers():

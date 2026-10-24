@@ -4,6 +4,7 @@ and data jobs that run once in the worker after an upgrade. New ones go at the e
 Every step also checks for itself, so a database from before the numbering (user_version 0) can run them all."""
 import json
 import threading
+import time
 import traceback
 
 from .core import kv_get, kv_set, link_key, LLM_MODEL
@@ -126,6 +127,138 @@ def _live_topic_review(db):
     add(db, 'live_clips', 'merged_into', 'INTEGER')
 
 
+def _directory_crawls(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS crawls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, url TEXT NOT NULL,
+        url_key TEXT NOT NULL, title TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+        max_pages INTEGER NOT NULL DEFAULT 50, merged INTEGER NOT NULL DEFAULT 0,
+        current_url TEXT DEFAULT '', error TEXT DEFAULT '', created REAL, updated REAL,
+        refresh_hours REAL NOT NULL DEFAULT 6, next_refresh REAL, last_refresh REAL,
+        generation INTEGER NOT NULL DEFAULT 1);
+    CREATE INDEX IF NOT EXISTS crawls_owner ON crawls(owner, id);
+    CREATE TABLE IF NOT EXISTS crawl_pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, crawl_id INTEGER NOT NULL, url_key TEXT NOT NULL,
+        url TEXT NOT NULL, kind TEXT NOT NULL, source TEXT DEFAULT '', title TEXT DEFAULT '',
+        state TEXT DEFAULT 'queued', error TEXT DEFAULT '', fingerprint TEXT DEFAULT '',
+        generation INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(crawl_id, url_key));
+    CREATE INDEX IF NOT EXISTS crawl_pages_queue ON crawl_pages(crawl_id, state, kind, id);
+    CREATE TABLE IF NOT EXISTS crawl_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, url TEXT NOT NULL,
+        page_url TEXT NOT NULL, title TEXT DEFAULT '', description TEXT DEFAULT '',
+        media_urls TEXT DEFAULT '[]', sources TEXT DEFAULT '[]', job_id INTEGER,
+        created REAL, updated REAL);
+    CREATE INDEX IF NOT EXISTS crawl_items_owner ON crawl_items(owner, id);
+    CREATE TABLE IF NOT EXISTS crawl_aliases (
+        owner TEXT NOT NULL, url_key TEXT NOT NULL, item_id INTEGER NOT NULL,
+        PRIMARY KEY(owner, url_key));
+    CREATE TABLE IF NOT EXISTS crawl_results (
+        crawl_id INTEGER NOT NULL, item_id INTEGER NOT NULL,
+        PRIMARY KEY(crawl_id, item_id));
+    CREATE TABLE IF NOT EXISTS crawl_downloads (
+        job_id INTEGER PRIMARY KEY, context TEXT NOT NULL);
+    """)
+
+
+def _recycle_bin(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS job_trash (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL,
+        job_id INTEGER, snapshot TEXT NOT NULL, deleted_at REAL NOT NULL,
+        orphan INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS job_trash_owner ON job_trash(owner, deleted_at, id);
+    CREATE INDEX IF NOT EXISTS job_trash_expiry ON job_trash(orphan, deleted_at);
+    """)
+
+
+def _directory_sources(db):
+    add(db, 'crawls', 'source_classification', "TEXT NOT NULL DEFAULT 'unknown'")
+    add(db, 'crawls', 'source_reason', "TEXT NOT NULL DEFAULT ''")
+    add(db, 'crawls', 'source_checked', 'REAL')
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS crawl_sources (
+        owner TEXT NOT NULL, url_key TEXT NOT NULL,
+        classification TEXT NOT NULL DEFAULT 'unknown', reason TEXT NOT NULL DEFAULT '', checked REAL,
+        PRIMARY KEY(owner,url_key));
+    CREATE TABLE IF NOT EXISTS crawl_source_jobs (
+        owner TEXT NOT NULL, job_id INTEGER NOT NULL, url_key TEXT NOT NULL,
+        PRIMARY KEY(owner,job_id,url_key));
+    INSERT OR IGNORE INTO crawl_sources(owner,url_key) SELECT owner,url_key FROM crawls;
+    INSERT OR IGNORE INTO crawl_source_jobs(owner,job_id,url_key)
+        SELECT c.owner,i.job_id,c.url_key FROM crawls c JOIN crawl_results r ON r.crawl_id=c.id
+        JOIN crawl_items i ON i.id=r.item_id AND i.owner=c.owner WHERE i.job_id IS NOT NULL;
+    INSERT OR IGNORE INTO crawl_source_jobs(owner,job_id,url_key)
+        SELECT j.owner,j.id,c.url_key FROM jobs j JOIN crawls c ON j.source='crawl:'||c.id AND j.owner=c.owner;
+    INSERT OR IGNORE INTO crawl_source_jobs(owner,job_id,url_key)
+        SELECT t.owner,t.job_id,c.url_key FROM job_trash t JOIN crawls c
+        ON json_extract(t.snapshot,'$.source')='crawl:'||c.id AND t.owner=c.owner WHERE t.job_id IS NOT NULL;
+    """)
+
+
+def _crawl_page_retries(db):
+    add(db, 'crawl_pages', 'failures', 'INTEGER NOT NULL DEFAULT 0')
+    add(db, 'crawl_pages', 'retry_at', 'REAL')
+    # The incident ID links every affected page to one verified repair.
+    add(db, 'crawl_pages', 'heal_reported', 'INTEGER NOT NULL DEFAULT 0')
+    db.execute('CREATE INDEX IF NOT EXISTS crawl_pages_retry ON crawl_pages(crawl_id,generation,state,retry_at)')
+
+
+def _saved_searches(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS saved_searches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner TEXT NOT NULL, name TEXT NOT NULL, query TEXT NOT NULL, mode TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0 CHECK(private IN (0,1)),
+        created REAL NOT NULL, updated REAL NOT NULL,
+        UNIQUE(owner,query,mode,private));
+    CREATE INDEX IF NOT EXISTS saved_searches_owner ON saved_searches(owner,updated,id);
+    """)
+
+
+def _source_inbox(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS source_inbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'unread' CHECK(state IN ('unread','read','ignored')),
+        created REAL NOT NULL, updated REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS source_inbox_owner ON source_inbox(owner,state,created,id);
+    CREATE TABLE IF NOT EXISTS source_inbox_aliases (
+        owner TEXT NOT NULL, key TEXT NOT NULL, item_id INTEGER NOT NULL,
+        PRIMARY KEY(owner,key));
+    CREATE INDEX IF NOT EXISTS source_inbox_alias_item ON source_inbox_aliases(item_id);
+    CREATE TABLE IF NOT EXISTS source_inbox_links (
+        item_id INTEGER NOT NULL, source_kind TEXT NOT NULL, source_id INTEGER NOT NULL,
+        source_key TEXT NOT NULL, content_kind TEXT NOT NULL, content_id INTEGER NOT NULL,
+        PRIMARY KEY(item_id,source_kind,source_id,source_key,content_kind,content_id));
+    CREATE INDEX IF NOT EXISTS source_inbox_content ON source_inbox_links(content_kind,content_id);
+    CREATE TABLE IF NOT EXISTS source_inbox_meta (key TEXT PRIMARY KEY,value REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS source_inbox_baselines (
+        source_id INTEGER NOT NULL, source_key TEXT NOT NULL, generation INTEGER NOT NULL,
+        PRIMARY KEY(source_id,source_key));
+    INSERT OR IGNORE INTO source_inbox_baselines(source_id,source_key,generation)
+        SELECT id,url_key,generation FROM crawls;
+    """)
+    db.execute("INSERT OR IGNORE INTO source_inbox_meta(key,value) VALUES('started',?)", (time.time(),))
+
+
+def _ai_activity(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS ai_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,
+        owner TEXT NOT NULL DEFAULT '', private INTEGER NOT NULL DEFAULT 0 CHECK(private IN (0,1)),
+        job_id INTEGER, purpose TEXT NOT NULL, engine TEXT, model TEXT, status TEXT NOT NULL,
+        fallback_code TEXT, queue_seconds REAL, run_seconds REAL, total_seconds REAL, retries INTEGER);
+    CREATE INDEX IF NOT EXISTS ai_activity_owner ON ai_activity(owner,ts,id);
+    CREATE INDEX IF NOT EXISTS ai_activity_time ON ai_activity(ts,id);
+    """)
+
+
+def _substring_search(db):
+    from . import search_index
+    search_index.install(db)
+
+
 STEPS = [
     (1, lambda db: add(db, "jobs", "transcript", "TEXT DEFAULT ''")),
     (2, lambda db: add(db, "jobs", "owner", "TEXT")),
@@ -154,6 +287,15 @@ STEPS = [
     (23, _live_topic_review),
     (24, lambda db: add(db, 'live_sources', 'archived', 'INTEGER NOT NULL DEFAULT 0')),
     (25, lambda db: add(db, 'live_clips', 'removed_at', 'REAL')),
+    (26, _directory_crawls),
+    (27, _recycle_bin),
+    (28, _directory_sources),
+    (29, _crawl_page_retries),
+    (30, _saved_searches),
+    (31, _source_inbox),
+    (32, _ai_activity),
+    (33, _substring_search),
+    (34, lambda db: (add(db, 'crawl_items', 'duration', 'REAL'), add(db, 'crawl_pages', 'duration', 'REAL'))),
 ]
 
 

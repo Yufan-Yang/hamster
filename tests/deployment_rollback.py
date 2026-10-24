@@ -88,7 +88,12 @@ case "$1" in
         exit 0;;
       health)
         printf 'health\\n' >> "$DEPLOY_TEST_ROOT/health-count"
+        count=0
+        if [ -f "$DEPLOY_TEST_ROOT/health-attempts" ]; then count=$(cat "$DEPLOY_TEST_ROOT/health-attempts"); fi
+        count=$((count + 1))
+        printf '%s' "$count" > "$DEPLOY_TEST_ROOT/health-attempts"
         [ "${DEPLOY_TEST_FAIL_HEALTH:-0}" != 1 ] || exit 1
+        [ "$count" -gt "${DEPLOY_TEST_HEALTH_READY_AFTER:-0}" ] || exit 1
         printf '{"revision":"%s","checks":["mock-services"]}\\n' "$(cat "$DEPLOY_TEST_APP/REVISION")"
         exit 0;;
     esac;;
@@ -165,10 +170,16 @@ exit 97
         self.assertEqual(self.shipped_state(), self.before)
         self.assertTrue((self.app / "static/old-only.js").exists())
         self.assertFalse((self.app / "static/new-only.js").exists())
-        self.assertEqual((self.root / "health-count").read_text().splitlines(), ["health"] * 20)
+        self.assertEqual((self.root / "health-count").read_text().splitlines(), ["health"] * 40)
         log = self.log.read_text()
         self.assertEqual(log.count("systemctl restart grabber\n"), 2)
         self.assertEqual(log.count("systemctl restart grabber-worker\n"), 2)
+
+    def test_slow_worker_still_requires_three_consecutive_fresh_heartbeats(self):
+        result = self.run_deployment(DEPLOY_TEST_HEALTH_READY_AFTER="23")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "health-count").read_text().splitlines(), ["health"] * 26)
+        self.assertEqual(json.loads((self.app / "VERIFICATION.json").read_text())["revision"], NEW_REVISION)
 
     def test_failed_http_health_also_rolls_back_before_worker_health(self):
         result = self.run_deployment(DEPLOY_TEST_HTTP_CODE="503")

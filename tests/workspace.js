@@ -30,7 +30,8 @@ const page = pageContext({
 });
 vm.runInContext(html.slice(html.indexOf("function renderChips("), html.indexOf("\nfunction card(")), page);
 page.renderChips();
-assert.equal((page.$("#workspaceNav").innerHTML.match(/<button/g) || []).length, 5);
+assert.equal((page.$("#workspaceNav").innerHTML.match(/<button/g) || []).length, 6);
+assert.ok(page.$("#workspaceNav").innerHTML.includes('onclick="openSources()"'));
 assert.ok(!page.$("#workspaceNav").innerHTML.includes("电影"));
 assert.ok(page.$("#chips").innerHTML.includes("电影"));
 assert.ok(!page.$("#chips").innerHTML.includes("setVideoSort"));
@@ -171,7 +172,7 @@ learningPlans().catch(error => { console.error(error); process.exitCode = 1; });
 async function learningSourceNavigation() {
   const requests = [], messages = [];
   const ctx = pageContext({
-    state: {jobs: []}, watchOpenEpoch: 0, storageOwner: "user:one", watching: null, casting: null,
+    state: {jobs: []}, query: '', watchOpenEpoch: 0, storageOwner: "user:one", watching: null, casting: null,
     document: {body: {style: {}}}, ACTIVE: [],
     esc: String, hl: String, category: () => null, phone: () => "", ago: () => "刚刚",
     episodeOf: () => "", titleOf: j => j.title, hitList: () => "",
@@ -181,6 +182,7 @@ async function learningSourceNavigation() {
   });
   const select = ctx.$;
   ctx.$ = key => key === "#watchBody video, #watchBody audio" ? null : select(key);
+  vm.runInContext(html.slice(html.indexOf("function waitingDownloadRetry("), html.indexOf("\nfunction card(")), ctx);
   vm.runInContext(html.slice(html.indexOf("async function openWatch("), html.indexOf("async function loadPointTimes(")), ctx);
   vm.runInContext(html.match(/^function openLearningSource\(.*$/m)[0], ctx);
   const job = id => ({id, title: `课程 ${id}`, url: "https://example.invalid/video", created: 1, status: "done", analysis: {}, media: []});

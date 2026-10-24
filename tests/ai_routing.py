@@ -12,10 +12,12 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
+import types
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,11 +31,33 @@ def load_functions(path, names, **values):
 
 
 class RoutingTests(unittest.TestCase):
+    # Worker-only source is validated locally before packing the Pi release.
+    def test_worker_reports_real_retry_count_and_typed_failures(self):
+        ask = Mock()
+        scope = load_functions('mac/mac_worker.py', {'answer_llm', 'UsageLimit', 'TransientCodexError'},
+                                       CODEX=Mock(), CODEX_MODEL='gpt-6-luna', ask_codex=ask, log=Mock())
+        scope['CODEX'].exists.return_value = True
+        ask.side_effect = [scope['TransientCodexError']('SECRET 429'), {'out': {}, 'model': 'gpt-6-luna'}]
+        metadata = {}
+        with patch.object(time, 'sleep'):
+            result = scope['answer_llm']({}, Mock(), {}, activity=metadata)
+        self.assertEqual(result['_activity']['retries'], 1)
+        self.assertIsNone(result['_activity']['failure_code'])
+        self.assertNotIn('SECRET', str(metadata))
+        for error, code in [(ValueError('Extra data: line 1'), 'invalid_result'),
+                            (scope['UsageLimit']('SECRET quota', time.time() + 10), 'quota_exhausted')]:
+            ask.side_effect = error
+            metadata = {}
+            with self.assertRaises(RuntimeError):
+                scope['answer_llm']({}, Mock(), {}, activity=metadata)
+            self.assertEqual(metadata['failure_code'], code)
+            self.assertEqual(metadata['retries'], 0)
+
     def route(self, ready=True, result=None, error=None):
         mac = Mock(return_value=result, side_effect=error)
         api = Mock(return_value={'answer': 'deepseek'})
         scope = load_functions('shiguang/llm.py', {'llm_json'}, SUMMARY_LANG='Chinese',
-                               codex_ready=Mock(return_value=ready), codex_json=mac, deepseek_json=api)
+                               CODEX_VIA_MAC=True, codex_ready=Mock(return_value=ready), codex_json=mac, deepseek_json=api)
         out = scope['llm_json']('Return {fields} in {lang}', 'question', {'answer': 'string'}, 100, {}, purpose='search')
         return out, mac, api
 
@@ -51,6 +75,57 @@ class RoutingTests(unittest.TestCase):
                 api.assert_called_once()
                 if not args.get('ready', True):
                     mac.assert_not_called()
+
+    def queued_request(self, status, ready=True, race=False, run_wait=360):
+        now, completed = [0], [False]
+        writes, usage = [], {}
+        clock = types.SimpleNamespace(time=lambda: now[0], sleep=lambda delay: now.__setitem__(0, now[0] + delay))
+        def query(sql, args=(), one=False):
+            if not sql.startswith('SELECT'):
+                return []
+            state = 'done' if completed[0] else status(now[0])
+            return {'state': state, 'error': '', 'result': json.dumps({'engine': 'codex', 'out': {'answer': 'ok'}})}
+        def write(sql, args):
+            writes.append((now[0], sql))
+            if race:
+                completed[0] = True
+                return 0
+            return 1
+        board = types.SimpleNamespace(publish=Mock(return_value=1), _write=write)
+        package = types.ModuleType('_routing_test'); package.board = board
+        scope = load_functions('shiguang/llm.py', {'codex_json'}, q=query, secrets=secrets,
+                               CODEX_URGENT={'search', 'live-curator'}, CODEX_CLAIM_WAIT=90,
+                               CODEX_RUN_WAIT=run_wait, codex_ready=lambda: ready, log_usage=Mock(),
+                               __package__='_routing_test')
+        scope['time'] = clock
+        with patch.dict(sys.modules, {'_routing_test': package}):
+            out = scope['codex_json']('sys', 'question', {'answer': 'string'}, 'live-curator', None, usage, True)
+        return out, usage, writes, now[0]
+
+    def test_busy_curator_waits_past_old_twenty_second_deadline(self):
+        out, usage, writes, _ = self.queued_request(lambda t: 'queued' if t < 30 else 'running' if t < 40 else 'done')
+        self.assertEqual(out, {'answer': 'ok'})
+        self.assertEqual(usage['codex'], 1)
+        self.assertEqual(writes, [])
+
+    def test_queue_stays_bounded_and_explains_fallback(self):
+        out, usage, writes, elapsed = self.queued_request(lambda t: 'queued')
+        self.assertIsNone(out)
+        self.assertEqual(elapsed, 92)
+        self.assertIn('queue wait', usage['fallback_reason'])
+        self.assertEqual(len(writes), 1)
+
+    def test_disappearing_worker_does_not_wait_the_whole_queue_budget(self):
+        out, usage, _, elapsed = self.queued_request(lambda t: 'queued', ready=False)
+        self.assertIsNone(out)
+        self.assertLess(elapsed, 90)
+        self.assertIn('fallback_reason', usage)
+
+    def test_running_timeout_preserves_concurrent_success(self):
+        out, usage, writes, _ = self.queued_request(lambda t: 'running', race=True, run_wait=10)
+        self.assertEqual(out, {'answer': 'ok'})
+        self.assertNotIn('fallback_reason', usage)
+        self.assertIn("state IN ('queued','running')", writes[0][1])
 
     def test_only_active_codex_workers_count(self):
         query = Mock()
@@ -92,7 +167,7 @@ class RoutingTests(unittest.TestCase):
     @unittest.skipUnless((ROOT / 'mac/mac_worker.py').is_file(), 'Mac worker source is tested in the repository')
     def test_worker_quota_skips_codex(self):
         ask = Mock()
-        scope = load_functions('mac/mac_worker.py', {'answer_llm', 'UsageLimit'}, CODEX=Mock(),
+        scope = load_functions('mac/mac_worker.py', {'answer_llm', 'UsageLimit', 'TransientCodexError'}, CODEX=Mock(),
                                ask_codex=ask, log=Mock())
         scope['CODEX'].exists.return_value = True
         limits = {}
@@ -109,10 +184,100 @@ class RoutingTests(unittest.TestCase):
     def test_codex_rejects_failed_turn_even_with_partial_answer(self):
         events = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{"answer": "partial"}'}},
                   {'type': 'turn.failed', 'error': {'message': 'failed'}}]
-        scope = load_functions('mac/mac_worker.py', {'ask_codex', 'UsageLimit'}, CODEX=Path('/codex'), CODEX_MODEL='',
+        scope = load_functions('mac/mac_worker.py', {'ask_codex', 'UsageLimit', 'TransientCodexError'}, CODEX=Path('/codex'), CODEX_MODEL='',
                                run_cli=Mock(return_value=(1, '\n'.join(map(json.dumps, events)), '')))
         with self.assertRaises(RuntimeError):
             scope['ask_codex']({'system': 'sys', 'user': 'text'}, Mock())
+
+    def codex_events(self, events, code=0):
+        return load_functions('mac/mac_worker.py', {'ask_codex', 'UsageLimit', 'TransientCodexError'},
+                              CODEX=Path('/codex'), CODEX_MODEL='gpt-6-luna',
+                              run_cli=Mock(return_value=(code, '\n'.join(map(json.dumps, events)), '')))
+
+    def test_codex_accepts_completion_after_recovered_stream_error(self):
+        events = [{'type': 'error', 'message': 'stream disconnected; reconnecting'},
+                  {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{"answer":"complete"}'}},
+                  {'type': 'turn.completed', 'usage': {'input_tokens': 7, 'output_tokens': 3}}]
+        scope = self.codex_events(events)
+        result = scope['ask_codex']({'system': 'sys', 'user': 'text'}, Mock())
+        self.assertEqual(result['out'], {'answer': 'complete'})
+        self.assertEqual(result['tokens_out'], 3)
+        self.assertEqual(result['model'], 'gpt-6-luna')
+        # A terminal failure must still win over a previous completion.
+        scope = self.codex_events(events + [{'type': 'turn.failed', 'error': {'message': 'failed'}}])
+        with self.assertRaises(RuntimeError):
+            scope['ask_codex']({'system': 'sys', 'user': 'text'}, Mock())
+
+    def test_codex_short_rate_limits_and_network_errors_are_not_quota(self):
+        for message in ('HTTP 429 too many concurrent requests, retry in 1 second',
+                        'rate limit exceeded', 'stream disconnected before completion',
+                        '503 temporarily unavailable'):
+            with self.subTest(message=message):
+                scope = self.codex_events([{'type': 'turn.failed', 'error': {'message': message}}], 1)
+                with self.assertRaises(scope['TransientCodexError']):
+                    scope['ask_codex']({'system': 'sys', 'user': 'text'}, Mock())
+
+    def test_codex_explicit_exhausted_quota_keeps_cooldown(self):
+        for detail in ({'message': "You've hit your usage limit. Try again Oct 27."},
+                       {'message': 'Request denied', 'code': 'usage_limit_reached'},
+                       {'message': 'You exceeded your current quota'},
+                       {'message': 'insufficient_quota'}):
+            with self.subTest(detail=detail):
+                scope = self.codex_events([{'type': 'turn.failed', 'error': detail}], 1)
+                with self.assertRaises(scope['UsageLimit']) as caught:
+                    scope['ask_codex']({'system': 'sys', 'user': 'text'}, Mock())
+                self.assertGreater(caught.exception.until, time.time() + 1700)
+
+    def worker_scope(self):
+        clock = Mock()
+        clock.monotonic.return_value = 100
+        clock.time.return_value = 100
+        ask, beat = Mock(), Mock()
+        scope = load_functions('mac/mac_worker.py', {'answer_llm', 'UsageLimit', 'TransientCodexError'},
+                               CODEX=Mock(), ask_codex=ask, log=Mock())
+        scope['time'] = clock
+        scope['CODEX'].exists.return_value = True
+        return scope, ask, beat, clock
+
+    def test_codex_transient_failure_retries_without_pausing_worker(self):
+        scope, ask, beat, clock = self.worker_scope()
+        limits = {}
+        ask.side_effect = [scope['TransientCodexError']('429'), scope['TransientCodexError']('network'),
+                           {'out': {'answer': 'codex'}}]
+        self.assertEqual(scope['answer_llm']({}, beat, limits), {'out': {'answer': 'codex'}})
+        self.assertEqual(ask.call_count, 3)
+        self.assertEqual([c.args[0] for c in clock.sleep.call_args_list], [2, 5])
+        self.assertEqual(beat.call_count, 2)
+        self.assertEqual(limits, {})
+
+    def test_codex_transient_retry_is_bounded_by_attempts_time_and_lease(self):
+        scope, ask, beat, clock = self.worker_scope()
+        ask.side_effect = scope['TransientCodexError']('network')
+        with self.assertRaises(RuntimeError):
+            scope['answer_llm']({}, beat, {})
+        self.assertEqual(ask.call_count, 3)
+        scope, ask, beat, clock = self.worker_scope()
+        clock.monotonic.side_effect = [100, 100, 399]
+        ask.side_effect = scope['TransientCodexError']('network')
+        with self.assertRaises(RuntimeError):
+            scope['answer_llm']({}, beat, {})
+        self.assertEqual(ask.call_count, 1)
+        clock.sleep.assert_not_called()
+        scope, ask, beat, clock = self.worker_scope()
+        ask.side_effect = scope['TransientCodexError']('network')
+        beat.side_effect = RuntimeError('task lease was lost')
+        with self.assertRaisesRegex(RuntimeError, 'lease was lost'):
+            scope['answer_llm']({}, beat, {})
+        self.assertEqual(ask.call_count, 1)
+        clock.sleep.assert_not_called()
+
+    def test_codex_invalid_output_does_not_repeat_model_calls(self):
+        scope, ask, beat, clock = self.worker_scope()
+        ask.side_effect = ValueError('invalid JSON')
+        with self.assertRaises(RuntimeError):
+            scope['answer_llm']({}, beat, {})
+        self.assertEqual(ask.call_count, 1)
+        clock.sleep.assert_not_called()
 
     @unittest.skipUnless((ROOT / 'mac/mac_worker.py').is_file() and shutil.which('git'),
                          'Mac healer requires its source and git; tested in the repository')

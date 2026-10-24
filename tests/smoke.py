@@ -75,6 +75,18 @@ def post(path, json=None, code=200, headers=None):
     return r.get_json(silent=True)
 
 
+def source_activity_overview():
+    for endpoint in ('/api/sources', '/api/inbox', '/api/ai/activity'):
+        started = time.monotonic()
+        result = get(endpoint)
+        assert result['storage_owner'] == 'user:' + user
+        assert isinstance(result['items'], list) and result['total'] >= len(result['items'])
+        print(f"      {endpoint}: {(time.monotonic() - started) * 1000:.0f} ms")
+
+
+check('owned sources, inbox and AI activity over real database copy', source_activity_overview)
+
+
 some_job = None
 
 
@@ -430,8 +442,9 @@ def weekly_privacy():
     owner = f"user:{user}"
     prev = G.q("SELECT tags FROM privacy WHERE owner=?", (owner,), one=True)
     hidden = json.loads(prev["tags"]) if prev else []
+    visible_ids = {item['id'] for item in get('/api/jobs')['jobs']}
     row = next((r for r in G.q("SELECT id, analysis FROM jobs WHERE owner=? AND status='done' ORDER BY id DESC LIMIT 50", (owner,))
-                if not shiguang.web.is_hidden({"analysis": json.loads(r["analysis"] or "{}")}, {"tags": hidden})), None)
+                if r['id'] in visible_ids), None)
     if not row:
         return
     jid, tag = row["id"], "隐私测试标签"

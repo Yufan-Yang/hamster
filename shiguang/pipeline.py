@@ -24,34 +24,77 @@ def add_job(url, source="web", chat_id=None, msg_id=None, owner=None, device=Non
     return add_job_ex(url, source, chat_id, msg_id, owner, device)[0]
 
 
-def add_job_ex(url, source="web", chat_id=None, msg_id=None, owner=None, device=None):
+def add_job_ex(url, source="web", chat_id=None, msg_id=None, owner=None, device=None,
+               key_aliases=(), download_context=None):
     """Queue a link. Returns (job id, how): "new", "duplicate" when this owner already has it queued,
     downloading or downloaded (the existing job is returned), or "linked" when someone else already has it:
     then this owner gets their own entry that points at the same files instead of a second download."""
     url = url.strip()
     key = link_key(url)
-    existing = q("SELECT id FROM jobs WHERE key=? AND owner IS ? AND status NOT IN ('failed','cancelled') "
-                 "ORDER BY id DESC LIMIT 1", (key, owner), one=True)
-    if existing:
-        return existing["id"], "duplicate"
-    source_job = q("SELECT * FROM jobs WHERE key=? AND ref IS NULL AND status IN ('queued','downloading','processing','done') "
-                   "ORDER BY status='done' DESC, id DESC LIMIT 1", (key,), one=True)
+    from .crawl import identity, MEDIA_EXT
+
+    def precise_key(address):
+        return identity(address, bool(MEDIA_EXT.search(address))) if address.startswith(('http://', 'https://')) else link_key(address)
+
+    equivalent = {precise_key(url)}
+    if key.startswith(('youtube:', 'bilibili:', 'btih:')):
+        # link_key may already have resolved a platform's short share URL.
+        equivalent.add(key)
+    for alias in key_aliases:
+        if alias.startswith(('http://', 'https://')):
+            equivalent.add(precise_key(alias))
+        elif alias.startswith(('youtube:', 'bilibili:', 'btih:')):
+            equivalent.add(alias)
+    keys = json.dumps(list(dict.fromkeys([key, *key_aliases, *sorted(equivalent)])))
+    stored_key = key_aliases[0] if key_aliases else key
     with db_lock:
-        cur = core.DB.execute("INSERT INTO jobs (url, key, source, chat_id, msg_id, owner, device, created, updated) "
-                         "VALUES (?,?,?,?,?,?,?,?,?)",
-                         (url, key, source, chat_id, msg_id, owner, device, time.time(), time.time()))
-        core.DB.commit()
-        job_id = cur.lastrowid
-    if source_job:
-        if source_job["status"] == "done":
-            # Already downloaded: copy the result over (same files on disk)
-            update(job_id, ref=source_job["id"], **{f: source_job[f] for f in SHARED_FIELDS})
-        else:
-            # Still downloading: wait for it; finish_links() fills this in when it's done
-            update(job_id, ref=source_job["id"], status="linked")
-        return job_id, "linked"
+        # Serialize lookup + insert across web/subscription/crawl processes, including aliases.
+        db = core.DB
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            # A regular add may use a collected detail-page alias while the job
+            # URL is its media stream. Resolve that direction through the ledger.
+            alias_jobs = {row['job_id'] for row in db.execute(
+                'SELECT DISTINCT i.job_id FROM crawl_aliases a JOIN crawl_items i ON i.id=a.item_id '
+                'WHERE i.job_id IS NOT NULL AND a.url_key IN (SELECT value FROM json_each(?))',
+                (json.dumps(sorted(equivalent)),)).fetchall()}
+            clause = '(key IN (SELECT value FROM json_each(?)) OR url=? OR id IN (SELECT value FROM json_each(?)))'
+            args = (keys, url, json.dumps(sorted(alias_jobs)))
+
+            def same_video(row):
+                # Legacy generic keys omit some query fields (e.g. mid/ref) and
+                # the scheme. They locate candidates but cannot prove identity.
+                return row['id'] in alias_jobs or row['key'] in equivalent or precise_key(row['url']) in equivalent
+
+            existing = next((row for row in db.execute(
+                "SELECT id,url,key FROM jobs WHERE " + clause +
+                " AND owner IS ? AND status NOT IN ('failed','cancelled') ORDER BY id DESC", (*args, owner)).fetchall()
+                if same_video(row)), None)
+            if existing:
+                db.commit()
+                return existing['id'], 'duplicate'
+            source_job = next((row for row in db.execute(
+                "SELECT * FROM jobs WHERE " + clause + " AND ref IS NULL "
+                "AND status IN ('queued','downloading','processing','done') ORDER BY status='done' DESC,id DESC", args).fetchall()
+                if same_video(row)), None)
+            cur = db.execute("INSERT INTO jobs (url,key,source,chat_id,msg_id,owner,device,created,updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                             (url, stored_key, source, chat_id, msg_id, owner, device, time.time(), time.time()))
+            job_id = cur.lastrowid
+            if source_job:
+                if source_job['status'] == 'done':
+                    fields = {f: source_job[f] for f in SHARED_FIELDS}
+                    fields['ref'] = source_job['id']
+                    db.execute('UPDATE jobs SET ' + ','.join(f'{f}=?' for f in fields) + ' WHERE id=?', (*fields.values(), job_id))
+                else:
+                    db.execute("UPDATE jobs SET ref=?,status='linked' WHERE id=?", (source_job['id'], job_id))
+            if download_context:
+                db.execute('INSERT INTO crawl_downloads(job_id,context) VALUES(?,?)', (job_id, json.dumps(download_context)))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
     ring("jobs")
-    return job_id, "new"
+    return job_id, 'linked' if source_job else 'new'
 
 
 def finish_links(source_id):
@@ -349,6 +392,12 @@ def process(job_id):
         download.aria2(job_id, ["--dir", str(workdir), "--seed-time=0", "--bt-stop-timeout=1800", "--follow-torrent=mem",
                        "--bt-remove-unselected-file=true", "--enable-dht=true", "--bt-enable-lpd=true", src], as_bt=True)
         meta["source"] = "torrent"
+    elif q('SELECT 1 FROM crawl_downloads WHERE job_id=?', (job_id,), one=True):
+        from . import crawl
+        kind = 'video'
+        update(job_id, kind=kind)
+        context = crawl.download_context(job_id)
+        meta, download_dir = download.page_video_download(job_id, url, workdir, media_context=context)
     else:
         probe_error = None
         try:
@@ -523,6 +572,26 @@ def refile_bangumi_extras():
     library.plex_refresh()
 
 
+def _commit_job_failure(job_id, **fields):
+    """Cancellation wins over a network failure racing with the last cancel check."""
+    with db_lock:
+        db = core.DB
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            row = db.execute('SELECT cancel,status FROM jobs WHERE id=?', (job_id,)).fetchone()
+            cancelled = not row or row['cancel'] or row['status'] == 'cancelled'
+            if cancelled:
+                fields = {'status': 'cancelled', 'stage': '', 'speed': '', 'retry_at': None}
+            fields['updated'] = time.time()
+            db.execute('UPDATE jobs SET ' + ','.join(f'{field}=?' for field in fields) + ' WHERE id=?',
+                       (*fields.values(), job_id))
+            db.commit()
+            return bool(cancelled)
+        except BaseException:
+            db.rollback()
+            raise
+
+
 def run_job(job_id):
     try:
         process(job_id)
@@ -535,21 +604,23 @@ def run_job(job_id):
         # automatically a few times (1, 5, then 15 minutes later); errors that won't fix themselves aren't.
         attempts = (q("SELECT attempts FROM jobs WHERE id=?", (job_id,), one=True)["attempts"] or 0) + 1
         permanent = (download.terminal_download_reason(e)
-                     or isinstance(e, download.DownloadFailure) and not e.retryable
-                     or re.search(r"No video found|Unsupported URL|no longer supported|produced no files|404|"
-                                  r"Private video|removed|not available|Cloudflare 人机验证", str(e), re.I))
+                     or (not e.retryable if isinstance(e, download.DownloadFailure) else
+                         not download.temporary_download_error(e) and
+                         re.search(r"No video found|Unsupported URL|no longer supported|produced no files|404|"
+                                   r"Private video|removed|not available|Cloudflare 人机验证", str(e), re.I)))
         # Being taken for a bot passes after a while: wait longer and try more often
         delays = (1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600) if download.BOT_CHECK.search(str(e)) or "机器人" in str(e) else (60, 300, 900)
         if attempts <= len(delays) and not permanent:
             delay = delays[attempts - 1]
             wait = f"{delay // 3600} 小时" if delay >= 3600 else f"{delay // 60} 分钟"
-            update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=time.time() + delay,
-                   error=f"{str(e)[:900]}\n（{wait}后自动重试，第 {attempts}/{len(delays)} 次，已下载的部分会保留）")
+            failure = dict(status="failed", stage="", speed="", attempts=attempts, retry_at=time.time() + delay,
+                           error=f"{str(e)[:900]}\n（{wait}后自动重试，第 {attempts}/{len(delays)} 次，可续传的部分会保留）")
         else:
-            update(job_id, status="failed", stage="", speed="", attempts=attempts, retry_at=None, error=str(e)[:1000],
-                   advice="")
-            if LLM_API_KEY:  # failed for good: why, in plain words, and what to do
-                board.publish("explain_failure", f"job:{job_id}", 50, force=True)
+            failure = dict(status="failed", stage="", speed="", attempts=attempts, retry_at=None, error=str(e)[:1000], advice="")
+        if _commit_job_failure(job_id, **failure):
+            shutil.rmtree(INCOMPLETE / str(job_id), ignore_errors=True)
+        elif failure['retry_at'] is None and LLM_API_KEY:  # failed for good: plain-language advice
+            board.publish("explain_failure", f"job:{job_id}", 50, force=True)
     finally:
         finish_links(job_id)
         ring("jobs", "tasks")  # a download slot is free; the CPU may be (the Pi's idle work waits for that)
@@ -558,6 +629,16 @@ def run_job(job_id):
 
 finishing = []  # job processes past their final status, still doing finishing touches
 claim_lock = threading.Lock()
+
+
+def _claim_job(jid):
+    """A previously selected queue row may have been cancelled in another process."""
+    with db_lock:
+        changed = core.DB.execute("UPDATE jobs SET status='downloading',stage='starting',updated=? "
+                                  "WHERE id=? AND status='queued' AND COALESCE(cancel,0)=0",
+                                  (time.time(), jid)).rowcount
+        core.DB.commit()
+    return bool(changed)
 
 
 def worker_loop():
@@ -577,8 +658,8 @@ def worker_loop():
                     " (SELECT COUNT(*) FROM jobs WHERE status IN ('downloading','processing') AND source LIKE 'sub:%') < ?)) "
                     "ORDER BY COALESCE(source,'') LIKE 'sub:%', CASE WHEN source LIKE 'sub:%' THEN -id ELSE id END LIMIT 1",
                     (channels.SUB_WORKERS, DOWNLOAD_WORKERS - 1), one=True)
-            if row:
-                update(row["id"], status="downloading", stage="starting", cancel=0)
+            if row and not _claim_job(row['id']):
+                row = None
         if not row:
             bell_wait("jobs", mark, 60)  # a new job rings; a due automatic retry is found within the minute
             continue
@@ -619,16 +700,34 @@ def worker_loop():
 # ---------------------------------------------------------------- job control
 
 def cancel_job(jid):
-    row = q("SELECT status FROM jobs WHERE id=?", (jid,), one=True)
-    if not row:
-        return f"No job #{jid}"
-    if row["status"] in ("queued", "linked"):
-        update(jid, status="cancelled")
+    finish = False
+    with db_lock:
+        # Serialize with the due-retry claim, so a waiting retry cannot revive
+        # itself after cancellation. Downloading children observe cancel=1.
+        db = core.DB
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            row = db.execute('SELECT status,retry_at FROM jobs WHERE id=?', (jid,)).fetchone()
+            if not row:
+                db.rollback()
+                return f"No job #{jid}"
+            if row['status'] in ('queued', 'linked') or row['status'] == 'failed' and row['retry_at'] is not None:
+                db.execute("UPDATE jobs SET status='cancelled',retry_at=NULL,cancel=1,stage='',speed='',updated=? WHERE id=?",
+                           (time.time(), jid))
+                finish = True
+            elif row['status'] in ('downloading', 'processing'):
+                db.execute('UPDATE jobs SET cancel=1,updated=? WHERE id=?', (time.time(), jid))
+            else:
+                db.rollback()
+                return f"#{jid} is already {row['status']}"
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    if finish:
+        shutil.rmtree(INCOMPLETE / str(jid), ignore_errors=True)
         finish_links(jid)
-    elif row["status"] in ("downloading", "processing"):
-        update(jid, cancel=1)  # the job process sees this within a couple of seconds
-    else:
-        return f"#{jid} is already {row['status']}"
+    ring('jobs')
     return f"Cancelling #{jid}"
 
 
@@ -640,36 +739,60 @@ def retry_job(jid):
     return f"Retrying #{jid}"
 
 
-def delete_job_files(row):
-    """Delete a job's files from disk: the media, its subtitles/cover, and the browser copy.
-    Only paths inside the library are touched; empty folders it leaves behind are removed."""
+def delete_job_files(row, protected_files=None, *, protection=None):
+    """Delete only unshared library files; a recycle-bin entry protects its media too."""
+    from . import trash
+    if protection is None and protected_files is None:
+        # Existing callers can still use this helper safely. The purge path passes
+        # references collected while holding its transaction instead.
+        with db_lock:
+            protected_files = trash._referenced(core.DB)
+    if protection is None:
+        protection = trash._FileProtection(protected_files)
+    root = MEDIA.resolve()
     removed = 0
-    for f in json.loads(row["files"] or "[]"):
-        p = Path(f)
-        try:
-            p.resolve().relative_to(MEDIA.resolve())
-        except ValueError:
-            continue
-        if p.suffix.lower() in VIDEO_EXT | AUDIO_EXT and p.exists():
-            st = p.stat()
-            (library.PLAY_CACHE / f"{hashlib.sha1(f'{p}:{st.st_mtime}'.encode()).hexdigest()}.mp4").unlink(missing_ok=True)
-            # subtitles made after the download (speech-to-text, translation) aren't in the job's file list
-            for side in p.parent.glob(glob.escape(p.stem) + ".*"):
+    visited = set()
+
+    def shared(path):
+        return protection.shared(path)
+
+    def unlink(path):
+        nonlocal removed
+        resolved = trash._safe_path(str(path), root=protection.root)
+        if resolved is None or resolved in visited or shared(resolved):
+            return
+        visited.add(resolved)
+        if path.is_symlink():
+            path.unlink()
+            removed += 1
+            return
+        if path.is_dir():
+            # Never recursively remove a whole directory containing shared files.
+            for child in list(path.iterdir()):
+                unlink(child)
+            if path != root and path.exists() and not any(path.iterdir()):
+                path.rmdir()
+            return
+        if not path.exists() and not path.is_symlink():
+            return
+        if path.suffix.lower() in VIDEO_EXT | AUDIO_EXT and path.exists():
+            st = path.stat()
+            (library.PLAY_CACHE / f"{hashlib.sha1(f'{path}:{st.st_mtime}'.encode()).hexdigest()}.mp4").unlink(missing_ok=True)
+            for side in path.parent.glob(glob.escape(path.stem) + ".*"):
                 if side.suffix.lower() in SUB_EXT and side.is_file():
-                    side.unlink()
-                    removed += 1
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-            removed += 1
-        elif p.exists():
-            p.unlink()
-            removed += 1
-        # Tidy empty folders, but keep the library's own folders (Movies, TV, Videos/Talks...)
-        parent = p.parent
-        while (parent != MEDIA and parent.parent != MEDIA and parent.parent != MEDIA / "Videos"
-               and parent.exists() and not any(parent.iterdir())):
+                    unlink(side)
+        path.unlink()
+        removed += 1
+        parent = path.parent
+        while (parent != root and parent.parent != root and parent.parent != root / "Videos"
+               and parent.exists() and not shared(parent) and not any(parent.iterdir())):
             parent.rmdir()
             parent = parent.parent
+
+    for value in trash._paths(dict(row)):
+        path = Path(value)
+        if trash._safe_path(value, root=protection.root) is not None:
+            unlink(path)
     return removed
 
 
@@ -701,29 +824,20 @@ def sweep_loop():
         time.sleep(3600)
 
 
-def remove_job(jid, with_files):
-    """Remove a job from the list (stopping it first); optionally delete its files too."""
+def remove_job(jid, with_files=None, owner=None):
+    """Move a stopped job to its owner's recycle bin. Old file flags are ignored."""
     cancel_job(jid)
-    row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
-    if not row:
-        return "gone", 0
-    if row["status"] in ("downloading", "processing"):
-        return "stopping", 0
-    shared = [r for r in q("SELECT id, files FROM jobs WHERE id != ? AND status NOT IN ('failed','cancelled')", (jid,))
-              if set(json.loads(r["files"] or "[]")) & set(json.loads(row["files"] or "[]"))]
-    # Files another account still uses stay on disk; only this entry goes
-    files = delete_job_files(row) if with_files and not shared else 0
-    shutil.rmtree(INCOMPLETE / str(jid), ignore_errors=True)  # any partial download
-    q("DELETE FROM jobs WHERE id=?", (jid,))
-    q("UPDATE jobs SET ref=NULL WHERE ref=?", (jid,))
-    search.forget_index(jid)
-    if with_files and shared:
-        return "kept_shared", 0
-    return "removed", files
+    from . import trash
+    result, files = trash.trash_job(jid, actor=owner)
+    if result == "trashed":
+        shutil.rmtree(INCOMPLETE / str(jid), ignore_errors=True)
+        # Search scopes itself to active jobs. Keep its costly text/image indexes
+        # for restoration; trash_job cancels queued work in the same transaction.
+    return result, files
 
 
 # The other modules, imported last: they import this one too, and are only used at run time
-from . import board, channels, core, download, library, llm, search, telegram  # noqa: E402
+from . import board, channels, core, download, library, llm, telegram  # noqa: E402
 
 
 @once("episode_titles", background=True)

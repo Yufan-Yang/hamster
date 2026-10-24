@@ -138,18 +138,32 @@ def codex_json(system, user, fields, purpose, job_id, usage, think):
                "effort": "medium" if think else "low"}
     tid = board.publish("llm", f"llm:{purpose}:{secrets.token_hex(6)}",
                         90 if purpose in CODEX_URGENT else 60 if purpose == "classify" else 50, payload=payload)
-    claim_wait = 20 if purpose in CODEX_URGENT else CODEX_CLAIM_WAIT
+    # Interactive requests already have queue priority. Let a busy Codex worker
+    # finish its current turn instead of paying for a fallback after 20 seconds.
+    claim_wait = CODEX_CLAIM_WAIT
+    run_started = None
+    activity = usage.get('_route_activity')
     try:
         checked = now
         while True:
-            row = q("SELECT state, result, error FROM tasks WHERE id=?", (tid,), one=True)
+            row = q("SELECT state, result, error, progress FROM tasks WHERE id=?", (tid,), one=True)
             if not row:
+                usage['fallback_reason'] = 'Codex task disappeared'
+                if activity is not None:
+                    activity['fallback_code'] = 'task_missing'
                 return None
             if row["state"] == "done":
                 res = json.loads(row["result"] or "{}")
                 out = res.get("out")
                 if res.get("engine") != "codex" or not isinstance(out, dict):
+                    usage['fallback_reason'] = 'Codex returned an invalid result'
+                    if activity is not None:
+                        activity['fallback_code'] = 'invalid_result'
                     return None
+                if activity is not None:
+                    meta = res.get('_activity') or {}
+                    activity.update(engine='codex', model=res.get('model'), retries=meta.get('retries'),
+                                    run_seconds=meta.get('run_seconds', res.get('seconds')))
                 usage["calls"] = usage.get("calls", 0) + 1
                 usage["tokens"] = usage.get("tokens", 0) + int(res.get("tokens_in") or 0) + int(res.get("tokens_out") or 0)
                 engine = "codex"
@@ -161,16 +175,40 @@ def codex_json(system, user, fields, purpose, job_id, usage, think):
                 return {k: None if isinstance(out.get(k), str) and out[k].strip().lower() in ("null", "none") else out.get(k)
                         for k in fields}
             if row["state"] == "failed":
-                print(f"Mac AI {purpose}: {row['error'][:200]} -> DeepSeek", flush=True)
+                usage['fallback_reason'] = 'Codex task failed: ' + str(row['error'] or '')[:200]
+                if activity is not None:
+                    # New workers send typed, bounded metadata. Old workers remain
+                    # unclassified; raw error strings are never copied or guessed as quota.
+                    try:
+                        meta = (json.loads(row['progress'] or '{}') or {}).get('ai_activity') or {}
+                    except (ValueError, TypeError):
+                        meta = {}
+                    code = meta.get('failure_code')
+                    if code not in {'quota_exhausted', 'transient_failure', 'invalid_result', 'execution_failed', 'worker_unavailable'}:
+                        code = 'execution_failed'
+                    activity.update(engine='codex', model=meta.get('model'), retries=meta.get('retries'),
+                                    run_seconds=meta.get('run_seconds'),
+                                    fallback_code=code)
                 return None
+            if row["state"] == "running" and run_started is None:
+                run_started = time.time()
+                if activity is not None:
+                    activity.update(engine='codex', queue_seconds=run_started - now)
             late = time.time() - now
             if row["state"] == "queued" and (late > claim_wait or (time.time() - checked > 15 and not codex_ready())):
                 if board._write("UPDATE tasks SET state='failed', error='not taken in time' WHERE id=? AND state='queued'", (tid,)):
+                    usage['fallback_reason'] = f'Codex queue wait ended after {int(late)}s'
+                    if activity is not None:
+                        activity.update(fallback_code='queue_timeout', queue_seconds=late)
                     return None
                 continue  # taken just now
-            if late > claim_wait + CODEX_RUN_WAIT:
-                board._write("UPDATE tasks SET state='failed', error='took too long' WHERE id=?", (tid,))
-                return None
+            if run_started is not None and time.time() - run_started > CODEX_RUN_WAIT:
+                if board._write("UPDATE tasks SET state='failed', error='took too long' WHERE id=? AND state IN ('queued','running')", (tid,)):
+                    usage['fallback_reason'] = f'Codex execution exceeded {CODEX_RUN_WAIT}s'
+                    if activity is not None:
+                        activity.update(fallback_code='run_timeout', run_seconds=time.time() - run_started)
+                    return None
+                continue  # completed while the deadline was being checked
             if time.time() - checked > 15:
                 checked = time.time()
             time.sleep(2)
@@ -183,15 +221,49 @@ def llm_json(system, user, fields, max_tokens, usage, purpose="", job_id=None, t
     max_tokens includes the model's reasoning tokens; only tokens actually used are billed.
     think=False: no reasoning at all, for mechanical work (translating lines, matching tags) where it only costs:
     thinking took ~5,000 of the ~6,000 output tokens of a 60-line subtitle batch."""
-    system = system.format(lang=SUMMARY_LANG, fields=json.dumps(fields, ensure_ascii=False, indent=1))
-    if codex_ready():
-        try:
-            out = codex_json(system, user, fields, purpose, job_id, usage, think)
-            if out is not None:
-                return out
-        except Exception:
-            traceback.print_exc()
-    return deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think)
+    activity, logger = None, None
+    previous = usage.get('_route_activity')
+    try:
+        from . import ai_activity as logger
+        activity = logger.begin(purpose, job_id)
+        usage['_route_activity'] = activity
+    except Exception:
+        pass  # Observability is optional; it must never choose a different route.
+    try:
+        system = system.format(lang=SUMMARY_LANG, fields=json.dumps(fields, ensure_ascii=False, indent=1))
+        if codex_ready():
+            try:
+                out = codex_json(system, user, fields, purpose, job_id, usage, think)
+                if out is not None:
+                    if activity is not None:
+                        activity['status'] = 'done'
+                    return out
+            except Exception as exc:
+                usage['fallback_reason'] = 'Codex routing error: ' + type(exc).__name__
+                if activity is not None:
+                    activity['fallback_code'] = 'routing_error'
+                traceback.print_exc()
+        else:
+            usage['fallback_reason'] = 'Codex disabled' if not CODEX_VIA_MAC else 'No active unpaused Codex worker'
+            if activity is not None:
+                activity['fallback_code'] = 'disabled' if not CODEX_VIA_MAC else 'worker_unavailable'
+        if activity is not None and not activity.get('fallback_code'):
+            activity['fallback_code'] = 'no_answer'
+        print(f"AI fallback purpose={purpose}: {usage.get('fallback_reason', 'Codex did not answer')} -> DeepSeek", flush=True)
+        out = deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think)
+        if activity is not None:
+            activity['status'] = 'done'
+        return out
+    finally:
+        if previous is None:
+            usage.pop('_route_activity', None)
+        else:
+            usage['_route_activity'] = previous
+        if activity is not None:
+            try:
+                logger.finish(activity)
+            except Exception:
+                pass
 
 
 def deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, think):
@@ -199,14 +271,26 @@ def deepseek_json(system, user, fields, max_tokens, usage, purpose, job_id, thin
         raise RuntimeError("Codex on the Mac didn't answer and there's no DeepSeek key")
     thinking = ({"reasoning_effort": LLM_EFFORT} if LLM_EFFORT else {}) if think else \
         ({"thinking": {"type": "disabled"}} if "deepseek" in LLM_BASE_URL else {})
-    r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
-                      headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                      json={"model": LLM_MODEL, "max_tokens": max_tokens, **thinking,
-                            "response_format": {"type": "json_object"},
-                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
+    activity = usage.get('_route_activity')
+    started = time.monotonic()
+    if activity is not None:
+        activity.update(engine='deepseek' if 'deepseek' in LLM_BASE_URL else 'api', model=LLM_MODEL,
+                        run_seconds=None,
+                        retries=0 if activity.get('retries') is None and activity.get('fallback_code') in ('disabled', 'worker_unavailable') else activity.get('retries'))
+    try:
+        r = requests.post(f"{LLM_BASE_URL}/chat/completions", timeout=180,
+                          headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                          json={"model": LLM_MODEL, "max_tokens": max_tokens, **thinking,
+                                "response_format": {"type": "json_object"},
+                                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
+    finally:
+        if activity is not None:
+            activity['run_seconds'] = time.monotonic() - started
     if r.status_code != 200:
         raise RuntimeError(f"{r.status_code} {r.text[:200]}")
     body = r.json()
+    if activity is not None:
+        activity.update(model=body.get('model') or LLM_MODEL, run_seconds=time.monotonic() - started)
     u = body.get("usage") or {}
     usage["calls"] = usage.get("calls", 0) + 1
     usage["tokens"] = usage.get("tokens", 0) + (u.get("total_tokens") or 0)
