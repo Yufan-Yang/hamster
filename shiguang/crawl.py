@@ -856,7 +856,7 @@ def _hidden_collected_job_ids(owner):
         snapshot['id'] = row['job_id']
         if isinstance(snapshot.get('analysis'), str):
             snapshot['analysis'] = json.loads(snapshot['analysis'] or '{}')
-        if web.is_hidden(snapshot, prefs):
+        if snapshot.get('_trash_private') is True or web.is_hidden(snapshot, prefs):
             hidden.add(row['job_id'])
     return hidden
 
