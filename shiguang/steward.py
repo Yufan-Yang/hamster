@@ -179,6 +179,10 @@ def inspect(row, settings):
     if state == 'ready' and actions:
         state = ('blocked' if any(x['state'] == 'blocked' for x in actions) else
                  'needs_work' if any(x['state'] == 'pending' for x in actions) else 'waiting')
+    if state == 'ready' and q("SELECT 1 FROM media_steward_actions a JOIN tasks t ON t.id=a.task_id "
+                              "WHERE a.job_id=? AND a.owner=? AND t.state IN ('queued','running') LIMIT 1",
+                              (jid, job['owner']), one=True):
+        state = 'waiting'
     return {'job_id': jid, 'owner': job['owner'], 'revision': version,
             'state': state, 'observation': observed, 'plan': actions}
 
@@ -395,8 +399,11 @@ def pending_manual_requests(owner=None):
             continue
         jobs = q("SELECT j.id FROM jobs j JOIN media_steward_assets s ON s.job_id=j.id AND s.owner=j.owner "
                  "WHERE j.owner=? AND j.id IN (SELECT value FROM json_each(?)) "
-                 "AND j.status NOT IN ('deleted','cancelled') AND s.state IN ('needs_work','waiting')",
-                 (p['owner'], json.dumps(ids)))
+                 "AND j.status NOT IN ('deleted','cancelled') AND (s.state IN ('needs_work','waiting') "
+                 "OR EXISTS(SELECT 1 FROM media_steward_actions a JOIN tasks t ON t.id=a.task_id "
+                 "WHERE a.job_id=j.id AND a.owner=j.owner AND a.created>=? "
+                 "AND t.state IN ('done','failed') AND t.updated>s.checked))",
+                 (p['owner'], json.dumps(ids), requested))
         if jobs:
             pending.append({'owner': p['owner'], 'ids': [job['id'] for job in jobs], 'requested_at': requested})
     return pending

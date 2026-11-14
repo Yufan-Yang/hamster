@@ -146,6 +146,22 @@ try:
                     assert 'transcribe' not in executed
                     assert calls == ['summarize'], calls
                     assert not steward.policy(owner)['automatic']
+                    subtitle = core.MEDIA / f'qa-{jid}.zh.srt'
+                    subtitle.write_text(subtitle.read_text() + '\n25\n00:00:24,000 --> 00:00:25,000\n补充调整主光的说明\n')
+                    requested = time.time()
+                    page.get_by_role('button', name='补全当前范围', exact=True).click()
+                    page.wait_for_function('!stewardView.busy')
+                    page.locator('#stewardBody').get_by_role('button', name='关闭', exact=True).click()
+                    deadline = time.time() + 25
+                    while time.time() < deadline:
+                        row = core.q('SELECT state,checked FROM media_steward_assets WHERE job_id=?', (jid,), one=True)
+                        if row and row['state'] == 'ready' and row['checked'] > requested and calls.count('summarize') == 2:
+                            break
+                        time.sleep(.1)
+                    else:
+                        raise AssertionError('manual batch stopped when the panel closed')
+                    page.evaluate('openSteward()')
+                    page.wait_for_function("stewardView.data?.items.some(x=>x.job_id === " + str(jid) + " && x.state === 'ready')")
                     assert page.locator('#stewardBody').evaluate('(e)=>e.scrollWidth <= e.clientWidth')
                     page.screenshot(path=str(OUT/'mobile.png'), full_page=True)
                 record('one manual request completes import, summary and verification', manual_completion)

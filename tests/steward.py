@@ -272,6 +272,19 @@ class StewardTests(unittest.TestCase):
         steward.tick()
         self.assertEqual(json.loads(self.task('steward_scan')['payload'])['requested_at'], requested)
 
+    def test_completed_subtitle_task_invalidates_an_earlier_ready_observation(self):
+        jid, files = self.media()
+        self.subs(files[0])
+        steward.queue_scan(self.owner, [jid], apply=True)
+        task = board.claim_task('ready-race-scan', ['steward_scan'])
+        board.run_claimed(task, 'ready-race-scan')
+        # A concurrent observer can have read the old, valid artifacts just before import commits.
+        core.q("UPDATE media_steward_assets SET state='ready',checked=? WHERE job_id=?", (time.time() - 1, jid))
+        task = board.claim_task('ready-race-import', ['steward_index'])
+        board.run_claimed(task, 'ready-race-import')
+        steward.tick()
+        self.assertEqual(self.task('steward_scan')['state'], 'queued')
+
     def test_paused_automatic_batch_does_not_become_manual_intent(self):
         jid, _ = self.media()
         steward.scan(self.owner)
