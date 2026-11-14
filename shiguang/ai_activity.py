@@ -21,6 +21,7 @@ PURPOSES = {
     'live-calibrate': '直播校准', 'live-score': '直播评分', 'live-verify': '来源核验',
     'live-style': '主播风格', 'live-refine': '评分校准', 'live-blind-eval': '盲评',
     'failure': '失败说明', 'other': '其他 AI 调用',
+    'media-steward': '媒体管家排程',
 }
 FALLBACKS = {
     'disabled': 'Codex 路由未启用', 'worker_unavailable': '没有可用的 Codex 工人（离线或暂停）',

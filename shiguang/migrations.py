@@ -259,6 +259,23 @@ def _substring_search(db):
     search_index.install(db)
 
 
+def _media_steward(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS media_steward_assets (
+        job_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, revision TEXT NOT NULL,
+        state TEXT NOT NULL, observation TEXT NOT NULL, plan TEXT NOT NULL,
+        checked REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS media_steward_owner ON media_steward_assets(owner,checked);
+    CREATE TABLE IF NOT EXISTS media_steward_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, job_id INTEGER NOT NULL,
+        kind TEXT NOT NULL, target TEXT NOT NULL, input_version TEXT NOT NULL,
+        task_id INTEGER NOT NULL, created REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS media_steward_attempts
+        ON media_steward_actions(job_id,kind,target,input_version,created);
+    CREATE INDEX IF NOT EXISTS media_steward_daily ON media_steward_actions(owner,created);
+    """)
+
+
 STEPS = [
     (1, lambda db: add(db, "jobs", "transcript", "TEXT DEFAULT ''")),
     (2, lambda db: add(db, "jobs", "owner", "TEXT")),
@@ -297,6 +314,7 @@ STEPS = [
     (33, _substring_search),
     (34, lambda db: (add(db, 'crawl_items', 'duration', 'REAL'), add(db, 'crawl_pages', 'duration', 'REAL'))),
     (35, lambda db: __import__('shiguang.directory_retired', fromlist=['clear_cache']).clear_cache(db)),
+    (36, _media_steward),
 ]
 
 

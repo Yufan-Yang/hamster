@@ -52,7 +52,7 @@ PREFER_WAIT_PAUSED = 4 * 3600  # a worker paused (a game) longer than this stops
 # "now": CPU work someone is waiting for (a note just made): done right away, not only in idle time
 # ("mac": kinds only the Mac does, e.g. asking Codex; no Pi worker takes them)
 PI_WORKERS = {"light": "pi", "ai": "pi-ai", "ai-quick": "pi-ai-2", "cpu": "pi-cpu", "now": "pi-now",
-              "publish": "pi-publish", "live-io": "pi-live-io", "live-search": "pi-live-search"}
+              "publish": "pi-publish", "live-io": "pi-live-io", "live-search": "pi-live-search", "steward": "pi-steward"}
 _execution = threading.local()
 
 
@@ -370,10 +370,18 @@ def task_media(task):
             raise ValueError("直播素材不存在")
         return media_path(row["path"]), []
     row = q("SELECT * FROM jobs WHERE id=?", (p["job"],), one=True)
+    if p.get('_steward_files') is not None:
+        if not row or row['files'] != p['_steward_files'] or row['owner'] != p.get('owner') or row['status'] != 'done':
+            raise ValueError('media changed since the steward planned it')
     media = library.playable(job_dict(row)) if row else []
     if p.get("part") is None or p["part"] >= len(media):
         raise ValueError("the file is gone")
-    return Path(media[p["part"]]["path"]), media[p["part"]]["subs"]
+    path = Path(media[p["part"]]["path"])
+    if p.get('_steward_stamp') is not None:
+        from . import steward
+        if steward._stamp(path) != p['_steward_stamp']:
+            raise ValueError('media changed since the steward planned it')
+    return path, media[p["part"]]["subs"]
 
 
 class AlreadySaved(Exception):
@@ -536,7 +544,8 @@ def retry_allowed(task, owner, admin=False):
         return bool(parent and parent["kind"] != "task_followup" and retry_allowed(parent, owner, admin))
     if task['kind'] not in {'live_calibrate', 'live_refine', 'live_verify', 'live_style', 'live_reference', 'live_transcribe', 'live_analyze',
                              'live_render', 'live_score', 'book_import', 'note_media', 'note_ai', 'transcribe', 'chapters', 'frames',
-                             'cover', 'index_subs', 'save_subs', 'translate', 'summarize', 'explain_failure', 'digest', 'notes_recap'}:
+                             'cover', 'index_subs', 'save_subs', 'translate', 'summarize', 'explain_failure', 'digest', 'notes_recap',
+                             'steward_scan', 'steward_index'}:
         return False
     payload = json.loads(task['payload'] or '{}')
     if payload.get('owner'):

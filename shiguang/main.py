@@ -50,6 +50,9 @@ def main_worker():
     threading.Thread(target=board.light_loop, args=("publish",), daemon=True).start()
     threading.Thread(target=board.light_loop, args=("live-io",), daemon=True).start()
     threading.Thread(target=board.light_loop, args=("live-search",), daemon=True).start()
+    from . import steward
+    threading.Thread(target=board.light_loop, args=('steward',), daemon=True).start()
+    threading.Thread(target=steward.loop, daemon=True).start()
     threading.Thread(target=live_editorial.cleanup_loop, daemon=True).start()
     if os.environ.get('GRABBER_RECORDER_SEPARATE') != '1':
         threading.Thread(target=live_recorder.loop, daemon=True).start()

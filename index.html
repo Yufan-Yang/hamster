@@ -732,6 +732,7 @@ a.link {display: inline-block; max-width: 100%;}
 <link rel="stylesheet" href="/static/ai_activity.css?v=20261024-v2">
 <link rel="stylesheet" href="/static/player_series.css?v=20261024-v3">
 <link rel="stylesheet" href="/static/library_updates.css?v=20261024-v1">
+<link rel="stylesheet" href="/static/steward.css?v=20261114-v1">
 </head>
 <body>
 <div class="topbar">
@@ -755,7 +756,7 @@ a.link {display: inline-block; max-width: 100%;}
 <main>
   <div class="workspace-heading"><div><h1 id="workspaceTitle">片库</h1><p id="workspaceDescription">留存喜欢的内容，随时接着看。</p></div><div class="view-tools" id="viewTools"></div></div>
   <div class="chips" id="chips" aria-label="片库分类"></div>
-  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><div class="toolbar-actions"><a class="link" href="/devices">设备状态</a><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" onclick="openTrash()">回收站</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div></div>
+  <div class="toolbar"><div class="scope" id="scope"></div><span id="privState"></span><div class="toolbar-actions"><button class="link" onclick="openSteward()">媒体管家</button><a class="link" href="/devices">设备状态</a><button class="link" onclick="openWeekly()">每周总结</button><button class="link" onclick="openUsage()">资源使用</button><button class="link" onclick="openTrash()">回收站</button><button class="link" id="manageBtn" onclick="toggleSelect()">批量管理</button></div></div>
   <div class="workspace-status" id="workspaceStatus" role="status" aria-live="polite" hidden><p id="workspaceStatusText"></p><button class="btn plain" id="workspaceRetry" onclick="refresh()">重新连接</button></div>
   <div class="understood" id="understood" hidden></div>
   <div class="saved-search-tools" id="savedSearchTools"><button type="button" class="link" onclick="openSavedSearches()">常用搜索</button><button type="button" class="link" id="savedSearchSaveCurrent" onclick="openSavedSearches(true)" hidden>保存搜索</button></div>
@@ -874,6 +875,7 @@ a.link {display: inline-block; max-width: 100%;}
 </div>
 
 <div class="sheet-bg" id="aiActivitySheet" hidden onclick="if (event.target === this) closeAIActivity()"><div class="sheet wide-sheet" id="aiActivityBody"></div></div>
+<div class="sheet-bg" id="stewardSheet" hidden onclick="if (event.target === this) resetSteward()"><div class="sheet wide-sheet" id="stewardBody" role="dialog" aria-modal="true" aria-labelledby="stewardTitle"></div></div>
 
 <div class="sheet-bg" id="trashSheet" hidden onclick="if (event.target === this) hide(this)">
   <div class="sheet trash-sheet" role="dialog" aria-modal="true" aria-labelledby="trashTitle">
@@ -1071,6 +1073,7 @@ function setStorageOwner(owner) {
   if (typeof resetSources === 'function') resetSources();
   if (typeof resetLibraryUpdates === 'function') resetLibraryUpdates();
   if (typeof resetAIActivity === 'function') resetAIActivity();
+  if (typeof resetSteward === 'function') resetSteward();
   ++removeEpoch; $('#removeGo').disabled = false;
   cancelPrivacySelection(); ++privacyMenuEpoch; ++privateViewEpoch;
   ++notesEpoch; ++booksEpoch; ++watchOpenEpoch;
@@ -1116,6 +1119,7 @@ function hide(el, after) {
   if (el?.id === "savedSearchSheet" && typeof closeSavedSearches === 'function') closeSavedSearches();
   if (el?.id === "sourcesSheet" && typeof resetSources === 'function') resetSources();
   if (el?.id === "aiActivitySheet" && typeof resetAIActivity === 'function') resetAIActivity();
+  if (el?.id === "stewardSheet" && typeof resetSteward === 'function') resetSteward();
   if (el?.id === "privacySheet") { cancelPrivacySelection(); ++privacyMenuEpoch; }
   if (!el || el.hidden || el.classList.contains("closing")) return;
   el.classList.add("closing");
@@ -2769,6 +2773,7 @@ function resetPrivateViews() {
   if (typeof resetSavedSearches === 'function') resetSavedSearches();
   if (typeof resetSources === 'function') resetSources();
   if (typeof resetAIActivity === 'function') resetAIActivity();
+  if (typeof resetSteward === 'function') resetSteward();
   if (typeof resetCrawl === 'function') resetCrawl();
   if (typeof resetTrash === 'function') resetTrash();
 }
@@ -4683,6 +4688,7 @@ if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWor
 <script src="/static/sources.js?v=20261024-v2"></script>
 <script src="/static/library_updates.js?v=20261024-v1"></script>
 <script src="/static/ai_activity.js?v=20261024-v2"></script>
+<script src="/static/steward.js?v=20261114-v1"></script>
 <script src="/static/intro.js?v=20261024-v2"></script>
 <script src="/static/player_series.js?v=20261024-v3"></script>
 </body>

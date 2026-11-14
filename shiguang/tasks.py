@@ -1,6 +1,7 @@
 """What each kind of task does on the Pi, and what follows it."""
 import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -151,6 +152,11 @@ def pi_summarize(task, beat):
                     current[key] = a[key]
                 else:
                     current.pop(key, None)
+        if current.get('summary') == a.get('summary') and current.get('summary'):
+            current['_summary_source'] = {
+                'transcript': hashlib.sha256(row['transcript'].encode()).hexdigest(),
+                'output': hashlib.sha256(current['summary'].encode()).hexdigest(),
+            }
         additions = [tag for tag in a.get("tags", []) if tag not in before.get("tags", [])]
         current["tags"] = list(dict.fromkeys(current.get("tags", []) + additions))[:12]
         if with_chapters and current.get("chapters", {}).get("0") == before.get("chapters", {}).get("0"):

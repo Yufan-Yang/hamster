@@ -288,6 +288,8 @@ def sign_in(name):
     saved_search.move_owner(g.device, f"user:{name}")
     from . import ai_activity
     ai_activity.move_owner(g.device, f"user:{name}")
+    from . import steward
+    steward.move_owner(g.device, f"user:{name}")
     # followed uploaders too; one the account already follows stays once
     for row in q('SELECT old.id old_id,new.id new_id FROM subs old JOIN subs new ON old.key=new.key '
                  'WHERE old.owner=? AND new.owner=?', (g.device, f'user:{name}')):

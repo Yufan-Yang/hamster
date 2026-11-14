@@ -1,0 +1,12 @@
+.steward-heading,.steward-controls,.steward-counts { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+.steward-heading { justify-content:space-between; }
+.steward-controls { margin:16px 0; }
+.steward-policy { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; margin:16px 0; padding:14px; border:2px solid var(--ink); }
+.steward-policy label { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
+.steward-policy input[type=checkbox] { width:auto; }
+.steward-policy select { flex:1 1 180px; min-width:0; max-width:100%; font:inherit; padding:8px; background:var(--panel); border:2px solid var(--ink); }
+.steward-counts span { padding:6px 10px; background:var(--bg); border:2px solid var(--ink); }
+.steward-item { padding:16px 0; border-bottom:2px solid var(--soft); overflow-wrap:anywhere; }
+.steward-item p { margin:6px 0; }
+.steward-item ul { padding-left:20px; }
+.steward-error { color:var(--accent); }
