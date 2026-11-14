@@ -47,7 +47,7 @@ class DeploymentRollbackTests(unittest.TestCase):
         self.script = self.script.replace("/tmp/shiguang-release-page.js", str(self.root / "page.js"))
         # Restrict PATH to a known set: filesystem operations are real; all privileged,
         # network, service, Python-validation and delay commands are test substitutes.
-        for command in ("cat", "cp", "date", "mkdir", "mv", "rm", "seq", "tar"):
+        for command in ("cat", "cp", "date", "gzip", "mkdir", "mv", "rm", "seq", "tar"):
             executable = shutil.which(command)
             self.assertIsNotNone(executable, f"{command} is required for this filesystem integration test")
             (self.commands / command).symlink_to(executable)
