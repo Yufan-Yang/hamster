@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from .core import COOKIES, UA, kv_get, kv_set, q
+from .series import numbered_name, series_key
 
 PREFIX = 'native-series:v1:'
 REFRESH = 86400
@@ -63,6 +64,10 @@ def video_key(value):
     return ''
 
 
+def _numbered_families(entries):
+    return sorted({family for entry in entries if (family := series_key(numbered_name(entry.get('title'))))})
+
+
 def attach(jobs):
     """Decorate selected jobs with stable native names/identities, in place.
 
@@ -73,7 +78,7 @@ def attach(jobs):
     if not jobs:
         return jobs
     ids = [job['id'] for job in jobs]
-    rows = q('SELECT j.id,j.key,j.owner,s.key sub_key FROM jobs j JOIN subs s '
+    rows = q("SELECT j.id,j.key,j.owner,j.title,json_extract(j.analysis,'$.library') library,s.key sub_key FROM jobs j JOIN subs s "
              "ON j.source='sub:'||s.id AND j.owner=s.owner WHERE j.id IN (SELECT value FROM json_each(?)) "
              "AND s.platform IN ('bilibili','youtube')", (json.dumps(ids),))
     maps, matches = {}, {}
@@ -83,7 +88,7 @@ def attach(jobs):
             continue
         if scope not in maps:
             data = kv_get(cache_key(*scope), {})
-            mapping = {}
+            mapping, families = {}, {}
             if data.get('owner') == scope[0] and data.get('sub_key') == scope[1]:
                 # A video can belong to several native playlists. The first
                 # collection in the platform catalogue is its stable primary.
@@ -94,10 +99,20 @@ def attach(jobs):
                     if not group.get('title'):
                         continue
                     identity = 'native:' + hashlib.sha256((scope[0] + '\0' + scope[1] + '\0' + ident).encode()).hexdigest()[:24]
+                    native = (group['title'], identity)
                     for key in group.get('members', []):
-                        mapping.setdefault(key, (group['title'], identity))
-            maps[scope] = mapping
-        native = maps[scope].get(video_key(row['key']))
+                        mapping.setdefault(key, native)
+                    for family in group.get('families', []):
+                        families[family] = native if family not in families else None
+            maps[scope] = mapping, families
+        mapping, families = maps[scope]
+        key = video_key(row['key'])
+        native = mapping.get(key)
+        if not native and key and row['library'] in (None, '', 'Videos', 'TV'):
+            # Creators sometimes publish the next numbered episode before
+            # adding it to their playlist. Only one owned creator collection
+            # may claim that exact title family; explicit membership wins.
+            native = families.get(series_key(numbered_name(row['title'])))
         if native:
             matches[row['id']] = native
     for job in jobs:
@@ -145,10 +160,12 @@ def _bili_catalogue(sub, page):
             title = str(meta.get('name') or meta.get('title') or '').strip()
             if not ident.isdecimal() or not title:
                 continue
-            members = [f"bilibili:{v['bvid']}:p" for v in entry.get('archives') or [] if re.fullmatch(r'BV\w+', str(v.get('bvid') or ''))]
+            archives = [v for v in entry.get('archives') or [] if re.fullmatch(r'BV\w+', str(v.get('bvid') or ''))]
+            members = [f"bilibili:{v['bvid']}:p" for v in archives]
             total = meta.get('total')
             out.append({'id': kind + ':' + ident, 'title': title[:500],
-                        'members': members, 'complete': type(total) is int and total == len(members)})
+                        'members': members, 'families': _numbered_families(archives),
+                        'complete': type(total) is int and total == len(members)})
     total = int(data.get('page', {}).get('total') or 0)
     return out, bool(out) and page * BILI_CATALOGUE_SIZE < total
 
@@ -165,9 +182,10 @@ def _bili_members(sub, group, page):
         data = _bili_get(session, endpoint, params)
     if not isinstance(data.get('archives'), list) or not isinstance(data.get('page'), dict):
         raise ValueError('B站合集分页暂不可用')
-    members = [f"bilibili:{v['bvid']}:p" for v in data.get('archives') or [] if re.fullmatch(r'BV\w+', str(v.get('bvid') or ''))]
+    archives = [v for v in data.get('archives') or [] if re.fullmatch(r'BV\w+', str(v.get('bvid') or ''))]
+    members = [f"bilibili:{v['bvid']}:p" for v in archives]
     total = int(data.get('page', {}).get('total') or 0)
-    return members, bool(members) and page * BILI_MEMBER_SIZE < total
+    return members, bool(members) and page * BILI_MEMBER_SIZE < total, _numbered_families(archives)
 
 
 def _youtube(url, page):
@@ -211,13 +229,17 @@ def _youtube_members(sub, group, page):
     if not re.fullmatch(r'[\w-]{12,100}', ident):
         raise ValueError('YouTube 播放列表无效')
     entries, more = _youtube('https://www.youtube.com/playlist?list=' + ident, page)
-    members = ['youtube:' + entry['id'] for entry in entries if re.fullmatch(r'[\w-]{11}', str(entry.get('id') or ''))]
-    return members, more
+    entries = [entry for entry in entries if re.fullmatch(r'[\w-]{11}', str(entry.get('id') or ''))]
+    return ['youtube:' + entry['id'] for entry in entries], more, _numbered_families(entries)
 
 
 def _same_sub(sub):
     row = q('SELECT owner,key,platform,url FROM subs WHERE id=?', (sub['id'],), one=True)
     return row is not None and all(row[key] == sub[key] for key in ('owner', 'key', 'platform', 'url'))
+
+
+def _subscription_changed(sub, data):
+    return (sub.get('checked') or 0) > data.get('subscription_checked', 0)
 
 
 def sync_sub(sub):
@@ -232,6 +254,15 @@ def sync_sub(sub):
     data = kv_get(key, {})
     if data.get('owner') != sub['owner'] or data.get('sub_key') != sub['key']:
         data = {'owner': sub['owner'], 'sub_key': sub['key'], 'groups': {}, 'catalogue': [], 'catalog_due': 0}
+    if _subscription_changed(sub, data):
+        # Following a creator can discover videos while the daily snapshot is
+        # still fresh. Refresh membership promptly, retaining the last known
+        # groups until replacement pages finish. New uploads can shift pages.
+        data.update(subscription_checked=sub['checked'], catalog_due=0, catalog_page=1)
+        data.pop('catalog_work', None)
+        for group in data['groups'].values():
+            group['updated'] = 0
+            group.pop('pending', None)
     now = time.time()
     catalogue = _bili_catalogue if sub['platform'] == 'bilibili' else _youtube_catalogue
     members = _bili_members if sub['platform'] == 'bilibili' else _youtube_members
@@ -245,7 +276,7 @@ def sync_sub(sub):
                 old = data['groups'].get(entry['id'], {})
                 data['groups'][entry['id']] = {**old, 'title': entry['title'], 'members': old.get('members', [])}
                 if entry['complete']:
-                    data['groups'][entry['id']].update(members=entry['members'], updated=now)
+                    data['groups'][entry['id']].update(members=entry['members'], families=entry.get('families', []), updated=now)
                     data['groups'][entry['id']].pop('pending', None)
             data['catalog_work'] = list(work.values())
             if more:
@@ -267,19 +298,21 @@ def sync_sub(sub):
             group = due[0]; stored = data['groups'][group['id']]
             pending = stored.get('pending') or {'page': 1, 'members': []}
             try:
-                fresh, more = members(sub, group, pending['page'])
+                fresh, more, fresh_families = members(sub, group, pending['page'])
             except Exception as exc:
                 stored.update(retry_at=now + RETRY, error=type(exc).__name__)
                 continue
             stored.pop('error', None); stored.pop('retry_at', None)
             accumulated = list(dict.fromkeys(pending['members'] + fresh))
+            accumulated_families = sorted(set(pending.get('families', []) + fresh_families))
             if more:
                 if not fresh or not set(fresh) - set(pending['members']):
                     raise ValueError('平台重复返回同一页，稍后重试')
-                stored['pending'] = {'page': pending['page'] + 1, 'members': accumulated}
+                stored['pending'] = {'page': pending['page'] + 1, 'members': accumulated, 'families': accumulated_families}
                 stored['members'] = list(dict.fromkeys(stored.get('members', []) + accumulated))
+                stored['families'] = sorted(set(stored.get('families', []) + accumulated_families))
             else:
-                stored.update(members=accumulated, updated=now)
+                stored.update(members=accumulated, families=accumulated_families, updated=now)
                 stored.pop('pending', None)
         data.pop('error', None)
         unfinished = data.get('catalog_due', 0) <= now or any(group.get('updated', 0) + REFRESH <= now for group in data['groups'].values())
@@ -324,12 +357,12 @@ def move_owner(old, new):
 def loop():
     while True:
         try:
-            for row in q("SELECT id,owner,key,platform,url FROM subs WHERE platform IN ('bilibili','youtube') ORDER BY id"):
+            for row in q("SELECT id,owner,key,platform,url,checked FROM subs WHERE platform IN ('bilibili','youtube') ORDER BY id"):
                 sub = dict(row)
                 if not _valid_scope(sub['owner'], sub['key']):
                     continue
                 data = kv_get(cache_key(sub['owner'], sub['key']), {})
-                if data.get('next', 0) <= time.time():
+                if data.get('next', 0) <= time.time() or (_subscription_changed(sub, data) and not data.get('error')):
                     sync_sub(sub)
         except Exception:
             # Database contention/restart should not terminate future refreshes.
