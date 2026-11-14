@@ -1,5 +1,5 @@
 .saved-search-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 2px 0 10px; }
-.saved-search-tools .link { min-height: 32px; }
+.saved-search-tools .link { min-height: 40px; }
 .saved-search-sheet { width: min(620px,100%); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; padding: 18px 20px; }
 .saved-search-heading { display: flex; align-items: center; gap: 16px; }
 .saved-search-heading h2 { flex: 1; margin: 0; }
@@ -17,7 +17,7 @@
 .saved-search-use { text-align: left; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 .saved-search-item-heading span { color: var(--muted); }
 .saved-search-query { color: var(--muted); margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.saved-search-item-actions .link, .saved-search-heading .link { min-height: 32px; }
+.saved-search-item-actions .link, .saved-search-heading .link { min-height: 40px; }
 .saved-search-more { margin: 10px auto; display: block; }
 @media (max-width: 640px) {
   #savedSearchSheet { padding: 8px; }

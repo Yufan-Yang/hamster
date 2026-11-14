@@ -74,6 +74,7 @@ for test in backend_reliability intelligence live_assistant live_finalization li
   sudo -u grabber "$APP/venv/bin/python" "tests/$test.py"
 done
 sudo -u grabber "$APP/venv/bin/python" tests/devices_browser.py
+sudo -u grabber "$APP/venv/bin/python" tests/steward_browser.py
 sudo -u grabber "$APP/venv/bin/python" tests/casting_browser.py "$APP.next"
 sudo -u grabber "$APP/venv/bin/python" tests/download_fallback.py --local-http
 for test in tests/heal_regression_*.py; do

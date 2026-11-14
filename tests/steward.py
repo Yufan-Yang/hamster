@@ -230,6 +230,56 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(board.run_claimed(task, 'test-steward'), 'done')
         self.assertIsNone(self.task('transcribe'))
 
+    def test_manual_batch_continues_after_subtitle_task_without_automatic_mode(self):
+        _, files = self.media()
+        self.subs(files[0])
+        response = self.alice.post('/api/steward/scan', json={'apply':True})
+        self.assertEqual(response.status_code, 202)
+        request_task = board.claim_task('manual-scan', ['steward_scan'])
+        board.run_claimed(request_task, 'manual-scan')
+        subtitle_task = board.claim_task('manual-index', ['steward_index'])
+        board.run_claimed(subtitle_task, 'manual-index')
+        with patch.object(steward.time, 'sleep', side_effect=StopIteration), self.assertRaises(StopIteration):
+            steward.loop()
+        self.assertEqual(self.task('steward_scan')['state'], 'queued')
+        next_scan = board.claim_task('manual-scan-next', ['steward_scan'])
+        board.run_claimed(next_scan, 'manual-scan-next')
+        self.assertIsNotNone(self.task('summarize'))
+        self.assertFalse(steward.policy(self.owner)['automatic'])
+        self.assertTrue(self.alice.get('/api/steward').json['busy'])
+
+    def test_manual_batch_is_bounded_and_stops_at_terminal_assets(self):
+        jid, files = self.media()
+        self.subs(files[0])
+        steward.scan(self.owner)
+        tid = steward.queue_scan(self.owner, [jid], apply=True, requested_at=time.time() - steward.MANUAL_WINDOW - 1)
+        core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
+        steward.tick()
+        self.assertEqual(self.task('steward_scan')['state'], 'done')
+        steward.queue_scan(self.owner, [jid], apply=True)
+        core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
+        files[0].unlink()
+        steward.scan(self.owner, [jid])
+        steward.tick()
+        self.assertEqual(self.task('steward_scan')['state'], 'done')
+
+    def test_manual_batch_keeps_original_deadline_on_rescan(self):
+        jid, _ = self.media()
+        steward.scan(self.owner)
+        requested = time.time() - 300
+        tid = steward.queue_scan(self.owner, [jid], apply=True, requested_at=requested)
+        core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
+        steward.tick()
+        self.assertEqual(json.loads(self.task('steward_scan')['payload'])['requested_at'], requested)
+
+    def test_paused_automatic_batch_does_not_become_manual_intent(self):
+        jid, _ = self.media()
+        steward.scan(self.owner)
+        tid = steward.queue_scan(self.owner, [jid], apply=True, automatic=True)
+        core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
+        steward.tick()
+        self.assertEqual(self.task('steward_scan')['state'], 'done')
+
     def test_execution_rejects_media_replaced_after_dispatch(self):
         _, files = self.media()
         steward.scan(self.owner, apply=True)

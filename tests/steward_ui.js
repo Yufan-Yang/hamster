@@ -90,4 +90,19 @@ function harness() {
     assert.ok((html.match(/resetSteward\(\)/g) || []).length >= 3);
     console.log('PASS foreign response rejected and account/privacy/close hooks present');
   }
+  {
+    const h = harness(), opening = h.context.openSteward();
+    h.calls[0].resolve(response(data({busy:true})));await opening;
+    assert.equal(h.timers.size,1);
+    h.$('#stewardAutomatic').checked = true;
+    h.$('#stewardProfile').value = 'essential';
+    h.context.editStewardPolicy();
+    const refresh = h.context.loadSteward();
+    h.calls[1].resolve(response(data({busy:true})));await refresh;
+    const body = h.$('#stewardBody').innerHTML;
+    assert.match(body,/id="stewardAutomatic"[^>]*checked/);
+    assert.match(body,/value="essential" selected/);
+    h.context.resetSteward();assert.equal(h.timers.size,0);
+    console.log('PASS active batch polling preserves unsaved policy changes');
+  }
 })().catch(error => {console.error(error);process.exitCode = 1;});

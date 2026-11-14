@@ -17,6 +17,8 @@ DAILY_LIMIT = 40
 COOLDOWN = 3600
 MAX_ATTEMPTS = 2
 AI_DAILY_LIMIT = 12
+SCAN_INTERVAL = 60
+MANUAL_WINDOW = 86400
 POLICY_PREFIX = 'media-steward:policy:'
 KINDS = {'steward_index', 'transcribe', 'summarize', 'chapters'}
 DEFAULT_POLICY = {'automatic': False, 'ai_planning': False, 'profile': 'standard'}
@@ -377,20 +379,50 @@ def import_subtitles(task, beat):
     return {'lines': len(cues)}
 
 
+def pending_manual_requests(owner=None):
+    """A manual batch is durable intent, independent of the opt-in whole-library scheduler."""
+    where, args = '', ()
+    if owner is not None:
+        where, args = " AND json_extract(payload,'$.owner')=?", (owner,)
+    rows = q("SELECT payload,created FROM tasks WHERE kind='steward_scan' AND state='done' "
+             "AND json_extract(payload,'$.apply')=1 AND json_extract(payload,'$.automatic')=0" + where, args)
+    pending = []
+    for row in rows:
+        p = _object(row['payload'], {})
+        ids = p.get('ids')
+        requested = p.get('requested_at', row['created'])
+        if not isinstance(ids, list) or not ids or time.time() - requested >= MANUAL_WINDOW:
+            continue
+        jobs = q("SELECT j.id FROM jobs j JOIN media_steward_assets s ON s.job_id=j.id AND s.owner=j.owner "
+                 "WHERE j.owner=? AND j.id IN (SELECT value FROM json_each(?)) "
+                 "AND j.status NOT IN ('deleted','cancelled') AND s.state IN ('needs_work','waiting')",
+                 (p['owner'], json.dumps(ids)))
+        if jobs:
+            pending.append({'owner': p['owner'], 'ids': [job['id'] for job in jobs], 'requested_at': requested})
+    return pending
+
+
+def tick():
+    for row in q('SELECT k FROM kv WHERE k LIKE ?', (POLICY_PREFIX + '%',)):
+        owner = row['k'][len(POLICY_PREFIX):]
+        if policy(owner)['automatic']:
+            queue_scan(owner, automatic=True, apply=True)
+    for pending in pending_manual_requests():
+        queue_scan(pending['owner'], pending['ids'], apply=True, requested_at=pending['requested_at'])
+
+
 def loop():
     while True:
         try:
-            for row in q('SELECT k FROM kv WHERE k LIKE ?', (POLICY_PREFIX + '%',)):
-                owner = row['k'][len(POLICY_PREFIX):]
-                if policy(owner)['automatic']:
-                    queue_scan(owner, automatic=True, apply=True)
+            tick()
         except Exception:
             app.logger.exception('media steward scheduler failed')
-        time.sleep(60)
+        time.sleep(SCAN_INTERVAL)
 
 
-def queue_scan(owner, ids=None, apply=False, automatic=False):
-    payload = {'owner': owner, 'ids': ids, 'apply': apply, 'automatic': automatic, 'title': '媒体管家盘点'}
+def queue_scan(owner, ids=None, apply=False, automatic=False, requested_at=None):
+    payload = {'owner': owner, 'ids': ids, 'apply': apply, 'automatic': automatic, 'title': '媒体管家盘点',
+               'requested_at': time.time() if requested_at is None else requested_at}
     mode = 'automatic' if automatic else 'apply' if apply else 'inspect'
     target = 'steward:' + owner + ':' + mode
     if automatic:
@@ -460,6 +492,12 @@ def overview():
         return _reply(error='片库或隐私权限已变化，请刷新'), 409
     busy = bool(q("SELECT 1 FROM tasks WHERE kind='steward_scan' AND state IN ('queued','running') "
                   "AND json_extract(payload,'$.owner')=?", (g.owner,), one=True))
+    if not busy:
+        for pending in pending_manual_requests(g.owner):
+            if q('SELECT 1 FROM jobs j WHERE ' + cond + ' AND j.id IN (SELECT value FROM json_each(?)) LIMIT 1',
+                 (*args, json.dumps(pending['ids'])), one=True):
+                busy = True
+                break
     return _reply(items=items, counts={row['state']: row['n'] for row in counts}, policy=policy(g.owner),
                   offset=offset, more=len(rows) > BATCH, busy=busy)
 
