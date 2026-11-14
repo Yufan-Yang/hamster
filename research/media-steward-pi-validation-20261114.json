@@ -1,0 +1,739 @@
+{
+  "source_revision": "4f15dd788d7d84fa0341075a295e9f411e54545a",
+  "machine": "aarch64",
+  "python": "3.13.5",
+  "started": 1794667078.3478482,
+  "results": [
+    {
+      "name": "inline_js_syntax",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.4,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_ai_activity",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.39,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_crawl",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.39,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_devices",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_intro",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_library_updates",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.38,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_live",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.39,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_main_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.37,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_player_series",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.4,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_saved_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.37,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_sources",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_steward",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.38,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_sw",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "syntax_trash",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_workspace",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.56,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_live_interactions",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.6,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_live_recordings",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.58,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_series",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.52,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_trash_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.52,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_privacy_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.57,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_main_search_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.61,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_search_evidence_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.5,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_saved_search_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.51,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_sources_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.62,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_ai_activity_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.56,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_download_retry_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.45,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_intro_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.47,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_player_series_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.49,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_library_updates_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.46,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "ui_steward_ui",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.56,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "backend_ai_routing",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 1.85,
+      "unittest_cases": 18,
+      "skipped": 0
+    },
+    {
+      "name": "backend_vpn_routing",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.6,
+      "unittest_cases": 4,
+      "skipped": 0
+    },
+    {
+      "name": "backend_deployment",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 1.19,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_deployment_rollback",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.45,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_heal_workflow",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 1.77,
+      "unittest_cases": 7,
+      "skipped": 0
+    },
+    {
+      "name": "backend_classification_tags",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.12,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "backend_backend_reliability",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.78,
+      "unittest_cases": 8,
+      "skipped": 0
+    },
+    {
+      "name": "backend_intelligence",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 14.52,
+      "unittest_cases": 12,
+      "skipped": 0
+    },
+    {
+      "name": "backend_live_assistant",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 7.58,
+      "unittest_cases": 8,
+      "skipped": 0
+    },
+    {
+      "name": "backend_live_finalization",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.38,
+      "unittest_cases": 5,
+      "skipped": 0
+    },
+    {
+      "name": "backend_live_review",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.14,
+      "unittest_cases": 8,
+      "skipped": 0
+    },
+    {
+      "name": "backend_live_result",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.19,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_task_lifecycle",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.74,
+      "unittest_cases": 13,
+      "skipped": 0
+    },
+    {
+      "name": "backend_television",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.39,
+      "unittest_cases": 13,
+      "skipped": 0
+    },
+    {
+      "name": "backend_device_routes",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.65,
+      "unittest_cases": 5,
+      "skipped": 0
+    },
+    {
+      "name": "backend_cast_protocol",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 1.77,
+      "unittest_cases": 10,
+      "skipped": 0
+    },
+    {
+      "name": "backend_directory_retired",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.05,
+      "unittest_cases": 2,
+      "skipped": 0
+    },
+    {
+      "name": "backend_retirement_trash",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.67,
+      "unittest_cases": 4,
+      "skipped": 0
+    },
+    {
+      "name": "backend_native_series",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 7.85,
+      "unittest_cases": 20,
+      "skipped": 0
+    },
+    {
+      "name": "backend_steward",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 13.73,
+      "unittest_cases": 36,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 8.5,
+      "unittest_cases": 17,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_extract",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.1,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_duration",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.22,
+      "unittest_cases": 10,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.65,
+      "unittest_cases": 34,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_refresh",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 0.73,
+      "unittest_cases": 7,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_network",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.36,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_source",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.15,
+      "unittest_cases": 5,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_sources",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 11.61,
+      "unittest_cases": 10,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_home_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.82,
+      "unittest_cases": 11,
+      "skipped": 0
+    },
+    {
+      "name": "backend_library_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 7.81,
+      "unittest_cases": 15,
+      "skipped": 0
+    },
+    {
+      "name": "backend_search_index",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.33,
+      "unittest_cases": 11,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_result_privacy",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.76,
+      "unittest_cases": 4,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_metadata_privacy",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.85,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_management",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.93,
+      "unittest_cases": 7,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_health",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.15,
+      "unittest_cases": 9,
+      "skipped": 0
+    },
+    {
+      "name": "backend_saved_search",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 6.27,
+      "unittest_cases": 11,
+      "skipped": 0
+    },
+    {
+      "name": "backend_sources",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 8.54,
+      "unittest_cases": 21,
+      "skipped": 0
+    },
+    {
+      "name": "backend_ai_activity",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.51,
+      "unittest_cases": 12,
+      "skipped": 0
+    },
+    {
+      "name": "backend_intro",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.64,
+      "unittest_cases": 13,
+      "skipped": 0
+    },
+    {
+      "name": "backend_player_series",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.16,
+      "unittest_cases": 7,
+      "skipped": 0
+    },
+    {
+      "name": "backend_download_retry_api",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.82,
+      "unittest_cases": 2,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_retry",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.24,
+      "unittest_cases": 10,
+      "skipped": 0
+    },
+    {
+      "name": "backend_crawl_heal",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.99,
+      "unittest_cases": 11,
+      "skipped": 0
+    },
+    {
+      "name": "backend_trash",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 2.73,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "backend_trash_review",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.3,
+      "unittest_cases": 7,
+      "skipped": 0
+    },
+    {
+      "name": "backend_trash_privacy",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.22,
+      "unittest_cases": 8,
+      "skipped": 0
+    },
+    {
+      "name": "backend_trash_source",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.39,
+      "unittest_cases": 4,
+      "skipped": 0
+    },
+    {
+      "name": "backend_trash_performance",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.06,
+      "unittest_cases": 3,
+      "skipped": 0
+    },
+    {
+      "name": "backend_privacy_modes",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.17,
+      "unittest_cases": 6,
+      "skipped": 0
+    },
+    {
+      "name": "backend_privacy_selection",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 5.35,
+      "unittest_cases": 11,
+      "skipped": 0
+    },
+    {
+      "name": "backend_report_privacy",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 3.59,
+      "unittest_cases": 5,
+      "skipped": 0
+    },
+    {
+      "name": "download_local_http",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 18.04,
+      "unittest_cases": 39,
+      "skipped": 0
+    },
+    {
+      "name": "devices_browser",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 8.87,
+      "unittest_cases": 1,
+      "skipped": 0
+    },
+    {
+      "name": "casting_browser",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 4.36,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "intelligence_browser",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 24.61,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "usability_browser",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 26.0,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "steward_browser",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 20.03,
+      "unittest_cases": 0,
+      "skipped": 0
+    },
+    {
+      "name": "real_database_smoke",
+      "passed": true,
+      "exit_code": 0,
+      "seconds": 156.43,
+      "unittest_cases": 0,
+      "skipped": 0
+    }
+  ],
+  "syntax_errors": [],
+  "production_schema_version": 35,
+  "finished": 1794667590.8616538,
+  "total_unittest_cases": 514,
+  "passed": true,
+  "node": "20.19.2",
+  "frontend_suites": 16,
+  "browser_suites": [
+    "devices_browser",
+    "casting_browser",
+    "intelligence_browser",
+    "usability_browser",
+    "steward_browser"
+  ],
+  "production_unchanged": true,
+  "historical_inventory": {
+    "passed": true,
+    "uncaught_errors": 0,
+    "dispatched": 0,
+    "model_calls": 0
+  },
+  "test_scope": {
+    "state": "disposable databases and a consistent production snapshot",
+    "production_media": "read-only",
+    "models": "deterministic test responses",
+    "external_download_and_publication": "mocked; media download integration uses localhost"
+  }
+}
