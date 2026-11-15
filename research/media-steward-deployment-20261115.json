@@ -1,0 +1,91 @@
+{
+  "checked_at": 1794718593.811901,
+  "verification": {
+    "revision": "712f80a705cdffb3424ac4a656e8412a3d6e116f",
+    "verified_at": 1794718551.057278,
+    "checks": [
+      "source_hashes",
+      "page",
+      "task_api",
+      "fresh_pi_cpu"
+    ]
+  },
+  "source_files_verified": 374,
+  "services": {
+    "grabber": {
+      "MainPID": "3899073",
+      "ActiveState": "active"
+    },
+    "grabber-worker": {
+      "MainPID": "3899122",
+      "ActiveState": "active"
+    },
+    "grabber-recorder": {
+      "MainPID": "129700",
+      "ActiveState": "active"
+    }
+  },
+  "http": {
+    "/": {
+      "status": 200,
+      "steward_assets_present": true
+    },
+    "/api/tasks": {
+      "status": 200,
+      "workers": [
+        {
+          "name": "pi-steward",
+          "online": true
+        },
+        {
+          "name": "pi-cpu",
+          "online": true
+        }
+      ]
+    },
+    "/api/steward": {
+      "status": 200,
+      "default_policy": {
+        "ai_planning": false,
+        "automatic": false,
+        "profile": "standard"
+      }
+    }
+  },
+  "database": {
+    "schema_version": 36,
+    "steward_tables": [
+      "media_steward_actions",
+      "media_steward_assets"
+    ],
+    "automatic_policies_enabled": 0,
+    "ai_planning_policies_enabled": 0,
+    "steward_actions": 0
+  },
+  "date": "2026-11-15",
+  "previous_revision": "d3e19ce9bf9174431c672d86fd7458a146294c32",
+  "deployment_command": "./deploy.sh --no-mac",
+  "deployment_exit_code": 0,
+  "tests": {
+    "local": {
+      "suites": 5,
+      "cases": 41,
+      "failures": 0,
+      "skipped_suites": 0
+    },
+    "raspberry_pi": {
+      "suites": 45,
+      "cases": 482,
+      "failures": 0,
+      "skipped_suites": 0
+    },
+    "frontend_suites": 16,
+    "browser_scripts": [
+      "devices_browser.py",
+      "steward_browser.py",
+      "casting_browser.py"
+    ],
+    "production_database_copy_smoke": "passed"
+  },
+  "deployment_log_sha256": "0ae457ae2e8cec939231f076288d9b4dd0775020b055bba0b124fe7cae02cbfb"
+}
