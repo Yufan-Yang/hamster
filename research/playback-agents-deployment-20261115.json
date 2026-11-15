@@ -1,0 +1,220 @@
+{
+  "checked_at": 1794730307.739989,
+  "revision": "69382f99b20dd3439f52c897d772f0c3aa402d26",
+  "source_files_verified": 388,
+  "verification": {
+    "revision": "69382f99b20dd3439f52c897d772f0c3aa402d26",
+    "verified_at": 1794729967.4657404,
+    "checks": [
+      "source_hashes",
+      "page",
+      "task_api",
+      "fresh_pi_cpu"
+    ]
+  },
+  "services": {
+    "grabber": {
+      "MainPID": "3979638",
+      "ActiveState": "active"
+    },
+    "grabber-worker": {
+      "MainPID": "3979730",
+      "ActiveState": "active"
+    },
+    "grabber-recorder": {
+      "MainPID": "129700",
+      "ActiveState": "active"
+    }
+  },
+  "http": {
+    "/": {
+      "status": 200,
+      "recap_panel_present": true,
+      "assist_script_present": true
+    },
+    "/api/tasks": {
+      "status": 200,
+      "workers": [
+        {
+          "role": "pi-steward",
+          "online": true
+        },
+        {
+          "role": "pi-cpu",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        },
+        {
+          "role": "mac-heal",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        }
+      ]
+    },
+    "/api/steward": {
+      "status": 200,
+      "quality_schema_present": true
+    },
+    "/static/playback_assist.js": {
+      "status": 200
+    },
+    "/static/playback_assist.css": {
+      "status": 200
+    }
+  },
+  "database": {
+    "version": 38,
+    "automatic_accounts": 3,
+    "ai_planning_accounts": 0,
+    "quality_records": 858
+  },
+  "resume_recap": {
+    "artifacts": [
+      {
+        "id": 1,
+        "job_id": 2041,
+        "state": "rejected",
+        "automatic": true,
+        "checkpoint": 3880.7076896777976,
+        "quote_count": 0,
+        "current_sources_match": true,
+        "all_ready_quotes_verified": null
+      },
+      {
+        "id": 2,
+        "job_id": 554,
+        "state": "ready",
+        "automatic": true,
+        "checkpoint": 1990.9822203007882,
+        "quote_count": 3,
+        "current_sources_match": true,
+        "all_ready_quotes_verified": true
+      },
+      {
+        "id": 3,
+        "job_id": 1989,
+        "state": "rejected",
+        "automatic": true,
+        "checkpoint": 723.665539211985,
+        "quote_count": 0,
+        "current_sources_match": true,
+        "all_ready_quotes_verified": null
+      }
+    ],
+    "states": [
+      {
+        "state": "ready",
+        "n": 1
+      },
+      {
+        "state": "rejected",
+        "n": 2
+      }
+    ],
+    "tasks": [
+      {
+        "state": "done",
+        "n": 3
+      }
+    ],
+    "live_ai_calls": [
+      {
+        "engine": "codex",
+        "model": "gpt-6-luna",
+        "status": "done",
+        "n": 3
+      }
+    ],
+    "automatic_limit_per_rolling_24h": 3,
+    "total_limit_per_rolling_24h": 6,
+    "eligible_with_bounded_evidence_at_baseline": 19
+  },
+  "timeline_quality": {
+    "revision": "69382f99b20dd3439f52c897d772f0c3aa402d26",
+    "checked_at": 1794730094.205343,
+    "quality": {
+      "checked": 858,
+      "passed": 855,
+      "invalid_anchors": 4,
+      "merged_duplicates": 4,
+      "needs_attention": 3
+    },
+    "examples": [
+      {
+        "job_id": 61,
+        "invalid": 1,
+        "merged_duplicates": 0
+      },
+      {
+        "job_id": 534,
+        "invalid": 2,
+        "merged_duplicates": 0
+      },
+      {
+        "job_id": 1245,
+        "invalid": 1,
+        "merged_duplicates": 0
+      },
+      {
+        "job_id": 1375,
+        "invalid": 0,
+        "merged_duplicates": 1
+      },
+      {
+        "job_id": 1409,
+        "invalid": 0,
+        "merged_duplicates": 1
+      },
+      {
+        "job_id": 1625,
+        "invalid": 0,
+        "merged_duplicates": 1
+      },
+      {
+        "job_id": 2040,
+        "invalid": 0,
+        "merged_duplicates": 1
+      }
+    ],
+    "original_metadata_unchanged": true
+  },
+  "activation_scope": "all_current_accounts",
+  "tests": {
+    "local": {
+      "suites": 5,
+      "cases": 44,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "raspberry_pi": {
+      "suites": 48,
+      "cases": 540,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "frontend_suites": 18,
+    "browser_scripts": [
+      "devices_browser.py",
+      "steward_browser.py",
+      "playback_agents_browser.py",
+      "casting_browser.py"
+    ],
+    "playback_browser_scenarios": 3,
+    "production_database_copy_smoke": "passed",
+    "controlled_tests_use_mock_model": true
+  },
+  "deployment": {
+    "exit_code": 0,
+    "command": "./deploy.sh --no-mac",
+    "consecutive_health_checks": 3,
+    "log_sha256": "dbfa1cc16f9abfe91eb0923feb175c635ea85fad6cab764419dc1c344a0a5e1e",
+    "mac_worker_changed": false,
+    "recorder_pid_unchanged": true
+  }
+}
