@@ -53,9 +53,9 @@ def seed(owner,title,private=False):
 
 def model(system,user,*args,**kwargs):
     data=json.loads(user);assert 'FUTURE_FULL_SUMMARY' not in user and 'AFTER_CHECKPOINT' not in user
-    assert all(x['end']<=data['checkpoint'] for x in data['excerpts'])
-    calls.append(data['checkpoint']);item=data['excerpts'][0]
-    return {'quotes':[{'source_id':item['id'],'quote':item['text'][:150]}]}
+    assert all(x['end']<=data['checkpoint'] for x in data['candidates'])
+    calls.append(data['checkpoint']);item=data['candidates'][0]
+    return {'selected_ids':[item['id']]}
 
 
 def worker():

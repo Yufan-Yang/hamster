@@ -38,8 +38,8 @@ class PlaybackTests(unittest.TestCase):
         return state,task
 
     def model(self,system,user,*args,**kwargs):
-        data=json.loads(user);items=data['excerpts']
-        return {'quotes':[{'source_id':items[0]['id'],'quote':items[0]['text'][:100]}]}
+        data=json.loads(user);items=data['candidates']
+        return {'selected_ids':[items[0]['id']]}
 
     def test_quality_filters_bad_jumps_without_editing_any_metadata(self):
         jid,_=self.seed();before=self.row(jid)['analysis']
@@ -119,7 +119,7 @@ class PlaybackTests(unittest.TestCase):
         core.q('UPDATE jobs SET analysis=? WHERE id=?',(json.dumps(a),jid));recap.prepare(self.row(jid))
         def model(system,user,*args,**kwargs):
             self.assertNotIn('FUTURE_FULL_SUMMARY_SECRET',user)
-            self.assertTrue(all(x['end']<=300 for x in json.loads(user)['excerpts']))
+            self.assertTrue(all(x['end']<=300 for x in json.loads(user)['candidates']))
             return self.model(system,user,*args,**kwargs)
         with patch.object(llm,'llm_json',side_effect=model):self.work()
 
@@ -243,7 +243,7 @@ class PlaybackTests(unittest.TestCase):
     def test_total_manual_budget_and_empty_results_are_not_padded(self):
         for i in range(recap.TOTAL_DAILY):
             jid,_=self.seed();self.assertEqual(recap.prepare(self.row(jid),manual=True)['state'],'pending')
-            with patch.object(llm,'llm_json',return_value={'quotes':[]}):self.work()
+            with patch.object(llm,'llm_json',return_value={'selected_ids':[]}):self.work()
             self.assertEqual(recap.prepare(self.row(jid))['state'],'empty')
         jid,_=self.seed()
         self.assertEqual(recap.prepare(self.row(jid),manual=True)['state'],'budget')
@@ -273,12 +273,79 @@ class PlaybackTests(unittest.TestCase):
     def test_actual_model_router_formats_the_prompt_and_saves_reviewed_output(self):
         jid,_=self.seed();record=recap.prepare(self.row(jid))
         def codex(system,user,*args,**kwargs):
-            self.assertIn('{"quotes":[{"source_id":integer',system)
+            self.assertIn('{"selected_ids":[integer]}',system)
             self.assertNotIn('{{',system)
             return self.model(system,user,*args,**kwargs)
         with patch.object(llm,'codex_ready',return_value=True),patch.object(llm,'codex_json',side_effect=codex) as model:
             self.assertEqual(self.work()[0],'done');self.assertEqual(model.call_count,1)
         self.assertEqual(self.alice.get(f"/api/recap/{jid}?id={record['id']}").json['state'],'ready')
+
+    def test_candidates_preserve_exact_unicode_and_bound_each_excerpt(self):
+        text='这里解释一个完整的知识点，包括背景和结论。'+('没有句读的原始字幕内容'*45)+' A decimal value of 3.14 is preserved. '*12
+        evidence=[{'id':7,'t':10,'end':40,'text':text[:700]}]
+        candidates=recap.candidates(evidence)
+        self.assertGreater(len(candidates),1)
+        self.assertEqual(len({x['id'] for x in candidates}),len(candidates))
+        for item in candidates:
+            self.assertEqual((item['source_id'],item['t'],item['end']),(7,10,40))
+            self.assertTrue(12<=len(item['text'])<=220)
+            self.assertIn(item['text'],evidence[0]['text'])
+        self.assertEqual(recap.candidates([{'id':1,'t':0,'end':10,'text':'too short'}]),[])
+
+    def test_selection_materializes_source_text_and_independently_reviews_it(self):
+        evidence=[{'id':1,'t':10,'end':25,'text':'The original evidence includes a useful explanation.'},
+                  {'id':2,'t':40,'end':55,'text':'A second source contains a separate concrete conclusion.'}]
+        candidates=recap.candidates(evidence)
+        output=recap.review_selection({'selected_ids':[candidates[1]['id'],candidates[0]['id']]},candidates,evidence,60)
+        self.assertEqual([x['quote'] for x in output],[x['text'] for x in evidence])
+        forged=[{**candidates[0],'text':'A fabricated statement with enough characters.'}]
+        with self.assertRaises(recap.ReviewError) as caught:
+            recap.review_selection({'selected_ids':[forged[0]['id']]},forged,evidence,60)
+        self.assertEqual(caught.exception.code,'not_verbatim')
+        with self.assertRaises(recap.ReviewError) as caught:
+            recap.review_selection({'selected_ids':[candidates[1]['id']]},candidates,evidence,50)
+        self.assertEqual(caught.exception.code,'outside_checkpoint')
+
+    def test_selection_rejects_unknown_duplicate_and_non_integer_ids(self):
+        evidence=[{'id':1,'t':10,'end':25,'text':'The original evidence includes a useful explanation. '*7}]
+        candidates=recap.candidates(evidence)
+        for raw,code in [({'selected_ids':[999]},'unknown_candidate'),
+                         ({'selected_ids':[True]},'selection_format'),
+                         ({'selected_ids':[1.0]},'selection_format'),
+                         ({'selected_ids':['1']},'selection_format'),
+                         ({'selected_ids':[1,1]},'duplicate'),
+                         ({'selected_ids':[1,2]},'duplicate'),
+                         ({'selected_ids':[1],'quote':'injected output'},'selection_format'),
+                         ({'selected_ids':[1,2,3,4]},'selection_format')]:
+            with self.subTest(raw=raw),self.assertRaises(recap.ReviewError) as caught:
+                recap.review_selection(raw,candidates,evidence,60)
+            self.assertEqual(caught.exception.code,code)
+
+    def test_rejection_receipt_contains_only_a_safe_reason_code(self):
+        jid,_=self.seed();record=recap.prepare(self.row(jid))
+        with patch.object(llm,'llm_json',return_value={'selected_ids':[999],'secret':'PRIVATE_MODEL_TEXT'}):
+            _,task=self.work()
+        body=json.loads(core.q('SELECT body FROM resume_recaps WHERE id=?',(record['id'],),one=True)['body'])
+        result=json.loads(core.q('SELECT result FROM tasks WHERE id=?',(task['id'],),one=True)['result'])
+        self.assertEqual(body,{'rejection_code':'selection_format'})
+        self.assertEqual(result,{'rejected':True,'rejection_code':'selection_format'})
+        self.assertNotIn('PRIVATE_MODEL_TEXT',json.dumps([body,result]))
+        self.assertNotIn('rejection_code',self.alice.get(f"/api/recap/{jid}?id={record['id']}").json)
+
+    def test_no_suitable_candidate_finishes_empty_without_calling_a_model(self):
+        jid,files=self.seed()
+        files[0].with_suffix('.zh.srt').write_text('1\n00:01:00,000 --> 00:01:20,000\nHi\n')
+        record=recap.prepare(self.row(jid))
+        with patch.object(llm,'llm_json') as model:
+            self.assertEqual(self.work()[0],'done');model.assert_not_called()
+        self.assertEqual(self.alice.get(f"/api/recap/{jid}?id={record['id']}").json['state'],'empty')
+
+    def test_source_change_before_task_claim_is_not_a_model_rejection(self):
+        jid,files=self.seed();record=recap.prepare(self.row(jid))
+        files[0].with_suffix('.zh.srt').write_text('changed before generation')
+        with patch.object(llm,'llm_json') as model:
+            self.assertEqual(self.work()[0],'done');model.assert_not_called()
+        self.assertEqual(core.q('SELECT state FROM resume_recaps WHERE id=?',(record['id'],),one=True)['state'],'changed')
 
 
 if __name__=='__main__':unittest.main()
