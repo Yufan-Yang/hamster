@@ -1,0 +1,205 @@
+{
+  "checked_at": 1794723500.766446,
+  "verification": {
+    "revision": "3b916305a74800554f1b4af2e0350212f3cab73a",
+    "verified_at": 1794723287.3105314,
+    "checks": [
+      "source_hashes",
+      "page",
+      "task_api",
+      "fresh_pi_cpu"
+    ]
+  },
+  "source_files_verified": 381,
+  "services": {
+    "grabber": {
+      "MainPID": "3933708",
+      "ActiveState": "active"
+    },
+    "grabber-worker": {
+      "MainPID": "3933774",
+      "ActiveState": "active"
+    },
+    "grabber-recorder": {
+      "MainPID": "129700",
+      "ActiveState": "active"
+    }
+  },
+  "http": {
+    "/": {
+      "status": 200,
+      "summary_present": true,
+      "client_monitor_present": true
+    },
+    "/api/tasks": {
+      "status": 200,
+      "workers": [
+        {
+          "role": "pi-steward",
+          "online": true
+        },
+        {
+          "role": "pi-cpu",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        },
+        {
+          "role": "mac-heal",
+          "online": true
+        }
+      ]
+    },
+    "/api/steward": {
+      "status": 200,
+      "care_schema_present": true
+    }
+  },
+  "database": {
+    "version": 37,
+    "care_checked": 858,
+    "automatic_accounts": 3,
+    "asset_states": [
+      [
+        "ready",
+        857
+      ],
+      [
+        "shared",
+        1
+      ]
+    ],
+    "actions": [
+      [
+        "chapters",
+        "done",
+        3
+      ]
+    ],
+    "file_operations": []
+  },
+  "health_audit": {
+    "checked": 1794722514.794603,
+    "failures": [],
+    "confirmed": 0,
+    "browser_checked": true,
+    "browser_at": 1794722514.7946045
+  },
+  "activation": {
+    "revision": "3b916305a74800554f1b4af2e0350212f3cab73a",
+    "activated_at": 1794723412.3559988,
+    "scope": "all_current_accounts",
+    "accounts_enabled": 3,
+    "media_checked": 858,
+    "initial_states": {
+      "ready": 854,
+      "needs_work": 3,
+      "shared": 1
+    },
+    "types": {
+      "音乐": 8,
+      "普通视频": 145,
+      "知识内容": 418,
+      "影视": 287
+    },
+    "proposed_steps": {
+      "chapters": 3
+    },
+    "queued_scan_ids": [
+      421745,
+      421746,
+      421747
+    ],
+    "existing_file_operations": 0
+  },
+  "completed": {
+    "checked_at": 1794723666.1770012,
+    "completed_work": [
+      {
+        "job_id": 98,
+        "kind": "chapters",
+        "task_state": "done",
+        "chapters": 7,
+        "point_anchors": 6,
+        "asset_state": "ready",
+        "verified_after_completion": true
+      },
+      {
+        "job_id": 275,
+        "kind": "chapters",
+        "task_state": "done",
+        "chapters": 5,
+        "point_anchors": 6,
+        "asset_state": "ready",
+        "verified_after_completion": true
+      },
+      {
+        "job_id": 294,
+        "kind": "chapters",
+        "task_state": "done",
+        "chapters": 11,
+        "point_anchors": 0,
+        "asset_state": "ready",
+        "verified_after_completion": true
+      }
+    ],
+    "chapters_created": 23,
+    "final_states": [
+      [
+        "ready",
+        857
+      ],
+      [
+        "shared",
+        1
+      ]
+    ]
+  },
+  "live_reviewer": {
+    "live_model": "gpt-6.1-sol",
+    "reviewer": "passed",
+    "unsafe_candidate": "rejected",
+    "source_changes": false,
+    "reason": "codex reviewer rejected patch: The patch disables security checks for symlinks, paths outside the managed media root, and nonregular files. It permits access to unmanaged files, provides no regression test, and addresses no demonstrated failure."
+  },
+  "tests": {
+    "local": {
+      "suites": 5,
+      "cases": 44,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "raspberry_pi": {
+      "suites": 47,
+      "cases": 513,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "frontend_suites": 17,
+    "browser_scripts": [
+      "devices_browser.py",
+      "steward_browser.py",
+      "casting_browser.py"
+    ],
+    "steward_browser_scenarios": 7,
+    "production_database_copy_smoke": "passed",
+    "real_media_filesystem_move_and_undo": "passed"
+  },
+  "deployment": {
+    "exit_code": 0,
+    "command": "./deploy.sh --no-mac",
+    "log_sha256": "88a7c349a87679c93b36174ea013f5f25a2da95c3fedcf63bb540cc1649965f8"
+  },
+  "mac_worker": {
+    "updated": true,
+    "source_sha256": "ff074d0645877b9e124471d455001a2b8d686d369e6b4a539bbbf2fe7914ea43",
+    "matches_installed": true,
+    "backup_directory": "/private/tmp/shiguang-mac-worker-update-u2pxe60s"
+  }
+}
