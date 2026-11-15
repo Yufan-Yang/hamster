@@ -22,6 +22,7 @@ PURPOSES = {
     'live-style': '主播风格', 'live-refine': '评分校准', 'live-blind-eval': '盲评',
     'failure': '失败说明', 'other': '其他 AI 调用',
     'media-steward': '媒体管家排程',
+    'resume-recap': '续看字幕回顾',
 }
 FALLBACKS = {
     'disabled': 'Codex 路由未启用', 'worker_unavailable': '没有可用的 Codex 工人（离线或暂停）',

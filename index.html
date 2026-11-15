@@ -733,6 +733,7 @@ a.link {display: inline-block; max-width: 100%;}
 <link rel="stylesheet" href="/static/player_series.css?v=20261024-v3">
 <link rel="stylesheet" href="/static/library_updates.css?v=20261024-v1">
 <link rel="stylesheet" href="/static/steward.css?v=20261114-v1">
+<link rel="stylesheet" href="/static/playback_assist.css?v=20261115-v1">
 </head>
 <body>
 <div class="topbar">
@@ -1066,6 +1067,7 @@ function setStorageOwner(owner) {
   lsSet(privateKey('noteDraft'), $('#noteText').value);
   storageOwner = owner; lsSet('shiguangOwner', owner);
   if (typeof stopIntro === 'function') stopIntro();
+  if (typeof stopRecap === 'function') stopRecap();
   if (typeof stopPlayerSeries === 'function') stopPlayerSeries();
   if (typeof resetCrawl === 'function') resetCrawl();
   if (typeof resetTrash === 'function') resetTrash();
@@ -2275,6 +2277,7 @@ async function openWatch(id, part = 0, t = 0) {
     <div id="shareBox"></div>
     ${resumed ? `<button class="link" onclick="seekTo(${id}, ${part}, 0)">从头播放</button>` : ""}
     <div id="similarBox"></div>
+    <section id="resumeRecap" class="resume-recap" aria-label="续看回顾" hidden></section>
     <div id="chapters"></div>
     ${a.parts ? `<div class="parts-offer">${a.parts.total ? `这个视频有 ${a.parts.total} 个分P，只下了这一个。` : "B站 当时没回应，不知道这个视频还有没有别的分P。"}
       <button onclick="act(${id},'parts')">${a.parts.total ? "下载全部分P" : "再检查一次"}</button></div>` : ""}
@@ -2288,6 +2291,7 @@ async function openWatch(id, part = 0, t = 0) {
   if (m) setupMediaSession(j);
   loadSimilar(id);
   loadPointTimes(id);
+  if (typeof startRecap === 'function') startRecap(j,part,resumed);
   const el = $("#watchBody video, #watchBody audio");
   if (el) {
     for (const track of el.textTracks) track.mode = "disabled";
@@ -2323,46 +2327,59 @@ async function openWatch(id, part = 0, t = 0) {
   if (typeof setupPlayerSeries === 'function') setupPlayerSeries(j);
 }
 // the summary's key points, each with the moment it's talked about: click to jump there
+function validPlaybackAnchor(at, media) {
+  if (!validSearchHit(at) || !media[at.part]) return false;
+  const duration=Number(media[at.part].duration);
+  return !(Number.isFinite(duration) && duration>0) || at.t<duration;
+}
 async function loadPointTimes(id) {
   if (!watching || watching.id !== id) return;
-  const owner = storageOwner, part = watching.part, privacyEpoch = typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch;
+  const owner=storageOwner,part=watching.part,privacyEpoch=privateViewEpoch;
   let r;
-  try { r = await (await fetch(`/api/points/${id}`)).json(); } catch (e) { return; }
-  if (!watching || watching.id !== id || watching.part !== part || owner !== storageOwner
-      || privacyEpoch !== (typeof privateViewEpoch === 'undefined' ? 0 : privateViewEpoch)) return;
-  const ch = (r.chapters || {})[String(watching.part)] || [];
-  // what the video's site shows along its progress bar: its own marks (Pornhub's action tags, YouTube's chapters)
-  // and how much each moment is watched there
-  const mk = (r.markers || {})[String(watching.part)] || [], heat = (r.heat || {})[String(watching.part)];
-  const len = (((state.jobs.find(j => j.id === id) || {}).media || [])[watching.part] || {}).duration
-    || (heat ? heat.step * heat.values.length : 0);
-  const peaks = heat ? heatPeaks(heat) : [];
-  const ul = $("#points"), lis = ul ? [...ul.children] : [];
-  // key points said in this part go under the chapter they fall in: one list, not two (the rest stay in the summary)
-  const under = ch.map(() => []), moved = new Set();
-  lis.forEach((li, i) => {
-    const at = (r.times || [])[i];
-    if (!ch.length || !at || at.part !== watching.part) return;
-    const k = Math.max(0, ch.findLastIndex(c => c.t <= at.t + 1));
-    under[k].push(`<button class="pt" onclick="seekTo(${id}, ${watching.part}, ${at.t})">${li.innerHTML}</button>`);
+  try {
+    const response=await fetch(`/api/points/${id}`);
+    r=await response.json();
+    if (!response.ok) return;
+  } catch (_) { return; }
+  if (!watching || watching.id!==id || watching.part!==part || owner!==storageOwner || privacyEpoch!==privateViewEpoch
+      || r.storage_owner && r.storage_owner!==owner) return;
+  const media=state.jobs.find(j=>j.id===id)?.media || [];
+  const valid=c=>c && typeof c.title==='string' && validPlaybackAnchor({part,t:c.t},media);
+  const ch=(Array.isArray(r.chapters?.[String(part)]) ? r.chapters[String(part)] : []).filter(valid);
+  const mk=(Array.isArray(r.markers?.[String(part)]) ? r.markers[String(part)] : []).filter(valid);
+  const candidate=r.heat?.[String(part)];
+  const heat=candidate && Number.isFinite(candidate.step) && candidate.step>0 && Array.isArray(candidate.values)
+    && candidate.values.length<=10000 && candidate.values.every(v=>Number.isFinite(v) && v>=0) ? candidate : null;
+  const len=media[part]?.duration || 0;
+  const peaks=(heat ? heatPeaks(heat) : []).filter(valid);
+  const ul=$('#points'),lis=ul ? [...ul.children] : [];
+  const under=ch.map(()=>[]),moved=new Set();
+  lis.forEach((li,i)=>{
+    const at=r.times?.[i];
+    if (!ch.length || !validPlaybackAnchor(at,media) || at.part!==part) return;
+    const k=Math.max(0,ch.findLastIndex(c=>c.t<=at.t+1));
+    under[k].push(`<button class="pt" onclick="seekTo(${id}, ${part}, ${at.t})">${li.innerHTML}</button>`);
     moved.add(i);
   });
-  const sec = (title, list, subs) => list.length ? `<div class="psec">${title}</div>${list.map((c, k) =>
-    `<button onclick="seekTo(${id}, ${watching.part}, ${c.t})"><b class="at">${dur(c.t) || "0:00"}</b>${esc(c.title)}</button>`
-    + (subs ? subs[k].join("") : "")).join("")}` : "";
-  if ((ch.length || mk.length || peaks.length) && $("#chapters"))
-    $("#chapters").innerHTML = (heat && len ? heatStrip(id, heat, mk, len) : "")
-      + `<div class="hits">${sec("网站标记", mk)}${sec("看的人最多", peaks)}${sec(moved.size ? "章节和要点" : "章节", ch, under)}</div>`;
+  const section=(title,list,subs)=>list.length ? `<div class="psec">${title}</div>${list.map((c,k)=>
+    `<button onclick="seekTo(${id}, ${part}, ${c.t})"><b class="at">${dur(c.t) || '0:00'}</b>${esc(c.title)}</button>${subs ? subs[k].join('') : ''}`).join('')}` : '';
+  const invalid=(Array.isArray(r.unavailable?.[String(part)]) ? r.unavailable[String(part)] : []).filter(c=>typeof c?.title==='string');
+  const quality=Number(r.quality?.rejected) || 0;
+  const box=$('#chapters');
+  if (box) box.innerHTML=(quality ? `<p class="hint timeline-quality">${quality} 个标记时间无效，已保留文字并关闭跳转。</p>` : '')
+    +(heat && len ? heatStrip(id,heat,mk,len) : '')
+    +`<div class="hits">${section('网站标记',mk)}${section('看的人最多',peaks)}${section(moved.size ? '章节和要点' : '章节',ch,under)}
+    ${invalid.map(c=>`<span class="timeline-unavailable">${esc(c.title)} · 无可用跳转</span>`).join('')}</div>`;
   if (!ul) return;
-  lis.forEach((li, i) => moved.has(i) && li.remove());
+  lis.forEach((li,i)=>moved.has(i) && li.remove());
   if (!ul.children.length) ul.remove();
-  const multi = ((state.jobs.find(j => j.id === id) || {}).media || []).length > 1;
-  lis.forEach((li, i) => {
-    const at = (r.times || [])[i];
-    if (!at || moved.has(i)) return;
-    li.classList.add("jump");
-    li.insertAdjacentHTML("afterbegin", `<b class="at">${multi ? `P${at.part + 1} ` : ""}${dur(at.t) || "0:00"}</b> `);
-    li.onclick = e => { e.stopPropagation(); seekTo(id, at.part, at.t); };
+  const multi=media.length>1;
+  lis.forEach((li,i)=>{
+    const at=r.times?.[i];
+    if (moved.has(i) || !validPlaybackAnchor(at,media)) return;
+    li.classList.add('jump');
+    li.insertAdjacentHTML('afterbegin',`<b class="at">${multi ? `P${at.part+1} ` : ''}${dur(at.t) || '0:00'}</b> `);
+    li.onclick=e=>{e.stopPropagation();seekTo(id,at.part,at.t);};
   });
 }
 // the site's watch counts as a strip of bars under the player, its marks as ticks on it; click to go there
@@ -2411,6 +2428,7 @@ async function clearWatch(id) {
   try {
     const r = await fetch(`/api/watch/${id}`, {method: "DELETE"});
     if (!r.ok) throw new Error();
+    if (watching?.id===id && typeof stopRecap==='function') stopRecap();
     const j = state.jobs.find(x => x.id === id);
     if (j) delete j.watch;
     render();
@@ -2439,9 +2457,12 @@ function hitList(j) {
 }
 function seekTo(id, part, t) {
   if (!Number.isSafeInteger(id) || id < 1 || !validSearchHit({part, t})) { toast('这个原文位置无效'); return; }
+  const targetMedia=state.jobs.find(job=>job.id===id)?.media;
+  if (targetMedia && (!targetMedia[part] || Number(targetMedia[part].duration)>0 && t>=Number(targetMedia[part].duration))) {toast('这个时间超出视频范围');return;}
   if (query && state.jobs.find(job => job.id === id)?.hits?.length) { openWatch(id, part, t); return; }
   const v = $("#watchBody video, #watchBody audio");
   if (!v || !watching || watching.id !== id || watching.part !== part) { openWatch(id, part, t); return; }
+  if (Number.isFinite(v.duration) && v.duration>0 && t>=v.duration) {toast('这个时间超出视频范围');return;}
   if (casting) { castSeek(casting.device, t); return; }
   v.currentTime = t; v.play().catch(() => {});
   $("#watch").scrollTo({top: 0, behavior: "smooth"});
@@ -2450,6 +2471,7 @@ function seekTo(id, part, t) {
 /* ---------- player ----------
    Only one media element ever exists; re-rendering or closing stops it first, so two sounds can't play at once. */
 function stopMedia() {
+  if (typeof stopRecap === 'function') stopRecap();
   if (typeof stopIntro === 'function') stopIntro();
   saveWatch();
   document.querySelectorAll("#watchBody video, #watchBody audio").forEach(el => { el.pause(); el.removeAttribute("src"); el.load(); });
@@ -2755,6 +2777,7 @@ function updatePrivacySelectionVisibility() {
   document.querySelectorAll('[data-privacy-action]').forEach(button => { button.hidden = !state.user || !privacyToken; });
 }
 function resetPrivateViews() {
+  if (typeof stopRecap === 'function') stopRecap();
   if (typeof resetLibraryUpdates === 'function') resetLibraryUpdates();
   ++privateViewEpoch; ++refreshEpoch; refreshController?.abort(); workspaceLoading = false;
   if (typeof stopIntro === 'function') stopIntro();
@@ -4691,6 +4714,7 @@ if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWor
 <script src="/static/library_updates.js?v=20261024-v1"></script>
 <script src="/static/ai_activity.js?v=20261024-v2"></script>
 <script src="/static/health_monitor.js?v=20261115-v1"></script>
+<script src="/static/playback_assist.js?v=20261115-v1"></script>
 <script src="/static/steward.js?v=20261115-v3"></script>
 <script src="/static/intro.js?v=20261024-v2"></script>
 <script src="/static/player_series.js?v=20261024-v3"></script>

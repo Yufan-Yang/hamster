@@ -415,11 +415,11 @@ def base_lang(code):
     return re.sub(r"^ai-", "", code).split("-")[0]
 
 
-def srt_cues(path):
+def srt_cues(path, text=None):
     """[(start, end, text)] of an .srt/.vtt, consecutive repeats merged and overlaps cut (auto captions roll: each
     cue starts before the last one ends)."""
     out = []
-    text = Path(path).read_text(errors="ignore").replace("\r", "")
+    text = (Path(path).read_text(errors="ignore") if text is None else text).replace("\r", "")
     stamp = r"(?:(\d+):)?(\d\d):(\d\d)[.,](\d+)"
     for block in re.split(r"\n\s*\n", text):
         m = re.search(stamp + r"\s*-->\s*" + stamp, block)

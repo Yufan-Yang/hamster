@@ -259,6 +259,22 @@ def _substring_search(db):
     search_index.install(db)
 
 
+def _playback_agents(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS media_quality (
+        job_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, revision TEXT NOT NULL,
+        report TEXT NOT NULL, checked REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS media_quality_owner ON media_quality(owner,checked);
+    CREATE TABLE IF NOT EXISTS resume_recaps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, job_id INTEGER NOT NULL,
+        part INTEGER NOT NULL, checkpoint REAL NOT NULL, revision TEXT NOT NULL,
+        sources TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', body TEXT DEFAULT '{}',
+        automatic INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL, updated REAL NOT NULL,
+        UNIQUE(owner,job_id,part,revision));
+    CREATE INDEX IF NOT EXISTS resume_recaps_owner ON resume_recaps(owner,created);
+    """)
+
+
 def _media_care(db):
     db.executescript("""
     CREATE TABLE IF NOT EXISTS media_care (
@@ -329,6 +345,7 @@ STEPS = [
     (35, lambda db: __import__('shiguang.directory_retired', fromlist=['clear_cache']).clear_cache(db)),
     (36, _media_steward),
     (37, _media_care),
+    (38, _playback_agents),
 ]
 
 

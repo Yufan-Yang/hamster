@@ -1,0 +1,6 @@
+.resume-recap { border:2px solid var(--ink); padding:12px 14px; margin:16px 0; overflow-wrap:anywhere; }
+.recap-heading { display:flex; gap:12px; align-items:center; justify-content:space-between; }
+.resume-recap blockquote { margin:12px 0 0; padding:0 0 0 12px; border-left:3px solid var(--soft); }
+.resume-recap blockquote p { margin:4px 0; }
+.timeline-quality { margin:8px 0; overflow-wrap:anywhere; }
+.timeline-unavailable { display:block; padding:8px 12px; color:var(--muted); }

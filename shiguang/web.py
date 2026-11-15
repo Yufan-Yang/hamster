@@ -2114,15 +2114,29 @@ def weekly_get():
 
 @app.get("/api/points/<int:jid>")
 def key_point_times(jid):
-    if not visible(jid):
-        return jsonify(error="not found"), 404
-    row = q("SELECT analysis, ref FROM jobs WHERE id=?", (jid,), one=True)
+    from . import media_quality, library_search, steward
+    if request.headers.get('X-Privacy-Token') and not privacy_token():
+        return steward._reply(error='隐私权限已失效'),403
+    if not visible(jid) or jid in hidden_ids():
+        return steward._reply(error="not found"), 404
+    access,reveal=library_search.access_stamp(g.owner),revealed()
+    row = q("SELECT * FROM jobs WHERE id=?", (jid,), one=True)
+    if not row:return steward._reply(error='not found'),404
     a = json.loads(row["analysis"] or "{}")
     if row["ref"]:  # linked entry: the downloading job has the chapters
         a = {**json.loads(q("SELECT analysis FROM jobs WHERE id=?", (row["ref"],), one=True)["analysis"] or "{}"), **a}
     times = [{"part": 0, "t": t} if t is not None else None for t in a["point_times"]] if a.get("point_times") \
         else search.point_times(jid)
-    return jsonify(times=times, chapters=a.get("chapters") or {}, markers=a.get("markers") or {}, heat=a.get("heat") or {})
+    reviewed=media_quality.review({**dict(row),'analysis':json.dumps(a)},times=times)
+    for key in ('hidden_ids','privacy_job_ids','source_hidden_ids','tag_aliases'):g.pop(key,None)
+    current=q('SELECT owner,files,analysis,ref FROM jobs WHERE id=?',(jid,),one=True)
+    if (not current or any(current[k]!=row[k] for k in current.keys()) or media_quality.durations(row)[1]!=reviewed['_source_stamps'] or access!=library_search.access_stamp(g.owner)
+            or reveal!=revealed() or jid in hidden_ids() or not visible(jid)
+            or request.headers.get('X-Privacy-Token') and not privacy_token()):
+        return steward._reply(error='媒体或权限已变化'),409
+    response=jsonify(storage_owner=g.owner,**{k:reviewed[k] for k in ('times','chapters','markers','heat','unavailable','quality')})
+    response.headers['Cache-Control']='no-store'
+    return response
 
 
 @app.get("/api/similar/<int:jid>")
@@ -2257,6 +2271,8 @@ def clear_watch(jid):
     if not visible(jid):
         return jsonify(error="not found"), 404
     q("DELETE FROM watch WHERE owner=? AND job_id=?", (g.owner, jid))
+    from . import resume_recap
+    resume_recap.clear(g.owner,jid)
     return jsonify(ok=True)
 
 

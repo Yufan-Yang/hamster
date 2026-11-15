@@ -70,12 +70,14 @@ node --check static/player_series.js
 node --check static/library_updates.js
 node --check static/steward.js
 node --check static/health_monitor.js
-for test in workspace live_interactions live_recordings series trash_ui privacy_ui main_search_ui search_evidence_ui saved_search_ui sources_ui ai_activity_ui download_retry_ui intro_ui player_series_ui library_updates_ui steward_ui health_monitor; do node "tests/$test.js"; done
-for test in backend_reliability intelligence live_assistant live_finalization live_review live_result task_lifecycle television device_routes cast_protocol directory_retired retirement_trash native_series steward housekeeping health_audit crawl crawl_extract crawl_duration crawl_search crawl_refresh crawl_network crawl_source crawl_sources crawl_home_search library_search search_index crawl_result_privacy crawl_metadata_privacy crawl_management crawl_health saved_search sources ai_activity intro player_series download_retry_api crawl_retry crawl_heal trash trash_review trash_privacy trash_source trash_performance privacy_modes privacy_selection report_privacy; do
+node --check static/playback_assist.js
+for test in workspace live_interactions live_recordings series trash_ui privacy_ui main_search_ui search_evidence_ui saved_search_ui sources_ui ai_activity_ui download_retry_ui intro_ui player_series_ui library_updates_ui steward_ui health_monitor playback_assist_ui; do node "tests/$test.js"; done
+for test in backend_reliability intelligence live_assistant live_finalization live_review live_result task_lifecycle television device_routes cast_protocol directory_retired retirement_trash native_series steward housekeeping health_audit playback_agents crawl crawl_extract crawl_duration crawl_search crawl_refresh crawl_network crawl_source crawl_sources crawl_home_search library_search search_index crawl_result_privacy crawl_metadata_privacy crawl_management crawl_health saved_search sources ai_activity intro player_series download_retry_api crawl_retry crawl_heal trash trash_review trash_privacy trash_source trash_performance privacy_modes privacy_selection report_privacy; do
   sudo -u grabber "$APP/venv/bin/python" "tests/$test.py"
 done
 sudo -u grabber "$APP/venv/bin/python" tests/devices_browser.py
 sudo -u grabber "$APP/venv/bin/python" tests/steward_browser.py
+sudo -u grabber "$APP/venv/bin/python" tests/playback_agents_browser.py
 sudo -u grabber "$APP/venv/bin/python" tests/casting_browser.py "$APP.next"
 sudo -u grabber "$APP/venv/bin/python" tests/download_fallback.py --local-http
 for test in tests/heal_regression_*.py; do

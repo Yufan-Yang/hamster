@@ -123,7 +123,7 @@ class StewardTests(unittest.TestCase):
         core.DB.close()
         core.init_db()
         self.addCleanup(core.DB.close)
-        self.assertEqual(core.q('PRAGMA user_version', one=True)[0], 37)
+        self.assertEqual(core.q('PRAGMA user_version', one=True)[0], 38)
         self.assertEqual(core.q('SELECT COUNT(*) n FROM media_steward_actions', one=True)['n'], 0)
 
     def test_concurrent_manual_summary_edit_is_not_claimed_by_generator(self):

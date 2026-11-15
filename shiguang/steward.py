@@ -445,8 +445,10 @@ def pending_manual_requests(owner=None, close_finished=False):
 
 
 def tick():
-    from . import housekeeping, health_audit
+    from . import housekeeping, health_audit, media_quality, resume_recap
     health_audit.tick()
+    media_quality.tick()
+    resume_recap.tick()
     housekeeping.recover()
     housekeeping.tick()
     for row in q('SELECT k FROM kv WHERE k LIKE ?', (POLICY_PREFIX + '%',)):
@@ -514,7 +516,7 @@ def steward_guard():
 
 @app.get('/api/steward', endpoint='steward_overview')
 def overview():
-    from . import housekeeping
+    from . import housekeeping, media_quality
     stamp, reveal = library_search.access_stamp(g.owner), web.revealed()
     cond, args = _visible()
     try:
@@ -536,6 +538,7 @@ def overview():
                       'observation': _object(row['observation'], {}), 'checked': row['checked'],
                       'actions': [{k: action[k] for k in ('id', 'kind', 'state', 'reason')} for action in actions]})
     care = housekeeping.overview(cond, args)
+    quality = media_quality.summary(cond,args)
     if (library_search.access_stamp(g.owner) != stamp or web.revealed() != reveal
             or (request.headers.get('X-Privacy-Token') and not web.privacy_token())
             or not _visibility_unchanged(args, list({item['job_id'] for item in items} | {item['job_id'] for item in care['items']} | {item['job_id'] for item in care['receipts']} | {item['job_id'] for item in care['operations']}))):
@@ -552,7 +555,7 @@ def overview():
                 busy = True
                 break
     return _reply(items=items, counts={row['state']: row['n'] for row in counts}, policy=policy(g.owner),
-                  offset=offset, more=len(rows) > BATCH, busy=busy, care=care, can_recover_files=bool(g.admin))
+                  offset=offset, more=len(rows) > BATCH, busy=busy, care=care, quality=quality, can_recover_files=bool(g.admin))
 
 
 @app.post('/api/steward/policy', endpoint='steward_policy')
@@ -587,6 +590,8 @@ def request_scan():
 
 def move_owner(old, new):
     with board.mutation() as conn:
+        conn.execute('UPDATE media_quality SET owner=?,checked=0 WHERE owner=?',(new,old))
+        conn.execute('UPDATE resume_recaps SET owner=?,updated=? WHERE owner=?',(new,time.time(),old))
         conn.execute("UPDATE media_care SET owner=?,checked=0,report=json_set(report,'$.owner',?) WHERE owner=?", (new, new, old))
         conn.execute("UPDATE media_file_ops SET owner=?,payload=json_set(payload,'$.before.owner',?,'$.after.owner',?) WHERE owner=?", (new, new, new, old))
         conn.execute('UPDATE media_steward_assets SET owner=? WHERE owner=?', (new, old))

@@ -118,6 +118,7 @@ function renderSteward() {
       ${(d.care.operations || []).map(op => `<p>${esc(op.title)} · ${op.state === 'undone' ? '已撤销' : op.state === 'done' ? '归档完成' : '归档中断或正在处理'} ${op.error ? esc(op.error) : ''} ${op.state !== 'undone' ? `<button class="link" onclick="undoCare(${Number(op.id)})"${v.busy ? ' disabled' : ''}>撤销归档</button>` : ''}</p>`).join('')}
       </section>` : ''}
     <h3>字幕与内容补全</h3>
+    ${d?.quality ? `<p class="hint">时间轴质检已检查 ${Number(d.quality.checked)} 条媒体；${Number(d.quality.invalid_anchors)} 个失效跳转已保留文字并关闭跳转${d.quality.merged_duplicates ? `，${Number(d.quality.merged_duplicates)} 处重复章节已合并展示` : ''}${d.quality.unverified ? `，${Number(d.quality.unverified)} 条尚无可信时长` : ''}。</p>` : ''}
     <div class="steward-controls"><button type="button" class="btn plain" onclick="scanSteward(false)"${v.busy ? ' disabled' : ''}>盘点当前范围</button>
     <button type="button" class="btn" onclick="scanSteward(true)"${v.busy ? ' disabled' : ''}>补全当前范围</button>
     <button type="button" class="link" onclick="loadSteward()"${v.busy ? ' disabled' : ''}>刷新</button></div>
