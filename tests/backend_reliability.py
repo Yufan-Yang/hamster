@@ -123,7 +123,9 @@ class BackendReliability(unittest.TestCase):
             self.assertTrue(board.fail_task(tid, "old", "failed", trace="trace", expected=True))
         self.assertEqual(core.q("SELECT state FROM tasks WHERE id=?", (tid,), one=True)["state"], "failed")
         self.assertEqual(core.q("SELECT state FROM live_clips WHERE id=1", one=True)["state"], "failed")
-        report.assert_called_once_with(tid, "failed", "trace", True)
+        self.assertEqual(report.call_args.args,(tid,"failed","trace",True))
+        self.assertEqual(report.call_args.kwargs['failed_row']['id'],tid)
+        self.assertEqual(report.call_args.kwargs['failed_row']['worker'],'old')
 
     def test_subtitle_search_only_reads_visible_sources_including_shared_downloads(self):
         own = self.job()

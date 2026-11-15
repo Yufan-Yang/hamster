@@ -219,6 +219,13 @@ def tick():
 
 
 def _transfer(source, destination):
+    try:
+        return _transfer_file(source,destination)
+    except OSError as error:
+        raise ValueError('存储暂不可用或不支持安全归档，已保留现有文件；请检查存储后重试或撤销') from error
+
+
+def _transfer_file(source, destination):
     """An exclusive link/unlink move: no replacement, including after a crash between the two calls."""
     source, destination = _safe(source), _safe(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)

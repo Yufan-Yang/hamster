@@ -350,7 +350,15 @@ def fail_task(tid, worker, error, retry=True, trace="", expected=False, attempt=
                 q("UPDATE live_references SET state='failed',error=?,updated=? WHERE id=?",
                   (str(error)[:800], time.time(), payload['reference']))
         from . import heal
-        heal.task_failed(tid, error, trace, expected)
+        previous = getattr(_execution,'claim',None)
+        try:
+            # This exact attempt was atomically failed above. Its incident is a new operation,
+            # so publishing the healer must not require the now-finished lease to stay running.
+            if previous == claim:
+                _execution.claim = None
+            heal.task_failed(tid, error, trace, expected, failed_row=dict(row))
+        finally:
+            _execution.claim = previous
     return True
 
 

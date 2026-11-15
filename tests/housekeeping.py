@@ -1,5 +1,6 @@
 """Real isolated file operations, durable recovery and owner/privacy boundaries."""
 import importlib.util
+import errno
 import json
 from pathlib import Path
 import time
@@ -9,7 +10,7 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('care_fixtures', Path(__file__).with_name('steward.py'))
 fixtures = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixtures)
-from shiguang import board, core, housekeeping as care, steward, media_workflows  # noqa: E402
+from shiguang import board, core, housekeeping as care, steward, media_workflows, heal  # noqa: E402
 
 
 class CareTests(unittest.TestCase):
@@ -292,6 +293,25 @@ class CareTests(unittest.TestCase):
         self.alice.post('/api/steward/care/undo',json={'operation_id':op['id']})
         self.assertEqual(self.work('steward_care_undo')[0],'done')
         self.assertTrue(files[0].exists())
+
+    def test_unsupported_storage_does_not_become_a_code_repair_incident(self):
+        jid,files=self.media();self.request(jid)
+        core.q("UPDATE tasks SET attempts=4 WHERE kind='steward_care_apply'")
+        with patch.object(care.os,'link',side_effect=OSError(errno.EXDEV,'cross-device link')):
+            self.assertEqual(self.work()[0],'failed')
+        self.assertTrue(files[0].exists())
+        self.assertEqual(core.q('SELECT count(*) FROM incidents',one=True)[0],0)
+
+    def test_terminal_local_failure_reaches_healer_without_leaking_to_other_accounts(self):
+        jid,_=self.media();self.request(jid)
+        core.q("UPDATE tasks SET attempts=4 WHERE kind='steward_care_apply'")
+        with patch.object(care,'_recover',side_effect=RuntimeError('synthetic program defect')):
+            self.assertEqual(self.work()[0],'failed')
+        self.assertIsNotNone(core.q("SELECT id FROM tasks WHERE kind='heal'",one=True))
+        self.assertTrue(self.alice.get('/api/tasks').json['heal'])
+        self.assertFalse(self.bob.get('/api/tasks').json['heal'])
+        self.assertNotEqual(heal.signature('steward_care_apply','same error','',{'owner':'user:alice'}),
+                            heal.signature('steward_care_apply','same error','',{'owner':'user:bob'}))
 
 
 if __name__ == '__main__':

@@ -34,6 +34,8 @@ def signature(kind, error, trace, context=None):
         # or overwrite a different task's retry target with its latest failure.
         scope = [context.get('owner'), context.get('url_key'), context.get('crawl_id')]
         sig += '|' + hashlib.sha256(json.dumps(scope, ensure_ascii=False).encode()).hexdigest()[:24]
+    elif kind != 'web' and isinstance(context,dict) and context.get('owner'):
+        sig += '|' + hashlib.sha256(str(context['owner']).encode()).hexdigest()[:24]
     return sig
 
 
@@ -97,17 +99,20 @@ def send(iid):
         raise
 
 
-def task_failed(tid, error, trace="", expected=False):
+def task_failed(tid, error, trace="", expected=False, failed_row=None):
     """A task failed for good (board.fail_task). `expected`: its target is gone or doesn't fit (not a bug)."""
     if expected:
         return
-    row = q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
+    row = failed_row if failed_row is not None else q("SELECT * FROM tasks WHERE id=?", (tid,), one=True)
     if not row:
         return
     payload = json.loads(row["payload"] or "{}")
     parent = q("SELECT kind, result FROM tasks WHERE id=?", (row["parent"],), one=True) if row["parent"] else None
     context = {"task": {"id": tid, "kind": row["kind"], "target": row["target"], "worker": row["worker"],
                         "attempts": row["attempts"], "payload": json.dumps(payload, ensure_ascii=False)[:1500]}}
+    job = payload.get('job') if type(payload.get('job')) is int else None
+    source = q('SELECT owner FROM jobs WHERE id=?',(job,),one=True) if job else None
+    context.update(owner=source['owner'] if source else payload.get('owner'),job=job)
     if parent:
         context["parent"] = {"kind": parent["kind"], "result": (parent["result"] or "")[:1500]}
     report(row["kind"], board.TASK_KINDS.get(row["kind"], {}).get("label", row["kind"]), error, trace, context, tid,
@@ -241,6 +246,20 @@ def recent(n=8):
         args = [owner, bool(owner and web.revealed()), owner]
     for r in q("SELECT i.*, t.state task_state, t.error task_error, t.result task_result FROM incidents i LEFT JOIN tasks t "
                "ON t.kind='heal' AND t.target='incident:' || i.id " + scope + "ORDER BY i.last DESC LIMIT ?", (*args, n)):
+        if has_request_context() and r['kind'] != 'crawl':
+            try:
+                context=json.loads(r['context'] or '{}')
+                raw=context.get('task',{}).get('payload','{}')
+                payload=json.loads(raw) if isinstance(raw,str) else raw
+                payload=payload if isinstance(payload,dict) else {}
+                owner=context.get('owner') or payload.get('owner')
+                job=context.get('job') or payload.get('job')
+                source=q('SELECT owner FROM jobs WHERE id=?',(job,),one=True) if type(job) is int else None
+                owner=source['owner'] if source else owner
+                if owner and owner != g.owner or type(job) is int and job in web.hidden_ids():
+                    continue
+            except (ValueError,TypeError,AttributeError):
+                continue
         state = r["state"]
         if state == "healing" and r["task_state"] == "failed":
             state = "error"
