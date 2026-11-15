@@ -767,6 +767,7 @@ a.link {display: inline-block; max-width: 100%;}
   <div id="continue" hidden><div class="contitle">继续观看</div><div class="controw" id="controw"></div></div>
   <div id="contRead" hidden><div class="contitle">继续阅读</div><div class="controw" id="controwRead"></div></div>
   <section id="libraryUpdates" class="library-updates" aria-label="片库更新" hidden></section>
+  <section id="stewardSummary" class="library-updates" aria-label="媒体管家处理情况" hidden></section>
   <div class="grid" id="grid"></div>
   <div id="mainLibraryPages" class="crawl-pagination" hidden><button type="button" class="btn plain" id="mainLibraryPrev" onclick="pageMainLibrary(-1)">上一页</button><span id="mainLibraryPage"></span><button type="button" class="btn plain" id="mainLibraryNext" onclick="pageMainLibrary(1)">下一页</button></div>
   <button class="btn plain" id="more" hidden onclick="loadMore()">加载更多</button>
@@ -1522,6 +1523,7 @@ async function refreshNow(options = {}) {
       render(); // Refresh retry countdowns even when the stored job row is unchanged.
     }
     if (typeof refreshLibraryUpdates === 'function') refreshLibraryUpdates();
+    if (typeof refreshStewardSummary === 'function') refreshStewardSummary();
   } catch (e) {
     if (epoch !== refreshEpoch || e.name === 'AbortError') return;
     workspaceError = e.message || "连接中断";
@@ -4688,7 +4690,8 @@ if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWor
 <script src="/static/sources.js?v=20261024-v2"></script>
 <script src="/static/library_updates.js?v=20261024-v1"></script>
 <script src="/static/ai_activity.js?v=20261024-v2"></script>
-<script src="/static/steward.js?v=20261114-v2"></script>
+<script src="/static/health_monitor.js?v=20261115-v1"></script>
+<script src="/static/steward.js?v=20261115-v3"></script>
 <script src="/static/intro.js?v=20261024-v2"></script>
 <script src="/static/player_series.js?v=20261024-v3"></script>
 </body>

@@ -167,7 +167,10 @@ def heal_done(task, result):
     iid = json.loads(task["payload"])["incident"]
     state = result.get("state") or "diagnosed"
     verification = result.get("verification") or {}
+    review = result.get('review') if isinstance(result.get('review'),dict) else {}
     verified = (verification.get("status") == "passed"
+                and review.get('approved') is True
+                and bool(review.get('evidence'))
                 and bool(re.fullmatch(r"[a-f0-9]{40}", str(verification.get("revision") or "")))
                 and bool(result.get("commit"))
                 and verification["revision"].startswith(str(result["commit"]))
@@ -175,7 +178,7 @@ def heal_done(task, result):
     diagnosis = str(result.get("diagnosis") or "")[:3500]
     if state == "fixed" and not verified:
         state = "diagnosed"
-        diagnosis += "（缺少有效的上线验收记录，未标为已修复，也未自动重试。）"
+        diagnosis += "（缺少独立审查或有效的上线验收记录，未标为已修复，也未自动重试。）"
     _write("UPDATE incidents SET state=?, diagnosis=?, summary=?, commit_id=?, healed=? WHERE id=?",
            (state, diagnosis,
             str(result.get("summary") or "")[:1000], str(result.get("commit") or ""), time.time(), iid))

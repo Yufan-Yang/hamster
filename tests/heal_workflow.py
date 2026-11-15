@@ -63,7 +63,7 @@ class HealWorkflowTests(unittest.TestCase):
         for state, confidence in [('diagnosed', 'low'), ('diagnosed', 'high'), ('fixed', 'low')]:
             with self.subTest(state=state, confidence=confidence):
                 initial = dict(state='fixed', diagnosis='first patch', summary='fix', retry=True,
-                               confidence='high', evidence='grabber.py:1', patch='first patch')
+                               confidence='high', evidence='grabber.py:1', patch='first patch', review={'approved':True,'evidence':'independent fixture review'})
                 followup = dict(initial, state=state, confidence=confidence, patch='')
                 ask = Mock(side_effect=[initial, followup])
                 # The first patch remains in the worktree after a failed regression.
@@ -107,6 +107,34 @@ class HealWorkflowTests(unittest.TestCase):
                         "if __name__ == '__main__': unittest.main()\n")
         with self.assertRaisesRegex(RuntimeError, '原版本应复现'):
             check(self.base, Mock())
+
+    def test_independent_reviewer_requires_evidence_and_can_veto(self):
+        ask=Mock()
+        scope=self.scope('review_heal_patch',HEAL_MODEL='test',ask_codex=ask)
+        review=scope['review_heal_patch']
+        for answer in [{'approved':False,'reason':'ownership regression'},
+                       {'approved':True,'confidence':'low','reason':'maybe','evidence':'file:1'},
+                       {'approved':True,'confidence':'high','reason':'fine','evidence':''}]:
+            ask.return_value={'out':answer}
+            with self.assertRaisesRegex(RuntimeError,'reviewer rejected'):review({},'patch',Mock())
+        ask.return_value={'out':{'approved':True,'confidence':'high','reason':'cause and fix checked','evidence':'grabber.py:1'}}
+        self.assertTrue(review({},'patch',Mock())['approved'])
+
+    def test_reviewer_rejection_happens_before_applying_patch(self):
+        answer=dict(state='fixed',diagnosis='cause',summary='fix',retry=True,confidence='high',evidence='file:1',patch='candidate')
+        apply=Mock()
+        scope=self.scope('ask_healer',HEAL_SYSTEM='',HEAL_SCHEMA={'required':list(answer)},HEAL_MODEL='',
+            CONFIDENCE={'high':'高'},heal_prompt=Mock(return_value=''),ask_codex=Mock(return_value={'out':answer}),
+            review_heal_patch=Mock(side_effect=RuntimeError('reviewer rejected')),apply_heal_patch=apply)
+        with self.assertRaisesRegex(RuntimeError,'reviewer rejected'):scope['ask_healer']({},Mock(),True)
+        apply.assert_not_called()
+
+    def test_deployment_receipt_without_independent_review_is_not_fixed(self):
+        write=Mock()
+        scope=load_functions('shiguang/heal.py',{'heal_done'},_write=write,q=Mock(),board=Mock())
+        scope['heal_done']({'payload':json.dumps({'incident':1})},{'state':'fixed','retry':True,'commit':'a'*10,
+            'verification':{'status':'passed','revision':'a'*40,'checks':['source_hashes','page','task_api','fresh_pi_cpu']}})
+        self.assertEqual(write.call_args.args[1][0],'diagnosed')
 
     def test_release_receipt_must_match_revision_and_new_validation(self):
         receipt = {'revision':'a'*40,'verified_at':100,

@@ -61,7 +61,7 @@ def model(system, user, fields, max_tokens, usage, purpose='', job_id=None, thin
 
 
 def worker():
-    kinds = ['steward_scan', 'steward_index', 'summarize', 'chapters']
+    kinds = ['steward_scan', 'steward_index', 'summarize', 'chapters', 'steward_diagnose', 'steward_care_apply', 'steward_care_undo']
     while not stop.wait(.05):
         try:
             task = board.claim_task('qa-steward-browser', kinds)
@@ -130,7 +130,7 @@ try:
                     page.evaluate('openSteward()')
                     page.wait_for_selector('#stewardProfile')
                     page.locator('#stewardBody').evaluate('(e)=>Promise.all(e.getAnimations().map(a=>a.finished))')
-                    assert not calls and not executed
+                    assert not calls and not set(executed) & {'steward_index','summarize','transcribe','steward_care_apply'}
                     assert not page.locator('#stewardAutomatic').is_checked()
                     page.get_by_role('button', name='盘点当前范围', exact=True).click()
                     page.wait_for_function("stewardView.data?.items.some(x=>x.job_id === " + str(jid) + " && x.state === 'needs_work')")
@@ -165,6 +165,19 @@ try:
                     assert page.locator('#stewardBody').evaluate('(e)=>e.scrollWidth <= e.clientWidth')
                     page.screenshot(path=str(OUT/'mobile.png'), full_page=True)
                 record('one manual request completes import, summary and verification', manual_completion)
+
+                def organize_and_undo():
+                    page.wait_for_function('stewardView.data?.care?.items.some(x=>x.job_id === '+str(jid)+')')
+                    original = json.loads(core.q('SELECT files FROM jobs WHERE id=?',(jid,),one=True)['files'])[0]
+                    page.get_by_role('button',name='按当前分类归档',exact=True).click()
+                    page.wait_for_function("stewardView.data?.care?.operations.some(x=>x.state === 'done')",timeout=20000)
+                    current = json.loads(core.q('SELECT files FROM jobs WHERE id=?',(jid,),one=True)['files'])[0]
+                    assert Path(current).is_file() and not Path(original).exists()
+                    page.get_by_role('button',name='撤销归档',exact=True).click()
+                    page.wait_for_function("stewardView.data?.care?.operations.some(x=>x.state === 'undone')",timeout=20000)
+                    assert Path(original).exists()
+                    assert not page.evaluate('stewardView.data.care.items.some(x=>x.job_id === '+str(jid)+')')
+                record('real file organization, receipt, undo and retained layout preference',organize_and_undo)
 
                 def automatic_and_ai():
                     first = seed(owner, '自动整理一')
@@ -219,6 +232,6 @@ finally:
             pass
     server.shutdown()
     report = {'results': results, 'page_errors': errors, 'model_calls': calls, 'executed': executed,
-              'passed': len(results) == 6 and all(item['passed'] for item in results) and not errors}
+              'passed': len(results) == 7 and all(item['passed'] for item in results) and not errors}
     (OUT/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print('Browser report:', OUT, flush=True)

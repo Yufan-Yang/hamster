@@ -17,6 +17,7 @@ function harness() {
   };
   $('#stewardSheet').hidden = true;
   const context = vm.createContext({$, Map, Number, Date, Object, JSON, AbortController,
+    state:{login_required:false},document:{hidden:false},
     storageOwner:'user:alice', privateViewEpoch:0,
     toast: message => notices.push(message),
     esc: text => String(text ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])),
@@ -104,5 +105,26 @@ function harness() {
     assert.match(body,/value="essential" selected/);
     h.context.resetSteward();assert.equal(h.timers.size,0);
     console.log('PASS active batch polling preserves unsaved policy changes');
+  }
+  {
+    const h=harness(),opening=h.context.openSteward();
+    h.calls[0].resolve(response(data({care:{checked:1,total:1,items:[{job_id:7,title:'<private>',revision:'version',issues:['wrong folder'],
+      actions:[{id:'organize_files',label:'按当前分类归档',detail:'files and subtitles',moves:[{from:'old.mp4',to:'new.mp4'}]}]}],operations:[],receipts:[]}})));await opening;
+    const action=h.context.careAction(7,'organize_files');
+    assert.equal(h.calls[1].url,'/api/steward/care/action');
+    assert.deepEqual(JSON.parse(h.calls[1].options.body),{job_id:7,action:'organize_files',revision:'version'});
+    assert.ok(!h.$('#stewardBody').innerHTML.includes('<private>'));
+    h.calls[1].resolve(response({storage_owner:'user:alice',queued:true},202));await action;
+    assert.equal(h.timers.size,1);
+    console.log('PASS file execution submits the reviewed revision and safely renders concrete move previews');
+  }
+  {
+    const h=harness(),loading=h.context.refreshStewardSummary();
+    const request=h.calls[0];
+    h.context.resetSteward();h.context.storageOwner='user:bob';
+    assert.equal(request.options.signal.aborted,true);
+    request.resolve(response(data({care:{total:17,checked:23,receipts:[{outcome:'SECRET'}]}})));await loading;
+    assert.equal(h.$('#stewardSummary').innerHTML,'');
+    console.log('PASS homepage maintenance summary is cleared and stale personal receipts cannot cross accounts');
   }
 })().catch(error => {console.error(error);process.exitCode = 1;});

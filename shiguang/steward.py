@@ -9,7 +9,7 @@ import time
 
 from flask import g, jsonify, request
 
-from . import ai_activity, board, core, library, library_search, llm, web
+from . import ai_activity, board, core, library, library_search, llm, media_workflows, web
 from .core import app, q
 
 BATCH = 25
@@ -36,6 +36,14 @@ def text_digest(value):
 def policy(owner):
     saved = core.kv_get(POLICY_PREFIX + owner, {})
     return {**DEFAULT_POLICY, **{k: v for k, v in saved.items() if k in DEFAULT_POLICY}}
+
+
+def daily_count(owner, db=None):
+    since = time.time() - 86400
+    def count(sql):
+        return db.execute(sql,(owner,since)).fetchone()[0] if db is not None else q(sql,(owner,since),one=True)[0]
+    return count('SELECT count(*) FROM media_steward_actions WHERE owner=? AND created>?') + count(
+        "SELECT count(*) FROM tasks WHERE kind='steward_care_apply' AND json_extract(payload,'$.owner')=? AND created>?")
 
 
 def _object(raw, fallback):
@@ -84,6 +92,7 @@ def inspect(row, settings):
     a = _object(job['analysis'], {})
     observed = {'files': 0, 'subtitles': 0, 'indexed_parts': 0, 'chapters': 0,
                 'summary': isinstance(a.get('summary'), str) and bool(a['summary'].strip()), 'issues': [], 'parts': []}
+    observed['workflow'] = media_workflows.propose(a, settings['profile'])
     actions, evidence = [], []
     state = 'ready'
     if latest is None:
@@ -113,9 +122,7 @@ def inspect(row, settings):
                 observed['issues'].append('媒体文件缺失、不可读取或不在受管目录，暂停补全')
                 state = 'blocked'
         if state != 'blocked':
-            music = a.get('library') == 'Music' or a.get('folder') == 'Music Videos'
-            semantic = not music and settings['profile'] != 'essential' and (
-                settings['profile'] == 'deep' or a.get('needs_transcript') is True)
+            semantic = observed['workflow']['semantic']
             chapter_map = a.get('chapters') if isinstance(a.get('chapters'), dict) else {}
             for part, path in enumerate(media):
                 try:
@@ -163,8 +170,7 @@ def inspect(row, settings):
                 actions = []
     version = digest([job['status'], job['ref'], job['files'], job['analysis'],
                       text_digest(job['transcript']), evidence, observed, settings['profile']])
-    daily = q('SELECT COUNT(*) n FROM media_steward_actions WHERE owner=? AND created>?',
-              (job['owner'], time.time() - 86400), one=True)['n'] if actions else 0
+    daily = daily_count(job['owner']) if actions else 0
     for action in actions:
         # Existing download follow-ups may still be saving the very artifact we lack.
         part = action['part'] if action['part'] is not None else 0
@@ -196,6 +202,7 @@ def inspect(row, settings):
                               "WHERE a.job_id=? AND a.owner=? AND t.state IN ('queued','running') LIMIT 1",
                               (jid, job['owner']), one=True):
         state = 'waiting'
+    observed['review'] = media_workflows.review(job, actions, settings['profile'])
     return {'job_id': jid, 'owner': job['owner'], 'revision': version, 'observed_at': observed_at,
             'state': state, 'observation': observed, 'plan': actions}
 
@@ -272,6 +279,8 @@ def dispatch(owner, item, action, settings, automatic=False):
     fresh = inspect(row, settings)
     if fresh['revision'] != item['revision']:
         return False
+    if not media_workflows.review(row, fresh['plan'], settings['profile'])['approved']:
+        return False
     valid = next((x for x in fresh['plan'] if x['id'] == action['id'] and
                   x['input_version'] == action['input_version'] and x['state'] == 'pending'), None)
     if not valid:
@@ -291,7 +300,7 @@ def dispatch(owner, item, action, settings, automatic=False):
         current = conn.execute('SELECT owner,status,files,analysis,transcript,ref FROM jobs WHERE id=?', (row['id'],)).fetchone()
         if not current or any(current[k] != row[k] for k in current.keys()):
             return False
-        recent = conn.execute('SELECT COUNT(*) n FROM media_steward_actions WHERE owner=? AND created>?', (owner, now - 86400)).fetchone()['n']
+        recent = daily_count(owner,conn)
         prior = conn.execute('SELECT COUNT(*) n,MAX(created) last FROM media_steward_actions '
                              'WHERE job_id=? AND kind=? AND target=? AND input_version=?',
                              (row['id'], action['kind'], action['target'], action['input_version'])).fetchone()
@@ -436,6 +445,10 @@ def pending_manual_requests(owner=None, close_finished=False):
 
 
 def tick():
+    from . import housekeeping, health_audit
+    health_audit.tick()
+    housekeeping.recover()
+    housekeeping.tick()
     for row in q('SELECT k FROM kv WHERE k LIKE ?', (POLICY_PREFIX + '%',)):
         owner = row['k'][len(POLICY_PREFIX):]
         if policy(owner)['automatic']:
@@ -501,6 +514,7 @@ def steward_guard():
 
 @app.get('/api/steward', endpoint='steward_overview')
 def overview():
+    from . import housekeeping
     stamp, reveal = library_search.access_stamp(g.owner), web.revealed()
     cond, args = _visible()
     try:
@@ -521,12 +535,16 @@ def overview():
         items.append({'job_id': row['id'], 'title': row['title'], 'state': row['state'] or 'unchecked',
                       'observation': _object(row['observation'], {}), 'checked': row['checked'],
                       'actions': [{k: action[k] for k in ('id', 'kind', 'state', 'reason')} for action in actions]})
+    care = housekeeping.overview(cond, args)
     if (library_search.access_stamp(g.owner) != stamp or web.revealed() != reveal
             or (request.headers.get('X-Privacy-Token') and not web.privacy_token())
-            or not _visibility_unchanged(args, [item['job_id'] for item in items])):
+            or not _visibility_unchanged(args, list({item['job_id'] for item in items} | {item['job_id'] for item in care['items']} | {item['job_id'] for item in care['receipts']} | {item['job_id'] for item in care['operations']}))):
         return _reply(error='片库或隐私权限已变化，请刷新'), 409
-    busy = bool(q("SELECT 1 FROM tasks WHERE kind='steward_scan' AND state IN ('queued','running') "
+    busy = bool(q("SELECT 1 FROM tasks WHERE kind IN ('steward_scan','steward_diagnose','steward_care_apply','steward_care_undo') AND state IN ('queued','running') "
                   "AND json_extract(payload,'$.owner')=?", (g.owner,), one=True))
+    if not busy:
+        busy = bool(q('SELECT 1 FROM jobs j LEFT JOIN media_care c ON c.job_id=j.id AND c.owner=j.owner WHERE ' + cond +
+                      ' AND (c.checked IS NULL OR j.updated>c.checked) LIMIT 1',args,one=True))
     if not busy:
         for pending in pending_manual_requests(g.owner):
             if q('SELECT 1 FROM jobs j WHERE ' + cond + ' AND j.id IN (SELECT value FROM json_each(?)) LIMIT 1',
@@ -534,7 +552,7 @@ def overview():
                 busy = True
                 break
     return _reply(items=items, counts={row['state']: row['n'] for row in counts}, policy=policy(g.owner),
-                  offset=offset, more=len(rows) > BATCH, busy=busy)
+                  offset=offset, more=len(rows) > BATCH, busy=busy, care=care, can_recover_files=bool(g.admin))
 
 
 @app.post('/api/steward/policy', endpoint='steward_policy')
@@ -569,6 +587,8 @@ def request_scan():
 
 def move_owner(old, new):
     with board.mutation() as conn:
+        conn.execute("UPDATE media_care SET owner=?,checked=0,report=json_set(report,'$.owner',?) WHERE owner=?", (new, new, old))
+        conn.execute("UPDATE media_file_ops SET owner=?,payload=json_set(payload,'$.before.owner',?,'$.after.owner',?) WHERE owner=?", (new, new, new, old))
         conn.execute('UPDATE media_steward_assets SET owner=? WHERE owner=?', (new, old))
         conn.execute('UPDATE media_steward_actions SET owner=? WHERE owner=?', (new, old))
         conn.execute('INSERT OR IGNORE INTO kv(k,v) SELECT ?,v FROM kv WHERE k=?', (POLICY_PREFIX + new, POLICY_PREFIX + old))

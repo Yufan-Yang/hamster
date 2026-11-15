@@ -867,7 +867,7 @@ def heal_incidents():
     assert sent and json.loads(sent["payload"])["error"].startswith("ZeroDivisionError")
     G.q("UPDATE tasks SET state='running', worker='mac' WHERE id=?", (sent["id"],))
     assert B.complete_task(sent["id"], "mac", {"state": "fixed", "diagnosis": "d", "summary": "s", "retry": True,
-        "commit": "a" * 10, "verification": {"status": "passed", "revision": "a" * 40,
+        "commit": "a" * 10, "review": {"approved": True, "evidence": "isolated smoke fixture"}, "verification": {"status": "passed", "revision": "a" * 40,
         "checks": ["source_hashes", "page", "task_api", "fresh_pi_cpu"]}})
     assert G.q("SELECT state FROM incidents WHERE id=?", (inc["id"],), one=True)["state"] == "fixed"
     assert all(G.q("SELECT state FROM tasks WHERE id=?", (t,), one=True)["state"] == "queued" for t in tids)

@@ -45,7 +45,7 @@ class CrawlHealTests(unittest.TestCase):
         return core.q('SELECT MAX(id) id FROM crawl_pages', one=True)['id']
 
     def done(self, iid, **changes):
-        result = {'state': 'fixed', 'retry': True, 'commit': 'a' * 10,
+        result = {'state': 'fixed', 'retry': True, 'commit': 'a' * 10, 'review': {'approved': True, 'evidence': 'isolated test fixture'},
                   'verification': {'status': 'passed', 'revision': 'a' * 40,
                                    'checks': ['source_hashes', 'page', 'task_api', 'fresh_pi_cpu']}}
         result.update(changes)

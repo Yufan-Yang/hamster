@@ -70,9 +70,12 @@ def _check_claim(conn):
 
 
 @contextlib.contextmanager
-def mutation():
+def mutation(durable=False):
     """Fence a local task's write against another process reclaiming its lease."""
     with core.db_lock:
+        previous = core.DB.execute('PRAGMA synchronous').fetchone()[0] if durable else None
+        if durable:
+            core.DB.execute('PRAGMA synchronous=FULL')
         try:
             core.DB.execute("BEGIN IMMEDIATE")
             _check_claim(core.DB)
@@ -81,6 +84,9 @@ def mutation():
         except BaseException:
             core.DB.rollback()
             raise
+        finally:
+            if durable:
+                core.DB.execute(f'PRAGMA synchronous={previous}')
 
 
 def guarded_q(sql, args=(), one=False):
