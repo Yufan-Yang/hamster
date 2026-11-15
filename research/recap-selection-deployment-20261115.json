@@ -1,0 +1,274 @@
+{
+  "checked_at": 1794744291.8931184,
+  "revision": "6213669a1abc607c23596397f42951ccf69023e8",
+  "source_files_verified": 388,
+  "verification": {
+    "revision": "6213669a1abc607c23596397f42951ccf69023e8",
+    "verified_at": 1794744205.3704298,
+    "checks": [
+      "source_hashes",
+      "page",
+      "task_api",
+      "fresh_pi_cpu"
+    ]
+  },
+  "services": {
+    "grabber": {
+      "MainPID": "4074139",
+      "ActiveState": "active"
+    },
+    "grabber-worker": {
+      "MainPID": "4074202",
+      "ActiveState": "active"
+    },
+    "grabber-recorder": {
+      "MainPID": "129700",
+      "ActiveState": "active"
+    }
+  },
+  "http": {
+    "/": {
+      "status": 200,
+      "recap_present": true
+    },
+    "/api/tasks": {
+      "status": 200,
+      "workers": [
+        {
+          "role": "pi-steward",
+          "online": true
+        },
+        {
+          "role": "pi-cpu",
+          "online": true
+        },
+        {
+          "role": "mac-heal",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        },
+        {
+          "role": "mac-codex",
+          "online": true
+        }
+      ]
+    },
+    "/api/steward": {
+      "status": 200
+    }
+  },
+  "database": {
+    "version": 38,
+    "automatic_accounts": 3,
+    "media_done": 856
+  },
+  "recaps": {
+    "artifacts": [
+      {
+        "id": 4,
+        "job_id": 284,
+        "state": "ready",
+        "automatic": false,
+        "quote_count": 3,
+        "current_sources_match": true,
+        "every_quote_is_an_exact_candidate": true,
+        "every_quote_within_fixed_checkpoint": true,
+        "after": {
+          "analysis_sha256": "fcfd9420290d5e850e1882bfb5d400167520832b2b0246095b0ba82ab7b2a1fe",
+          "files_sha256": "b56f9ce3551dc5b620315c4d47a8cace3816d071944ec6e72be3988bddfa2552",
+          "watch_sha256": "95e0da1b63e54d5401846ab5f0648354ae539c4eec5302b553f0ba806876953f"
+        },
+        "usage": {
+          "total": 5,
+          "automatic": 3
+        },
+        "original_metadata_files_and_watch_unchanged": true
+      },
+      {
+        "id": 5,
+        "job_id": 185,
+        "state": "ready",
+        "automatic": false,
+        "quote_count": 3,
+        "current_sources_match": true,
+        "every_quote_is_an_exact_candidate": true,
+        "every_quote_within_fixed_checkpoint": true,
+        "after": {
+          "analysis_sha256": "cf0ef2e26fc9fc8d4496caa723bef69190f33ceb4af13c6d15161867f39bbd0f",
+          "files_sha256": "50df3d03fe52bde97239f9cc9ab873dfb006e7d65d680ec1dd990218e44be580",
+          "watch_sha256": "2564bde84c57a639f185fade9fd77110f09567327bfb5fe4af1a4cd3bb3f612f"
+        },
+        "usage": {
+          "total": 5,
+          "automatic": 3
+        },
+        "original_metadata_files_and_watch_unchanged": true
+      }
+    ],
+    "cleared_artifacts_still_absent": true,
+    "cleared_checkpoints_not_restored": true
+  },
+  "live_ai_calls": [
+    {
+      "job_id": 284,
+      "engine": "codex",
+      "model": "gpt-6-luna",
+      "status": "done"
+    },
+    {
+      "job_id": 185,
+      "engine": "codex",
+      "model": "gpt-6-luna",
+      "status": "done"
+    }
+  ],
+  "dispatch": {
+    "checked_at": 1794744225.0509357,
+    "revision": "6213669a1abc607c23596397f42951ccf69023e8",
+    "purpose": "bounded live acceptance with current existing bookmarks",
+    "records": [
+      {
+        "job_id": 284,
+        "part": 0,
+        "checkpoint": 1135.811722729682,
+        "candidate_count": 9,
+        "before": {
+          "analysis_sha256": "fcfd9420290d5e850e1882bfb5d400167520832b2b0246095b0ba82ab7b2a1fe",
+          "files_sha256": "b56f9ce3551dc5b620315c4d47a8cace3816d071944ec6e72be3988bddfa2552",
+          "watch_sha256": "95e0da1b63e54d5401846ab5f0648354ae539c4eec5302b553f0ba806876953f"
+        },
+        "usage_before": {
+          "total": 3,
+          "automatic": 3
+        },
+        "usage_after": {
+          "total": 4,
+          "automatic": 3
+        },
+        "result": {
+          "id": 4,
+          "state": "pending",
+          "checkpoint": 1135.811722729682
+        }
+      },
+      {
+        "job_id": 185,
+        "part": 0,
+        "checkpoint": 235.1283125756675,
+        "candidate_count": 8,
+        "before": {
+          "analysis_sha256": "cf0ef2e26fc9fc8d4496caa723bef69190f33ceb4af13c6d15161867f39bbd0f",
+          "files_sha256": "50df3d03fe52bde97239f9cc9ab873dfb006e7d65d680ec1dd990218e44be580",
+          "watch_sha256": "2564bde84c57a639f185fade9fd77110f09567327bfb5fe4af1a4cd3bb3f612f"
+        },
+        "usage_before": {
+          "total": 4,
+          "automatic": 3
+        },
+        "usage_after": {
+          "total": 5,
+          "automatic": 3
+        },
+        "result": {
+          "id": 5,
+          "state": "pending",
+          "checkpoint": 235.1283125756675
+        }
+      }
+    ]
+  },
+  "candidate_preview": {
+    "checked_at": 1794743984.815138,
+    "writes": false,
+    "model_calls": 0,
+    "current_valid_watch_records": 6,
+    "artifacts": [
+      {
+        "job_id": 284,
+        "part": 0,
+        "checkpoint": 1135.811722729682,
+        "candidate_count": 9,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      },
+      {
+        "job_id": 185,
+        "part": 0,
+        "checkpoint": 235.1283125756675,
+        "candidate_count": 8,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      },
+      {
+        "job_id": 62,
+        "part": 0,
+        "checkpoint": 923.228767400337,
+        "candidate_count": 10,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      },
+      {
+        "job_id": 344,
+        "part": 0,
+        "checkpoint": 678.5871295743639,
+        "candidate_count": 10,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      },
+      {
+        "job_id": 148,
+        "part": 0,
+        "checkpoint": 1880.9841695336668,
+        "candidate_count": 10,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      },
+      {
+        "job_id": 93,
+        "part": 0,
+        "checkpoint": 296.5914794306613,
+        "candidate_count": 10,
+        "inside_current_duration": true,
+        "all_contiguous_originals_before_checkpoint": true
+      }
+    ]
+  },
+  "cleared_prior_records_not_recreated": true,
+  "tests": {
+    "local": {
+      "suites": 5,
+      "cases": 44,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "raspberry_pi": {
+      "suites": 48,
+      "cases": 546,
+      "failed_suites": 0,
+      "skipped_suites": 0
+    },
+    "frontend_suites": 18,
+    "playback_backend_cases": 33,
+    "browser_scripts": [
+      "devices_browser.py",
+      "steward_browser.py",
+      "playback_agents_browser.py",
+      "casting_browser.py"
+    ],
+    "playback_browser_scenarios": 3,
+    "local_playback_browser": "passed",
+    "production_database_copy_smoke": "passed",
+    "controlled_tests_use_mock_model": true
+  },
+  "deployment": {
+    "exit_code": 0,
+    "command": "./deploy.sh --no-mac",
+    "consecutive_health_checks": 3,
+    "log_sha256": "0fe879e649e03972ee473ed1404c0c56b4ceed294fb8b8ae6a83a04e720e229e",
+    "mac_worker_changed": false,
+    "recorder_pid_unchanged": true
+  }
+}
