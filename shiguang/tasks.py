@@ -49,7 +49,9 @@ def kv_set(key, value):
 def after_transcribe(task, result):
     p = json.loads(task["payload"])
     amount, seconds = float(result.get("audio_seconds") or 0), float(result.get("seconds") or 0)
-    board.publish("save_subs", task["target"], task["priority"], parent=task["id"], force=True)
+    guarded_payload = ({key: value for key, value in p.items() if key != '_claim_token'}
+                       if p.get('_steward_stamp') is not None else None)
+    board.publish("save_subs", task["target"], task["priority"], parent=task["id"], force=True, payload=guarded_payload)
     # Follow-ups are replayable. Count this completed transcription once even if a replay
     # happens after its save task was already published.
     marker = f"transcribe-usage:{task['id']}:{task['updated']}"

@@ -12,7 +12,7 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('steward_fixtures', Path(__file__).with_name('crawl_home_search.py'))
 fixtures = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixtures)
-from shiguang import board, core, library, llm, steward, web  # noqa: E402
+from shiguang import board, core, library, llm, steward, tasks, web  # noqa: E402
 
 
 class StewardTests(unittest.TestCase):
@@ -256,12 +256,12 @@ class StewardTests(unittest.TestCase):
         core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
         steward.tick()
         self.assertEqual(self.task('steward_scan')['state'], 'done')
-        steward.queue_scan(self.owner, [jid], apply=True)
+        tid = steward.queue_scan(self.owner, [jid], apply=True)
         core.q("UPDATE tasks SET state='done' WHERE id=?", (tid,))
         files[0].unlink()
         steward.scan(self.owner, [jid])
         steward.tick()
-        self.assertEqual(self.task('steward_scan')['state'], 'done')
+        self.assertEqual(core.q('SELECT state FROM tasks WHERE id=?', (tid,), one=True)['state'], 'done')
 
     def test_manual_batch_keeps_original_deadline_on_rescan(self):
         jid, _ = self.media()
@@ -457,6 +457,104 @@ class StewardTests(unittest.TestCase):
         self.assertEqual(steward.policy(self.owner)['profile'], 'essential')
         self.assertFalse(steward.policy(self.owner)['automatic'])
         self.assertEqual(core.q('SELECT owner FROM media_steward_assets WHERE job_id=?', (jid,), one=True)['owner'], self.owner)
+
+    def test_new_manual_batch_does_not_replace_an_unfinished_batch(self):
+        first, _ = self.media()
+        second, _ = self.media()
+        steward.scan(self.owner)
+        one = steward.queue_scan(self.owner, [first], apply=True)
+        core.q("UPDATE tasks SET state='done' WHERE id=?", (one,))
+        two = steward.queue_scan(self.owner, [second], apply=True)
+        self.assertNotEqual(one, two)
+        steward.tick()
+        rows = core.q("SELECT payload,state FROM tasks WHERE kind='steward_scan'")
+        self.assertEqual({tuple(json.loads(r['payload'])['ids']) for r in rows}, {(first,), (second,)})
+        self.assertTrue(all(r['state'] == 'queued' for r in rows))
+
+    def test_expired_queued_manual_batch_does_not_start_repairs(self):
+        jid, _ = self.media()
+        steward.queue_scan(self.owner, [jid], apply=True, requested_at=time.time() - steward.MANUAL_WINDOW - 1)
+        task = board.claim_task('expired-request', ['steward_scan'])
+        board.run_claimed(task, 'expired-request')
+        self.assertIsNone(self.task('transcribe'))
+
+    def test_observation_watermark_precedes_later_task_completion(self):
+        jid, _ = self.media()
+        item = self.item(jid)
+        completion = time.time()
+        with patch.object(steward.time, 'time', return_value=completion + 10):
+            steward.save_observation(item)
+        saved = core.q('SELECT checked FROM media_steward_assets WHERE job_id=?', (jid,), one=True)
+        self.assertLessEqual(saved['checked'], completion)
+
+    def test_delayed_observer_cannot_overwrite_a_newer_snapshot(self):
+        jid, _ = self.media()
+        older = self.item(jid)
+        core.q("UPDATE jobs SET analysis=json_set(analysis,'$.summary','A human summary') WHERE id=?", (jid,))
+        newer = self.item(jid)
+        steward.save_observation(newer)
+        steward.save_observation(older)
+        saved = core.q('SELECT observation FROM media_steward_assets WHERE job_id=?', (jid,), one=True)
+        self.assertTrue(json.loads(saved['observation'])['summary'])
+
+    def test_observer_refreshes_rows_selected_before_a_task_completed(self):
+        jid, _ = self.media()
+        stale = self.row(jid)
+        core.q("UPDATE jobs SET analysis=json_set(analysis,'$.summary','Completed summary') WHERE id=?", (jid,))
+        item = steward.inspect(stale, steward.DEFAULT_POLICY)
+        self.assertTrue(item['observation']['summary'])
+
+    def test_transcription_followup_keeps_the_original_media_guard(self):
+        for replace_media in (False, True):
+            with self.subTest(replace_media=replace_media):
+                jid, files = self.media()
+                steward.scan(self.owner, [jid], apply=True)
+                task = board.claim_task('qa-remote-transcribe', ['transcribe', 'gpu'])
+                if replace_media:
+                    files[0].write_bytes(b'a different video replaced the original')
+                result = {'language':'zh', 'segments':[[0,1,'Original video transcript']], 'audio_seconds':1,'seconds':1}
+                with patch.object(library, 'duration_of', return_value=30), patch.object(library, 'plex_refresh'), \
+                        patch.object(tasks, 'maybe_translate'):
+                    board.complete_task(task['id'], 'qa-remote-transcribe', result)
+                    child = board.claim_task('qa-save-transcribe', ['save_subs'])
+                    outcome = board.run_claimed(child, 'qa-save-transcribe')
+                self.assertEqual(outcome, 'failed' if replace_media else 'done')
+                self.assertEqual(files[0].with_suffix('.zh.srt').exists(), not replace_media)
+
+    def test_subtitle_replacement_with_preserved_timestamp_is_detected(self):
+        jid, files = self.media()
+        sub = self.subs(files[0])
+        steward.scan(self.owner, [jid], apply=True)
+        task = board.claim_task('original-subtitle-import', ['steward_index'])
+        board.run_claimed(task, 'original-subtitle-import')
+        stamp = sub.stat()
+        sub.write_text(sub.read_text() + '\n25\n00:00:24,000 --> 00:00:25,000\nAdditional revised content\n')
+        os.utime(sub, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertIn('steward_index', [x['kind'] for x in self.item(jid)['plan']])
+
+    def test_finished_manual_batch_is_not_reopened_by_later_work(self):
+        jid, _ = self.media(speech=False)
+        old = steward.queue_scan(self.owner, [jid], apply=True)
+        task = board.claim_task('finished-batch', ['steward_scan'])
+        board.run_claimed(task, 'finished-batch')
+        steward.tick()
+        self.assertTrue(json.loads(core.q('SELECT payload FROM tasks WHERE id=?', (old,), one=True)['payload'])['request_finished'])
+        self.policy(profile='deep')
+        new = steward.queue_scan(self.owner, [jid], apply=True)
+        task = board.claim_task('later-batch', ['steward_scan'])
+        board.run_claimed(task, 'later-batch')
+        steward.tick()
+        self.assertEqual(core.q('SELECT state FROM tasks WHERE id=?', (old,), one=True)['state'], 'done')
+        self.assertEqual(core.q('SELECT state FROM tasks WHERE id=?', (new,), one=True)['state'], 'queued')
+
+    def test_pending_batch_accounts_for_running_work_even_after_ready_snapshot(self):
+        jid, _ = self.media()
+        tid = steward.queue_scan(self.owner, [jid], apply=True)
+        task = board.claim_task('running-batch', ['steward_scan'])
+        board.run_claimed(task, 'running-batch')
+        core.q("UPDATE media_steward_assets SET state='ready' WHERE job_id=?", (jid,))
+        steward.tick()
+        self.assertEqual(core.q('SELECT state FROM tasks WHERE id=?', (tid,), one=True)['state'], 'queued')
 
 
 if __name__ == '__main__':

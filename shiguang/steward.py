@@ -3,6 +3,7 @@ import hashlib
 import glob
 import json
 import math
+import secrets
 from pathlib import Path
 import time
 
@@ -66,16 +67,29 @@ def _action(kind, jid, part, evidence, reason):
             'part': part, 'input_version': digest(evidence), 'reason': reason, 'state': 'pending'}
 
 
+def _subtitle_sources(path):
+    p = Path(path)
+    return [_stamp(sidecar) for sidecar in sorted(p.parent.glob(glob.escape(p.stem) + '.*'))
+            if sidecar.suffix.lower() in {'.srt', '.vtt'}]
+
+
 def inspect(row, settings):
     """Build a plan from actual artifacts. A task's success flag is never proof of an artifact."""
+    observed_at = time.time()
     job = dict(row)
+    latest = q('SELECT * FROM jobs WHERE id=? AND owner IS ?', (job['id'], job['owner']), one=True)
+    if latest:
+        job = dict(latest)
     jid = job['id']
     a = _object(job['analysis'], {})
     observed = {'files': 0, 'subtitles': 0, 'indexed_parts': 0, 'chapters': 0,
                 'summary': isinstance(a.get('summary'), str) and bool(a['summary'].strip()), 'issues': [], 'parts': []}
     actions, evidence = [], []
     state = 'ready'
-    if job['status'] != 'done':
+    if latest is None:
+        observed['issues'].append('媒体记录已变化，暂停本轮处理')
+        state = 'blocked'
+    elif job['status'] != 'done':
         observed['issues'].append('下载失败，等待下载任务处理' if job['status'] == 'failed' else '下载或入库尚未完成')
         state = 'blocked' if job['status'] == 'failed' else 'waiting'
     elif job['ref']:
@@ -104,12 +118,8 @@ def inspect(row, settings):
                 settings['profile'] == 'deep' or a.get('needs_transcript') is True)
             chapter_map = a.get('chapters') if isinstance(a.get('chapters'), dict) else {}
             for part, path in enumerate(media):
-                p = Path(path)
-                subtitles = []
                 try:
-                    for sidecar in sorted(p.parent.glob(glob.escape(p.stem) + '.*')):
-                        if sidecar.suffix.lower() in {'.srt', '.vtt'}:
-                            subtitles.append(_stamp(sidecar))
+                    subtitles = _subtitle_sources(path)
                 except (OSError, ValueError, RuntimeError):
                     observed['issues'].append('字幕附件不可读取或不在受管目录，暂停补全')
                     state = 'blocked'
@@ -126,9 +136,12 @@ def inspect(row, settings):
                     chapter_ok = all(chapters[i]['t'] > chapters[i-1]['t'] for i in range(1, len(chapters)))
                 observed['chapters'] += chapter_ok
                 observed['parts'].append({'part': part, 'subtitle_lines': count, 'has_subtitles': bool(subtitles)})
-                indexed = q("SELECT updated FROM tasks WHERE kind='steward_index' AND target=? AND state='done'",
+                indexed = q("SELECT updated,result FROM tasks WHERE kind='steward_index' AND target=? AND state='done'",
                             (f'job:{jid}:{part}',), one=True)
-                changed_subs = bool(indexed and subtitles and max(s[2] for s in subtitles) / 1e9 > indexed['updated'])
+                imported = _object(indexed['result'], {}) if indexed else {}
+                changed_subs = bool(indexed and subtitles and (
+                    imported['subtitle_source'] != subtitles[0] if 'subtitle_source' in imported
+                    else max(s[2] for s in subtitles) / 1e9 > indexed['updated']))
                 if (subtitles and (not count or changed_subs)) or (part == 0 and semantic and not job['transcript'] and (subtitles or count)):
                     actions.append(_action('steward_index', jid, part, stamps, '先使用已有字幕，避免重复转写'))
                 elif not subtitles and not count and semantic:
@@ -183,7 +196,7 @@ def inspect(row, settings):
                               "WHERE a.job_id=? AND a.owner=? AND t.state IN ('queued','running') LIMIT 1",
                               (jid, job['owner']), one=True):
         state = 'waiting'
-    return {'job_id': jid, 'owner': job['owner'], 'revision': version,
+    return {'job_id': jid, 'owner': job['owner'], 'revision': version, 'observed_at': observed_at,
             'state': state, 'observation': observed, 'plan': actions}
 
 
@@ -194,9 +207,11 @@ def save_observation(item):
             return
         conn.execute('INSERT INTO media_steward_assets(job_id,owner,revision,state,observation,plan,checked) '
                      'VALUES(?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET owner=excluded.owner,revision=excluded.revision,'
-                     'state=excluded.state,observation=excluded.observation,plan=excluded.plan,checked=excluded.checked',
+                     'state=excluded.state,observation=excluded.observation,plan=excluded.plan,checked=excluded.checked '
+                     'WHERE media_steward_assets.checked<=excluded.checked',
+                     # Older observers must not erase a newer snapshot or task-completion watermark.
                      (item['job_id'], item['owner'], item['revision'], item['state'],
-                      json.dumps(item['observation'], ensure_ascii=False), json.dumps(item['plan'], ensure_ascii=False), time.time()))
+                      json.dumps(item['observation'], ensure_ascii=False), json.dumps(item['plan'], ensure_ascii=False), item['observed_at']))
 
 
 def _ordered(owner, candidates, use_ai, beat):
@@ -348,6 +363,8 @@ def run_scan(task, beat):
     p = task['payload']
     if p.get('automatic') and not policy(p['owner'])['automatic']:
         return {'skipped': 'automatic processing paused'}
+    if p.get('apply') and not p.get('automatic') and time.time() - p.get('requested_at', 0) >= MANUAL_WINDOW:
+        return {'skipped': 'manual processing request expired'}
     return scan(p['owner'], p.get('ids'), p.get('apply', False), p.get('automatic', False), beat)
 
 
@@ -360,16 +377,17 @@ def import_subtitles(task, beat):
     item = inspect(row, policy(p['owner']))
     if item['state'] == 'blocked':
         return {'skipped': 'media unavailable'}
-    path, subs = board.task_media(task)
+    path, _ = board.task_media(task)
     _stamp(path)
-    stamp = _stamp(subs[0]) if subs else None
-    cues = (library._cues(subs[0], Path(subs[0]).stat().st_mtime) if subs else
+    subtitles = _subtitle_sources(path)
+    stamp = subtitles[0] if subtitles else None
+    cues = (library._cues(stamp[0], stamp[2] / 1e9) if stamp else
             [(r['t'], r['text']) for r in q("SELECT t,text FROM seg WHERE kind='job' AND ref=? AND part=? AND src='字幕' ORDER BY t", (p['job'], p['part']))])
     if not cues:
         raise ValueError('字幕没有可读取的时间轴，保留已有转写')
     text = '\n'.join(line for _, line in cues)[:200_000]
     beat({'phase': 'saving', 'lines': len(cues)})
-    if subs and _stamp(subs[0]) != stamp:
+    if stamp and _stamp(stamp[0]) != stamp:
         raise ValueError('字幕文件已变化，稍后重试')
     with board.mutation() as conn:
         current = conn.execute('SELECT owner,status,files,transcript FROM jobs WHERE id=?', (p['job'],)).fetchone()
@@ -380,16 +398,18 @@ def import_subtitles(task, beat):
                          [(p['job'], p['part'], t, line) for t, line in cues])
         if p['part'] == 0:
             conn.execute('UPDATE jobs SET transcript=?,updated=? WHERE id=?', (text, time.time(), p['job']))
-    return {'lines': len(cues)}
+    return {'lines': len(cues), 'subtitle_source': stamp}
 
 
-def pending_manual_requests(owner=None):
+def pending_manual_requests(owner=None, close_finished=False):
     """A manual batch is durable intent, independent of the opt-in whole-library scheduler."""
-    where, args = '', ()
+    where, args = " AND COALESCE(json_extract(payload,'$.requested_at'),created)>?", [time.time() - MANUAL_WINDOW]
     if owner is not None:
-        where, args = " AND json_extract(payload,'$.owner')=?", (owner,)
-    rows = q("SELECT payload,created FROM tasks WHERE kind='steward_scan' AND state='done' "
-             "AND json_extract(payload,'$.apply')=1 AND json_extract(payload,'$.automatic')=0" + where, args)
+        where += " AND json_extract(payload,'$.owner')=?"
+        args.append(owner)
+    rows = q("SELECT payload,created,target FROM tasks WHERE kind='steward_scan' AND state='done' "
+             "AND json_extract(payload,'$.apply')=1 AND json_extract(payload,'$.automatic')=0 "
+             "AND COALESCE(json_extract(payload,'$.request_finished'),0)=0" + where, args)
     pending = []
     for row in rows:
         p = _object(row['payload'], {})
@@ -402,10 +422,16 @@ def pending_manual_requests(owner=None):
                  "AND j.status NOT IN ('deleted','cancelled') AND (s.state IN ('needs_work','waiting') "
                  "OR EXISTS(SELECT 1 FROM media_steward_actions a JOIN tasks t ON t.id=a.task_id "
                  "WHERE a.job_id=j.id AND a.owner=j.owner AND a.created>=? "
-                 "AND t.state IN ('done','failed') AND t.updated>s.checked))",
+                 "AND (t.state IN ('queued','running') OR (t.state IN ('done','failed') AND t.updated>s.checked))))",
                  (p['owner'], json.dumps(ids), requested))
         if jobs:
-            pending.append({'owner': p['owner'], 'ids': [job['id'] for job in jobs], 'requested_at': requested})
+            pending.append({'owner': p['owner'], 'ids': [job['id'] for job in jobs],
+                            'requested_at': requested, 'request_id': row['target']})
+        elif close_finished:
+            with board.mutation() as conn:
+                conn.execute("UPDATE tasks SET payload=json_set(payload,'$.request_finished',1) "
+                             "WHERE kind='steward_scan' AND target=? AND state='done' AND payload=?",
+                             (row['target'], row['payload']))
     return pending
 
 
@@ -414,8 +440,8 @@ def tick():
         owner = row['k'][len(POLICY_PREFIX):]
         if policy(owner)['automatic']:
             queue_scan(owner, automatic=True, apply=True)
-    for pending in pending_manual_requests():
-        queue_scan(pending['owner'], pending['ids'], apply=True, requested_at=pending['requested_at'])
+    for pending in pending_manual_requests(close_finished=True):
+        queue_scan(pending['owner'], pending['ids'], apply=True, requested_at=pending['requested_at'], request_id=pending['request_id'])
 
 
 def loop():
@@ -427,11 +453,13 @@ def loop():
         time.sleep(SCAN_INTERVAL)
 
 
-def queue_scan(owner, ids=None, apply=False, automatic=False, requested_at=None):
+def queue_scan(owner, ids=None, apply=False, automatic=False, requested_at=None, request_id=None):
     payload = {'owner': owner, 'ids': ids, 'apply': apply, 'automatic': automatic, 'title': '媒体管家盘点',
                'requested_at': time.time() if requested_at is None else requested_at}
     mode = 'automatic' if automatic else 'apply' if apply else 'inspect'
     target = 'steward:' + owner + ':' + mode
+    if apply and not automatic:
+        target = request_id or target + ':' + secrets.token_hex(8)
     if automatic:
         previous = q("SELECT id,updated FROM tasks WHERE kind='steward_scan' AND target=? AND state='failed'", (target,), one=True)
         if previous and time.time() - previous['updated'] < COOLDOWN:
